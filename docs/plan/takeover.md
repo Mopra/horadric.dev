@@ -100,7 +100,12 @@ app keeps what the human allowed and asks them when it does not know.
 - The question is put in a corner clear of the program and its dialogs,
   without taking the focus. Its default button refuses. It waits
   `answer_within` seconds (60 when not set, 10 to 80), then the session
-  is told nobody answered, apart from a refusal.
+  is told nobody answered, apart from a refusal. The time counts from
+  when the call came, and the questions about one call share it: the
+  risky question after an approval has only what the approval left, and
+  all of them end by 80 seconds after the call, inside the 90 the hook
+  listener holds it. A takeover call the listener still gives up on is
+  told as a takeover timeout, with nothing done.
 - A refused or unanswered question is held for 2 minutes before it can
   be asked again, and at most four wait per session.
 - One session drives a program at a time. Another session's operate

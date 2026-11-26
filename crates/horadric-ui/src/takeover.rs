@@ -256,12 +256,15 @@ pub(super) fn risky_answered(pressed: Option<usize>) -> Decision {
     }
 }
 
-/// How long a question still waits, `within` seconds from when its call
-/// came, `waited` ago. Never so short the human can not read it.
-pub(super) fn time_left(within: u64, waited: Duration) -> Duration {
-    Duration::from_secs(within)
-        .saturating_sub(waited)
-        .max(Duration::from_secs(5))
+/// How long a question still waits: `within` seconds from when its call
+/// came, `waited` ago, and never past [`listed::ASKING_MOST`] from then,
+/// which every question about the call shares. None when too little is
+/// left to read it, so it is not put at all.
+pub(super) fn time_left(within: u64, waited: Duration) -> Option<Duration> {
+    let left = Duration::from_secs(within)
+        .min(listed::ASKING_MOST)
+        .saturating_sub(waited);
+    (left >= Duration::from_secs(5)).then_some(left)
 }
 
 /// The button an answer pressed, if any, and the refusal for none at all.
@@ -949,10 +952,9 @@ pub(super) struct Question {
     /// Its id and start.
     ident: String,
     risky: bool,
-    /// How long it waits for the human, in seconds.
+    /// How long it waits for the human, in seconds, counted from when its
+    /// call came (see [`time_left`]).
     within: u64,
-    /// What is left of that after waiting behind other questions.
-    left: Duration,
 }
 
 thread_local! {
@@ -1340,7 +1342,6 @@ impl App {
                         ident: self.ident_of(&p.session),
                         risky: ask == Decision::AskRisky,
                         within: self.takeover.answer_within(),
-                        left: time_left(self.takeover.answer_within(), p.since.elapsed()),
                         pending: p,
                     });
                 }
@@ -1476,9 +1477,19 @@ pub(super) fn ask_waiting(hwnd: HWND) {
     ASKING.set(true);
     let mut next = first;
     while let Some(q) = next {
+        // Asked now, not when the call was taken up: the risky question
+        // after an approval has only what the approval left of the time.
+        let Some(left) = time_left(q.within, q.pending.since.elapsed()) else {
+            next = match with_app(|app| app.answered(q, Answer::Unanswered)) {
+                Some(again @ Some(_)) => again,
+                Some(None) => with_app(App::next_question).flatten(),
+                None => None,
+            };
+            continue;
+        };
         let aside = Aside {
             avoid: windows_of(q.pending.request.hwnd),
-            within: q.left,
+            within: left,
         };
         // Only a question bypass would answer goes when bypass comes on.
         // An approval, or anything in an elevated program, stays up for
@@ -2097,15 +2108,27 @@ mod tests {
 
     #[test]
     fn a_question_waits_the_rest_of_its_time() {
-        assert_eq!(time_left(60, Duration::ZERO), Duration::from_secs(60));
+        let secs = |s| Some(Duration::from_secs(s));
+        assert_eq!(time_left(60, Duration::ZERO), secs(60));
+        assert_eq!(time_left(60, Duration::from_secs(20)), secs(40));
+        // Too little left to read is not asked at all.
+        assert_eq!(time_left(60, Duration::from_secs(57)), None);
+        assert_eq!(time_left(60, Duration::from_secs(90)), None);
+    }
+
+    #[test]
+    fn the_questions_about_one_call_share_one_deadline_inside_the_listener() {
+        // An approval answered after 70 of 80 seconds leaves the risky
+        // question the 10 that remain, not 80 more.
         assert_eq!(
-            time_left(60, Duration::from_secs(20)),
-            Duration::from_secs(40)
+            time_left(80, Duration::from_secs(70)),
+            Some(Duration::from_secs(10))
         );
-        assert_eq!(
-            time_left(60, Duration::from_secs(90)),
-            Duration::from_secs(5)
-        );
+        let most = listed::ASKING_MOST;
+        assert_eq!(time_left(u64::MAX, Duration::ZERO), Some(most));
+        // Every question about a call is over before the hook listener's
+        // 90 seconds, with room for the answer to travel.
+        assert!(most + Duration::from_secs(5) < Duration::from_secs(90));
     }
 
     #[test]

@@ -251,6 +251,20 @@ pub(crate) fn ask_app(port: u16, session: Option<&str>, body: &Value) -> Result<
     ask_app_within(port, session, body, APP_WAIT)
 }
 
+/// What the agent hears when the listener gave up waiting on the app. A
+/// takeover op is asked before the engine acts, so nothing was done; a
+/// browser call may have run in the page.
+fn timed_out(body: &Value) -> String {
+    let op = body.get("op").and_then(Value::as_str).unwrap_or_default();
+    if op.starts_with("desktop.") {
+        "Horadric did not answer this takeover call in time, so nothing was done. Look \
+         (takeover_windows or takeover_snapshot) before you call again."
+            .into()
+    } else {
+        format!("the browser did not answer in time. {MAY_HAVE_RUN}")
+    }
+}
+
 /// [`ask_app`] with its own limit on how long the app may take.
 fn ask_app_within(
     port: u16,
@@ -276,11 +290,7 @@ fn ask_app_within(
         })?;
     match status {
         200 => {}
-        504 => {
-            return Err(format!(
-                "the browser did not answer in time. {MAY_HAVE_RUN}"
-            ))
-        }
+        504 => return Err(timed_out(&body)),
         s => return Err(format!("Horadric refused the call ({s})")),
     }
     let answer: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
@@ -1844,6 +1854,15 @@ B.";
             assert_eq!(a["result"]["content"][0]["text"], OFF);
         }
         assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_takeover_timeout_is_not_told_as_the_browser_s() {
+        let allow = json!({ "op": "desktop.allow" });
+        let said = timed_out(&allow);
+        assert!(said.contains("takeover") && said.contains("nothing was done"));
+        assert!(!said.contains("browser"));
+        assert!(timed_out(&json!({ "op": "navigate" })).contains("browser"));
     }
 
     /// An app that does not say whether takeover is on keeps the tools

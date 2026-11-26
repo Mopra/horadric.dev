@@ -195,6 +195,13 @@ pub struct Entry {
     pub pre_approved: Vec<Approval>,
 }
 
+/// How long the app's questions about one call may take together, from
+/// when the call came: the approval question and the risky one after it
+/// share it. Ten seconds inside the 90 the hook listener holds a call, so
+/// the answer reaches the engine before the listener gives up on it, and
+/// no yes is logged for an action the engine already gave up.
+pub const ASKING_MOST: std::time::Duration = std::time::Duration::from_secs(80);
+
 /// The whole file: the programs, and how long a question waits.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct List {
