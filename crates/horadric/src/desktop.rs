@@ -92,13 +92,13 @@ const MOST_ELEMENTS: usize = 2000;
 /// what is about to happen in it is risky.
 const SMALL_DIALOG: usize = 40;
 
-/// How long `desktop_wait` waits when not told, and at most.
+/// How long `takeover_wait` waits when not told, and at most.
 const WAIT_DEFAULT_MS: u64 = 10_000;
 /// Sets another default for a wait, in milliseconds, for a machine whose
 /// programs are slow.
 pub const WAIT_ENV: &str = "HORADRIC_DESKTOP_WAIT_MS";
 
-/// How much of a window's title `desktop_windows` tells of a program the
+/// How much of a window's title `takeover_windows` tells of a program the
 /// human has not let the session into.
 const UNKNOWN_TITLE: usize = 40;
 
@@ -114,7 +114,7 @@ const HELD_WAIT: Duration = Duration::from_millis(1000);
 /// front: what a window that takes the front can get of the text at most.
 const TYPED_PIECE: usize = 20;
 
-/// The most characters `desktop_text` gives back.
+/// The most characters `takeover_text` gives back.
 const TEXT_MOST: usize = 20_000;
 /// How long a copy is given to reach the clipboard.
 const COPY_WAIT: Duration = Duration::from_millis(1500);
@@ -123,8 +123,8 @@ const WAIT_MOST_MS: u64 = 60_000;
 
 /// Said when a change is asked for before any program is watched.
 const NOTHING_WATCHED: &str = "Nothing is watched yet: Horadric watches a program from the first \
-time this session looks at it or operates it (desktop_snapshot, desktop_screenshot, or naming its \
-window to desktop_changes or desktop_wait).";
+time this session looks at it or operates it (takeover_snapshot, takeover_screenshot, or naming its \
+window to takeover_changes or takeover_wait).";
 
 /// Said of a window that runs as administrator when the helper that
 /// reaches it is not to be had.
@@ -425,7 +425,7 @@ pub fn typed_refusal(text: &str, by_keys: bool, control: &str) -> Option<String>
     Some(format!(
         "the text holds {what}, which would be typed into this {control} as the Enter and Tab \
          keys, so nothing was typed; type the text without them, with submit for a final Enter \
-         or desktop_press for a key between"
+         or takeover_press for a key between"
     ))
 }
 
@@ -511,12 +511,12 @@ pub fn landed_text(l: &Landed, entered: bool) -> String {
             short(v, 300)
         ),
         Landed::Unknown => " Its value can not be read back through UI Automation; \
-            desktop_snapshot or desktop_screenshot shows whether the text is there."
+            takeover_snapshot or takeover_screenshot shows whether the text is there."
             .to_string(),
     }
 }
 
-/// What `desktop_text` answers with the text read `how`, cut to
+/// What `takeover_text` answers with the text read `how`, cut to
 /// [`TEXT_MOST`] characters.
 pub fn text_answer(text: &str, how: &str) -> String {
     let text = text.replace("\r\n", "\n");
@@ -1012,7 +1012,7 @@ pub fn tree_text(head: &str, nodes: &[Node], more: bool, limit: usize) -> String
         let line = node_line(n, i);
         if out.len() + line.len() + 1 > limit {
             out.push_str(&format!(
-                "\n(cut short here at e{i} of {}: take a desktop_screenshot, or act on what is \
+                "\n(cut short here at e{i} of {}: take a takeover_screenshot, or act on what is \
                  above and snapshot again)",
                 nodes.len()
             ));
@@ -1023,7 +1023,7 @@ pub fn tree_text(head: &str, nodes: &[Node], more: bool, limit: usize) -> String
     }
     if nodes.is_empty() {
         out.push_str(
-            "\n(UI Automation shows nothing inside this window: take a desktop_screenshot)",
+            "\n(UI Automation shows nothing inside this window: take a takeover_screenshot)",
         );
     }
     if more {
@@ -1354,7 +1354,7 @@ pub fn is_edit(control: &str, class: &str) -> bool {
     control == "Edit" || class.to_ascii_lowercase().contains("edit")
 }
 
-/// Whether a value read off an element answers `desktop_text`. An empty
+/// Whether a value read off an element answers `takeover_text`. An empty
 /// one does for an edit field, which may well be empty; elsewhere it more
 /// likely means the text is not kept in its value, so copying is tried.
 pub fn read_counts(value: &str, edit: bool) -> bool {
@@ -1409,12 +1409,12 @@ pub fn covered(found: bool, under: u32, target: u32) -> bool {
 pub fn typed_short(typed: usize, of: usize, why: &str) -> String {
     format!(
         "typing stopped after {typed} of {of} characters: {why}. Nothing more was sent and \
-         Enter was not pressed; look with desktop_snapshot at what the field holds before \
+         Enter was not pressed; look with takeover_snapshot at what the field holds before \
          typing again"
     )
 }
 
-/// Whether `desktop_text` may click into an element to give it the
+/// Whether `takeover_text` may click into an element to give it the
 /// keyboard: only one that holds text and has no action of its own. A
 /// click on a button, a menu item or a link does what it says, which
 /// reading must never do.
@@ -1555,7 +1555,7 @@ pub struct Desktop {
     /// What last kept the helper away, why, and when, so Windows does not
     /// ask the human again on every call.
     setback: Option<(Setback, String, Instant)>,
-    /// The last change `desktop_changes` told, per program (none for
+    /// The last change `takeover_changes` told, per program (none for
     /// all), so the next call starts after it.
     seen: HashMap<Option<u32>, u64>,
     /// When the app last said this session may still look at each watched
@@ -1997,12 +1997,12 @@ fn find(query: Option<&Value>) -> Result<(Window, Window), String> {
         Some(Value::String(s)) => s.clone(),
         Some(Value::Number(n)) => n.to_string(),
         _ => {
-            return Err("say which window: an id from desktop_windows, or part of its title".into())
+            return Err("say which window: an id from takeover_windows, or part of its title".into())
         }
     };
     let list = list_windows();
     let target = pick_window(&list, &query).cloned().ok_or(format!(
-        "no window matches {query:?}; desktop_windows lists them"
+        "no window matches {query:?}; takeover_windows lists them"
     ))?;
     // A program that will not say its file is refused by the caller, once
     // it knows the helper can not tell it either.
@@ -2240,7 +2240,7 @@ fn same_window(w: &Window) -> Result<(), String> {
         return Ok(());
     }
     Err(format!(
-        "{:?} is gone since it was asked about, so nothing was sent; desktop_windows lists what \
+        "{:?} is gone since it was asked about, so nothing was sent; takeover_windows lists what \
          is open now",
         w.title
     ))
@@ -2386,7 +2386,7 @@ fn timed<T: Send + 'static>(
         Ok(r) => r.map_err(|e| format!("UI Automation could not read {whose:?}: {}", win_err(e))),
         Err(_) => Err(format!(
             "{whose:?} did not answer UI Automation in {} s: the program is busy or hung, or \
-             the window has more controls than can be read in that time. desktop_screenshot \
+             the window has more controls than can be read in that time. takeover_screenshot \
              still shows it",
             limit.as_secs()
         )),
@@ -2478,7 +2478,7 @@ fn keep_clip() -> Result<Kept, String> {
     if !open_clipboard() {
         return Err(
             "another program holds the clipboard, so what is on it could not be kept and \
-             nothing was copied; try again, or use desktop_snapshot or desktop_screenshot"
+             nothing was copied; try again, or use takeover_snapshot or takeover_screenshot"
                 .into(),
         );
     }
@@ -2507,9 +2507,9 @@ fn keep_clip() -> Result<Kept, String> {
     };
     match clip_other(&formats) {
         Some(what) => Err(format!(
-            "the clipboard holds {what}, which desktop_text's select all and copy would \
+            "the clipboard holds {what}, which takeover_text's select all and copy would \
              destroy since only plain text can be put back, so nothing was copied; read this \
-             with desktop_snapshot or desktop_screenshot instead"
+             with takeover_snapshot or takeover_screenshot instead"
         )),
         None => Ok(kept),
     }
@@ -2787,7 +2787,10 @@ impl Desktop {
         }
     }
 
-    /// Answers a `desktop_` tool, asking `app` for the human's leave first.
+    /// Answers a tool, asking `app` for the human's leave first. The tool
+    /// is known by the verb after its prefix, so the engine serves whichever
+    /// family of names called it (`takeover_click`, the older
+    /// `desktop_click`) and whoever lists it decides which names exist.
     pub fn tool<A: FnMut(Value) -> Result<Value, String>>(
         &mut self,
         name: &str,
@@ -2795,9 +2798,10 @@ impl Desktop {
         app: &mut A,
         settle: Duration,
     ) -> Result<Vec<Value>, String> {
+        let verb = name.split_once('_').map_or(name, |(_, verb)| verb);
         let flag = |k: &str| args.get(k) == Some(&json!(true));
         let s = |k: &str| args.get(k).and_then(Value::as_str);
-        if name == "desktop_windows" {
+        if verb == "windows" {
             let known = |w: &Window| self.granted.contains_key(&w.pid);
             return Ok(vec![text(windows_text(&list_windows(), reach_of, known))]);
         }
@@ -2813,9 +2817,9 @@ impl Desktop {
             // picked up here too, and a no is timed from when it came.
             self.collect_start();
         }
-        match name {
-            "desktop_changes" if unnamed => return Ok(vec![text(self.changes(args, None, app))]),
-            "desktop_wait" if unnamed => return Ok(vec![text(self.wait(args, None, app)?)]),
+        match verb {
+            "changes" if unnamed => return Ok(vec![text(self.changes(args, None, app))]),
+            "wait" if unnamed => return Ok(vec![text(self.wait(args, None, app)?)]),
             _ => {}
         }
         let (w, root) = find(args.get("window"))?;
@@ -2836,8 +2840,8 @@ impl Desktop {
         }
         // Windows drops input sent to an elevated window without a word,
         // so nothing that types, clicks or copies is sent there at all.
-        if let (Some(why), "desktop_click" | "desktop_type" | "desktop_press" | "desktop_text") =
-            (&walled, name)
+        if let (Some(why), "click" | "type" | "press" | "text") =
+            (&walled, verb)
         {
             return Err(why.clone());
         }
@@ -2853,8 +2857,8 @@ impl Desktop {
         }
         // The agent's words for the human, kept to one line.
         let reason = short(s("reason").unwrap_or_default(), 300);
-        match name {
-            "desktop_snapshot" => {
+        match verb {
+            "snapshot" => {
                 let what = format!("read the controls of {:?}", w.title);
                 let answer = allow(app, &root, "see", &what, false, None, &reason);
                 self.heard(&w, false, answer)?;
@@ -2867,7 +2871,7 @@ impl Desktop {
                 });
                 report(app, &root, &what, result)
             }
-            "desktop_screenshot" => {
+            "screenshot" => {
                 let what = format!("take a picture of {:?}", w.title);
                 let answer = allow(app, &root, "see", &what, false, None, &reason);
                 self.heard(&w, false, answer)?;
@@ -2900,7 +2904,7 @@ impl Desktop {
                         });
                 report(app, &root, &what, result)
             }
-            "desktop_click" => {
+            "click" => {
                 let button = s("button").unwrap_or("left");
                 if !matches!(button, "left" | "right" | "middle") {
                     return Err("button is left, right or middle".into());
@@ -2936,7 +2940,7 @@ impl Desktop {
                 });
                 report(app, &root, &what, result)
             }
-            "desktop_type" => {
+            "type" => {
                 let typed = s("text").ok_or("say what to type: text")?;
                 let submit = flag("submit");
                 let first = format!("type into {} in {:?}", wanted(args), w.title);
@@ -2972,7 +2976,7 @@ impl Desktop {
                 });
                 report(app, &root, &what, result)
             }
-            "desktop_press" => {
+            "press" => {
                 let key = s("key").ok_or("say which key")?;
                 let chord = parse_key(key)?;
                 if let Some(why) = press_refusal(&chord) {
@@ -3017,7 +3021,7 @@ impl Desktop {
                 });
                 report(app, &root, &what, result)
             }
-            "desktop_text" => {
+            "text" => {
                 // Asked in the agent's words, since the element is found
                 // only once the human lets the session look.
                 let what = format!("read the text of {} in {:?}", wanted(args), w.title);
@@ -3054,7 +3058,7 @@ impl Desktop {
                 // Copying takes keys and the clipboard, so it is operating.
                 // An element that will not take the keyboard otherwise is
                 // clicked into, but only one that holds text: the click is
-                // named in the question and judged as desktop_click's is,
+                // named in the question and judged as takeover_click's is,
                 // and anything with an action of its own is never clicked
                 // to be read.
                 let clicks = aim
@@ -3089,8 +3093,8 @@ impl Desktop {
                 });
                 report(app, &root, &what, result)
             }
-            "desktop_changes" | "desktop_wait" => {
-                let what = if name == "desktop_wait" {
+            "changes" | "wait" => {
+                let what = if verb == "wait" {
                     format!("wait for a change in {:?}", w.title)
                 } else {
                     format!("read what changed in {:?}", w.title)
@@ -3103,7 +3107,7 @@ impl Desktop {
                 self.heard(&w, false, answer)?;
                 self.still.insert(w.pid, Instant::now());
                 watch::follow(&root);
-                let answer = if name == "desktop_wait" {
+                let answer = if verb == "wait" {
                     self.wait(args, Some(&w), app)
                 } else {
                     Ok(self.changes(args, Some(&w), app))
@@ -3112,7 +3116,7 @@ impl Desktop {
                     if let Some(why) = walled {
                         said.push_str(&format!("\n(Note: {why}. {UNWATCHED})"));
                     }
-                    let outcome = if name == "desktop_wait" {
+                    let outcome = if verb == "wait" {
                         "Waited for a change."
                     } else {
                         "Read what changed."
@@ -3229,7 +3233,7 @@ impl Desktop {
                 }
                 let mut marked = |body: Value| app(as_administrator(body));
                 let theirs =
-                    helper.call("desktop_changes", &theirs_args, &mut marked, Duration::ZERO);
+                    helper.call("takeover_changes", &theirs_args, &mut marked, Duration::ZERO);
                 match theirs {
                     Ok(Ok(content)) => {
                         let said = content
@@ -3261,7 +3265,7 @@ impl Desktop {
     /// The helper's side of an unnamed wait, see [`PEEK`]: without `after`
     /// it marks where the wait begins, with it it says what changed since
     /// and whether the text or quiet waited for holds here. With `commit`,
-    /// at the wait's end, the changes count as told, as `desktop_changes`
+    /// at the wait's end, the changes count as told, as `takeover_changes`
     /// counts them, those from before the wait that were not told yet
     /// among them. The app is asked whether each program may still be
     /// looked at where the wait begins and where it ends, not on every
@@ -3327,7 +3331,7 @@ impl Desktop {
     /// Waits until what `args` asks for holds, in `w`'s program or in any
     /// watched, and says which held and what changed meanwhile. It reads
     /// from the session's place, not from its own start, so what changed
-    /// between the last `desktop_changes` and the wait is told too, apart,
+    /// between the last `takeover_changes` and the wait is told too, apart,
     /// and only what came after its start decides what it found.
     fn wait<A: FnMut(Value) -> Result<Value, String>>(
         &mut self,
@@ -3495,8 +3499,8 @@ impl Desktop {
             // and wait again in the same blind way.
             None => Err(format!(
                 "Timed out after {took:.1} s waiting for {}: it did not come. Do not wait \
-                 again for the same thing: look first, with desktop_snapshot or \
-                 desktop_screenshot, whether the last action landed where you meant.{meanwhile}",
+                 again for the same thing: look first, with takeover_snapshot or \
+                 takeover_screenshot, whether the last action landed where you meant.{meanwhile}",
                 waited_for(&until)
             )),
         }
@@ -3579,14 +3583,14 @@ impl Desktop {
         let el = match &self.snap {
             Some(s) if s.hwnd != w.hwnd => {
                 return Err(format!(
-                    "{r} is from a snapshot of another window; take a desktop_snapshot of this one"
+                    "{r} is from a snapshot of another window; take a takeover_snapshot of this one"
                 ))
             }
             Some(s) => s.elements.get(n).cloned(),
             None => None,
         }
         .ok_or(format!(
-            "there is no {r} in the last desktop_snapshot of this window; take a new one"
+            "there is no {r} in the last takeover_snapshot of this window; take a new one"
         ))?;
         let one = Sent(self.com()?.one.clone());
         let fresh = read_on_the_side(&el, move |el| {
@@ -3594,7 +3598,7 @@ impl Desktop {
         })
         .ok_or(format!(
             "{r} is gone from the window, or the program does not answer; take a new \
-             desktop_snapshot"
+             takeover_snapshot"
         ))?;
         Ok(aim_of(fresh.0))
     }
@@ -3608,7 +3612,7 @@ impl Desktop {
         let wanted = args
             .get("name")
             .and_then(Value::as_str)
-            .ok_or("say which element: a ref from desktop_snapshot, or its name")?;
+            .ok_or("say which element: a ref from takeover_snapshot, or its name")?;
         let found = self.all(w)?;
         let names: Vec<String> = found.iter().map(|a| a.name.clone()).collect();
         let apt: Vec<bool> = found
@@ -3623,7 +3627,7 @@ impl Desktop {
             .collect();
         let ids: Vec<String> = found.iter().map(|a| a.automation_id.clone()).collect();
         let i = pick_name(&names, &ids, &apt, wanted).ok_or(format!(
-            "nothing in {:?} has a name or automation id like {wanted:?}; take a desktop_snapshot",
+            "nothing in {:?} has a name or automation id like {wanted:?}; take a takeover_snapshot",
             w.title
         ))?;
         Ok(found.into_iter().nth(i).expect("picked from these"))
@@ -3736,7 +3740,7 @@ impl Desktop {
             let Some((r, offscreen)) = now else {
                 return Err(format!(
                     "{thing} is gone from the window or the program does not answer, so \
-                     nothing was clicked; take a new desktop_snapshot"
+                     nothing was clicked; take a new takeover_snapshot"
                 ));
             };
             // One scrolled out of view may still say where it would be,
@@ -3914,7 +3918,7 @@ impl Desktop {
         if submit && matches!(held, Landed::Elsewhere(_)) {
             return Err(format!(
                 "{said}.{} So Enter was not pressed. Find where the keyboard is with \
-                 desktop_snapshot before typing again.",
+                 takeover_snapshot before typing again.",
                 landed_text(&held, false)
             ));
         }
@@ -4036,9 +4040,9 @@ impl Desktop {
                 }
                 Err(why) => {
                     return Err(format!(
-                        "{why}, and desktop_text does not click a {} to give it the keyboard, \
-                         since that click would do what it says; desktop_snapshot or \
-                         desktop_screenshot of it is what is left",
+                        "{why}, and takeover_text does not click a {} to give it the keyboard, \
+                         since that click would do what it says; takeover_snapshot or \
+                         takeover_screenshot of it is what is left",
                         a.control
                     ))
                 }
@@ -4057,7 +4061,7 @@ impl Desktop {
         if changed == before {
             return Err(format!(
                 "nothing was copied from {thing}: it may not take Control+A and Control+C; \
-                 desktop_screenshot of it is what is left"
+                 takeover_screenshot of it is what is left"
             ));
         }
         // The clipboard changed, but the human may be the one who copied
@@ -4073,8 +4077,8 @@ impl Desktop {
             return Err(format!(
                 "the clipboard changed, but Windows does not name {} as the one that put it \
                  there (the user may have copied something meanwhile), so nothing was read \
-                 and the clipboard was left as it is now; desktop_snapshot or \
-                 desktop_screenshot of {thing} is what is left",
+                 and the clipboard was left as it is now; takeover_snapshot or \
+                 takeover_screenshot of {thing} is what is left",
                 program_of(w)
             ));
         }
@@ -4103,7 +4107,7 @@ impl Desktop {
         let h = hwnd(w.hwnd);
         if unsafe { IsIconic(h) }.as_bool() {
             return Err(format!(
-                "{:?} is minimized, so there is nothing to see; desktop_snapshot still reads it",
+                "{:?} is minimized, so there is nothing to see; takeover_snapshot still reads it",
                 w.title
             ));
         }
@@ -4402,7 +4406,7 @@ unsafe fn print(h: HWND, at: RECT) -> Result<(Vec<u8>, bool), String> {
                 Err(why) => Err(format!(
                     "Windows would not draw this window for the agent, and it can not be \
                      copied off the screen either: {why}, and the copy would show other \
-                     programs. desktop_snapshot still reads the window"
+                     programs. takeover_snapshot still reads the window"
                 )),
             }
         }
@@ -5672,8 +5676,8 @@ mod tests {
             r
         };
         let snap = |c: &[Value]| c[0]["text"].as_str().unwrap_or("").to_string();
-        run("desktop_windows", json!({})).unwrap();
-        let tree = snap(&run("desktop_snapshot", json!({ "window": id })).unwrap());
+        run("takeover_windows", json!({})).unwrap();
+        let tree = snap(&run("takeover_snapshot", json!({ "window": id })).unwrap());
         let doc = tree
             .lines()
             .find(|l| l.contains("- Document") || l.contains("- Edit"))
@@ -5685,42 +5689,42 @@ mod tests {
         };
         let mut typing = aim.clone();
         typing["text"] = json!("Hello from Horadric\nA second line, typed for real.");
-        run("desktop_type", typing).unwrap();
-        run("desktop_press", json!({ "window": id, "key": "Control+A" })).unwrap();
-        let shot = run("desktop_screenshot", json!({ "window": id })).unwrap();
+        run("takeover_type", typing).unwrap();
+        run("takeover_press", json!({ "window": id, "key": "Control+A" })).unwrap();
+        let shot = run("takeover_screenshot", json!({ "window": id })).unwrap();
         let png = horadric_core::release::base64_decode(shot[0]["data"].as_str().unwrap()).unwrap();
         std::fs::write(out.join("desk-window.png"), png).unwrap();
         if let Some(r) = &doc {
-            run("desktop_snapshot", json!({ "window": id })).unwrap();
-            let shot = run("desktop_screenshot", json!({ "window": id, "ref": r })).unwrap();
+            run("takeover_snapshot", json!({ "window": id })).unwrap();
+            let shot = run("takeover_screenshot", json!({ "window": id, "ref": r })).unwrap();
             std::fs::write(
                 out.join("desk-element.png"),
                 horadric_core::release::base64_decode(shot[0]["data"].as_str().unwrap()).unwrap(),
             )
             .unwrap();
         }
-        let _ = run("desktop_click", json!({ "window": id, "name": "File" }));
+        let _ = run("takeover_click", json!({ "window": id, "name": "File" }));
         thread::sleep(Duration::from_millis(500));
-        let shot = run("desktop_screenshot", json!({ "window": id })).unwrap();
+        let shot = run("takeover_screenshot", json!({ "window": id })).unwrap();
         std::fs::write(
             out.join("desk-menu.png"),
             horadric_core::release::base64_decode(shot[0]["data"].as_str().unwrap()).unwrap(),
         )
         .unwrap();
-        run("desktop_press", json!({ "window": id, "key": "Escape" })).unwrap();
-        run("desktop_press", json!({ "window": id, "key": "Escape" })).unwrap();
-        run("desktop_press", json!({ "window": id, "key": "Control+A" })).unwrap();
-        run("desktop_press", json!({ "window": id, "key": "Delete" })).unwrap();
-        let _ = run("desktop_press", json!({ "window": id, "key": "Control+W" }));
+        run("takeover_press", json!({ "window": id, "key": "Escape" })).unwrap();
+        run("takeover_press", json!({ "window": id, "key": "Escape" })).unwrap();
+        run("takeover_press", json!({ "window": id, "key": "Control+A" })).unwrap();
+        run("takeover_press", json!({ "window": id, "key": "Delete" })).unwrap();
+        let _ = run("takeover_press", json!({ "window": id, "key": "Control+W" }));
         thread::sleep(Duration::from_millis(800));
-        let _ = run("desktop_windows", json!({}));
-        let _ = run("desktop_snapshot", json!({ "window": id }));
+        let _ = run("takeover_windows", json!({}));
+        let _ = run("takeover_snapshot", json!({ "window": id }));
         let _ = run(
-            "desktop_click",
+            "takeover_click",
             json!({ "window": id, "name": "SecondaryButton" }),
         );
         thread::sleep(Duration::from_millis(800));
-        let _ = run("desktop_press", json!({ "window": id, "key": "Alt+F4" }));
+        let _ = run("takeover_press", json!({ "window": id, "key": "Alt+F4" }));
         thread::sleep(Duration::from_millis(1500));
         if list_windows().iter().any(|x| x.hwnd == w.hwnd) {
             println!("Notepad is still open, pid {}", w.pid);
@@ -5731,7 +5735,7 @@ mod tests {
     }
 
     /// One tool call by hand, for checking a program on screen:
-    /// `TOOL=desktop_snapshot ARGS='{"window":"Notepad"}' cargo test -p
+    /// `TOOL=takeover_snapshot ARGS='{"window":"Notepad"}' cargo test -p
     /// horadric one_tool`, with the ignored and nocapture flags handed on to
     /// the test binary. A picture is written to
     /// `HORADRIC_DESKTOP_OUT`, or the temp folder.
@@ -5824,31 +5828,31 @@ $f.Controls.Add($b)
             r.map(|c| c[0]["text"].as_str().unwrap_or_default().to_string())
                 .unwrap_or_else(|e| format!("ERROR: {e}"))
         };
-        let first = run("desktop_changes", json!({ "window": id }));
+        let first = run("takeover_changes", json!({ "window": id }));
         // A real key, not UI Automation's invoke: a WinForms button holds
         // that until its modal dialog closes, and UI Automation then waits
         // on the program for anything else.
-        let clicked = run("desktop_press", json!({ "window": id, "key": "Enter" }));
+        let clicked = run("takeover_press", json!({ "window": id, "key": "Enter" }));
         let waited_for = run(
-            "desktop_wait",
+            "takeover_wait",
             json!({ "appears": "Settings dialog", "timeout_ms": 5000 }),
         );
         let typed = run(
-            "desktop_type",
+            "takeover_type",
             json!({ "window": "Settings dialog", "name": "IP address", "text": "10.0.0.5" }),
         );
-        let changes = run("desktop_changes", json!({ "window": id }));
-        let again = run("desktop_changes", json!({ "window": id }));
+        let changes = run("takeover_changes", json!({ "window": id }));
+        let again = run("takeover_changes", json!({ "window": id }));
         let escaped = run(
-            "desktop_press",
+            "takeover_press",
             json!({ "window": "Settings dialog", "key": "Escape" }),
         );
         let gone = run(
-            "desktop_wait",
+            "takeover_wait",
             json!({ "window": id, "gone": "Settings dialog", "timeout_ms": 5000 }),
         );
         let quiet = run(
-            "desktop_wait",
+            "takeover_wait",
             json!({ "quiet_ms": 800, "timeout_ms": 5000 }),
         );
         let _ = form.kill();
@@ -5910,14 +5914,14 @@ $f.Controls.Add($b)
             }
             r
         };
-        let _ = run("desktop_snapshot", json!({ "window": id }));
+        let _ = run("takeover_snapshot", json!({ "window": id }));
         let waited = run(
-            "desktop_wait",
+            "takeover_wait",
             json!({ "window": id, "text": "Watch dialog", "timeout_ms": 8000 }),
         );
         thread::sleep(Duration::from_millis(2500));
-        let changes = run("desktop_changes", json!({ "window": id }));
-        let all = run("desktop_changes", json!({}));
+        let changes = run("takeover_changes", json!({ "window": id }));
+        let all = run("takeover_changes", json!({}));
         thread::sleep(Duration::from_secs(3));
         let _ = std::fs::remove_file(&script);
         let text =

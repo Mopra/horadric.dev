@@ -653,7 +653,7 @@ pub fn stall_text(secs: u64) -> String {
     format!("the watcher has not answered for {secs} s (a watched program may be hung)")
 }
 
-/// Where a `desktop_changes` reads from: the change the agent `asked`
+/// Where a `takeover_changes` reads from: the change the agent `asked`
 /// after, else the place the session `kept`. A number past the `newest`
 /// change is from before `horadric mcp` started again, when the count
 /// began anew: all that is kept is told then, with a note saying why.
@@ -737,7 +737,7 @@ pub fn meanwhile_text(
     out
 }
 
-/// The answer to `desktop_changes`: the lines, newest last, and the
+/// The answer to `takeover_changes`: the lines, newest last, and the
 /// change to ask after next time.
 pub fn changes_text(
     list: &[Change],
@@ -772,7 +772,7 @@ pub fn changes_text(
         ));
     }
     out.push_str(&format!(
-        " The next desktop_changes starts after #{newest} by itself."
+        " The next takeover_changes starts after #{newest} by itself."
     ));
     out
 }
@@ -841,12 +841,12 @@ pub fn digest(list: &[Change], most: usize) -> String {
     let more = picked.len().saturating_sub(most);
     let mut said: Vec<String> = picked.iter().take(most).map(|c| brief(c)).collect();
     if more > 0 {
-        said.push(format!("{more} more (desktop_changes has them)"));
+        said.push(format!("{more} more (takeover_changes has them)"));
     }
     format!(" Then: {}.", said.join("; "))
 }
 
-/// What `desktop_wait` waits for. It ends when any of them holds.
+/// What `takeover_wait` waits for. It ends when any of them holds.
 #[derive(Debug, Default)]
 pub struct Until {
     /// A window whose title contains this is open.
@@ -2724,7 +2724,7 @@ pub(crate) mod tests {
     fn the_changes_answer_lists_newest_last_and_says_where_to_go_on() {
         assert_eq!(
             changes_text(&[], 4, 4, false, " in app.exe", None),
-            "Nothing changed in app.exe since #4. The next desktop_changes starts after #4 by \
+            "Nothing changed in app.exe since #4. The next takeover_changes starts after #4 by \
              itself."
         );
         let mut a = value(0, None, "1");
@@ -2769,7 +2769,7 @@ pub(crate) mod tests {
         assert_eq!(
             digest(&list, 2),
             " Then: dialog shown \"Save As\" id=66 (app.exe); Edit \"IP address\" value now \
-             \"a\" in \"Settings\"; 1 more (desktop_changes has them)."
+             \"a\" in \"Settings\"; 1 more (takeover_changes has them)."
         );
     }
 

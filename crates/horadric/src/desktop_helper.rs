@@ -118,7 +118,7 @@ pub const SILENCE: Duration = Duration::from_secs(150);
 /// screen for its question.
 pub const ANNOUNCE_PAUSE: Duration = Duration::from_millis(800);
 
-/// The helper's own call for an unnamed `desktop_wait`: what changed in its
+/// The helper's own call for an unnamed `takeover_wait`: what changed in its
 /// programs since a mark, and whether what is waited for holds there. Not
 /// a `desktop_` name, so an agent can not call it.
 pub const PEEK: &str = "helper_peek";
@@ -1903,7 +1903,7 @@ mod tests {
                 told.push(body);
                 Ok(json!({ "allowed": true }))
             };
-            let answer = helper.call("desktop_click", &json!({}), &mut app, Duration::ZERO);
+            let answer = helper.call("takeover_click", &json!({}), &mut app, Duration::ZERO);
             drop(helper);
             let ended = stand_in.join().unwrap().unwrap();
             let _ = tx.send((answer, told, ended));
@@ -1911,7 +1911,7 @@ mod tests {
         let (answer, told, ended) = rx
             .recv_timeout(Duration::from_secs(10))
             .expect("the call or the drop hung");
-        assert_eq!(answer, Ok(Ok(vec![json!("desktop_click"), json!(true)])));
+        assert_eq!(answer, Ok(Ok(vec![json!("takeover_click"), json!(true)])));
         assert_eq!(told, vec![json!({ "op": "desktop.allow" })]);
         assert!(ended, "the helper's read ends when the session drops it");
     }
@@ -1949,12 +1949,12 @@ mod tests {
     #[test]
     fn a_request_carries_name_args_and_settle() {
         let line = request_line(
-            "desktop_click",
+            "takeover_click",
             &json!({"ref": "e3"}),
             Duration::from_millis(250),
         );
         let v: Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(v["name"], "desktop_click");
+        assert_eq!(v["name"], "takeover_click");
         assert_eq!(v["args"]["ref"], "e3");
         assert_eq!(v["settle_ms"], 250);
     }

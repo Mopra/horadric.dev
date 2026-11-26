@@ -374,11 +374,9 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
             }
             // The lore is served to any session, but the desktop only to
             // one Horadric started, which has an app to ask the human.
-            n if n.starts_with("desktop_") && !self.browser => Err(NOT_STARTED.into()),
+            n if is_takeover(n) && !self.browser => Err(NOT_STARTED.into()),
             #[cfg(windows)]
-            n if n.starts_with("desktop_") => {
-                self.desktop.tool(n, args, &mut self.app, self.settle)
-            }
+            n if is_takeover(n) => self.desktop.tool(n, args, &mut self.app, self.settle),
             _ => Err(format!("there is no tool {name}")),
         }
     }
@@ -1020,17 +1018,27 @@ fn tools() -> Vec<Value> {
         ),
     ];
     #[cfg(windows)]
-    list.extend(desktop_tools());
+    list.extend(takeover_tools());
     list
 }
 
-/// The tools for programs on the user's Windows desktop.
+/// Whether `name` is a takeover tool, by either family of names: the
+/// listed `takeover_` ones, and the `desktop_` ones they were first shipped
+/// as, which prompts and saved runewords still call. The engine goes by
+/// the verb after the prefix, so both reach the same code.
+fn is_takeover(name: &str) -> bool {
+    ["takeover_", "desktop_"]
+        .iter()
+        .any(|family| name.starts_with(family))
+}
+
+/// The takeover tools, for programs on the user's own Windows desktop.
 #[cfg(windows)]
-fn desktop_tools() -> Vec<Value> {
+fn takeover_tools() -> Vec<Value> {
     let window = || {
         json!({
             "anyOf": [{ "type": "string" }, { "type": "number" }],
-            "description": "The window: its id from desktop_windows, or part of its title",
+            "description": "The window: its id from takeover_windows, or part of its title",
         })
     };
     let risky = || {
@@ -1052,7 +1060,7 @@ fn desktop_tools() -> Vec<Value> {
         json!({
             "window": window(),
             "reason": reason(),
-            "ref": { "type": "string", "description": "A ref from desktop_snapshot of this window, like e12" },
+            "ref": { "type": "string", "description": "A ref from takeover_snapshot of this window, like e12" },
             "name": { "type": "string", "description": format!("Or the element to {verb}: its name or automation id, else part of the name, then of the id") },
             "risky": risky(),
         })
@@ -1065,7 +1073,7 @@ fn desktop_tools() -> Vec<Value> {
     };
     vec![
         tool(
-            "desktop_windows",
+            "takeover_windows",
             "The windows on the user's desktop, frontmost first: id, title (cut at 40 \
              characters until the user lets you into the program), program and process id. \
              Dialogs say whose they are.",
@@ -1073,30 +1081,30 @@ fn desktop_tools() -> Vec<Value> {
             &[],
         ),
         tool(
-            "desktop_snapshot",
+            "takeover_snapshot",
             "A window's controls as text, through UI Automation: each button, field, list, tree \
              item and label with its type, name, value, automation id, whether it is enabled, \
              where it is in the window and what it can do (invoke, toggle, select, expand, \
-             value), and a ref like e12 for desktop_click, desktop_type and \
-             desktop_screenshot. Take a new one after the window changes; refs from an old \
+             value), and a ref like e12 for takeover_click, takeover_type and \
+             takeover_screenshot. Take a new one after the window changes; refs from an old \
              one go stale.",
             json!({ "window": window(), "reason": reason() }),
             &["window"],
         ),
         tool(
-            "desktop_screenshot",
+            "takeover_screenshot",
             "A picture of a window, mostly even when it is covered (one Windows will not draw \
              for you must be in front and uncovered). For what a snapshot can not tell: a \
              chart, a ladder diagram, colours.",
             json!({
                 "window": window(),
-                "ref": { "type": "string", "description": "Only this element, a ref from desktop_snapshot" },
+                "ref": { "type": "string", "description": "Only this element, a ref from takeover_snapshot" },
                 "reason": reason(),
             }),
             &["window"],
         ),
         tool(
-            "desktop_click",
+            "takeover_click",
             "Click an element of a window with a real mouse click at its middle. The window \
              comes forward and an element out of view is scrolled into it where the program \
              can; one that is gone, off screen or covered by another program is not clicked, \
@@ -1115,10 +1123,10 @@ fn desktop_tools() -> Vec<Value> {
             &["window"],
         ),
         tool(
-            "desktop_type",
+            "takeover_type",
             "Type text into a field. One that takes a value has it set, replacing what was \
              there; any other gets the keyboard and the text at its caret, where a line break \
-             or tab is refused except in a document (use submit or desktop_press) and typing \
+             or tab is refused except in a document (use submit or takeover_press) and typing \
              stops if another program takes the front. The answer says what the field \
              holds, read back before Enter; when that is not what was typed, Enter is not \
              pressed. The keyboard then goes back to the user's window.",
@@ -1132,8 +1140,8 @@ fn desktop_tools() -> Vec<Value> {
             &["window", "text"],
         ),
         tool(
-            "desktop_text",
-            "Read the text of a list, grid, output pane or editor that desktop_snapshot can not \
+            "takeover_text",
+            "Read the text of a list, grid, output pane or editor that takeover_snapshot can not \
              read, by ref or by name, or of what has the keyboard in the window when neither is \
              given. It reads UI Automation's text, then the element's value; only where \
              neither answers it selects all and copies (Control+A, Control+C), which counts as \
@@ -1145,7 +1153,7 @@ fn desktop_tools() -> Vec<Value> {
             &["window"],
         ),
         tool(
-            "desktop_press",
+            "takeover_press",
             "Press a key in a window, with modifiers joined by +: Enter, Escape, Tab, F5, \
              Down, Control+S, Shift+Tab, Alt+F4, a. Chords with the Windows key are refused. \
              The window comes forward, the key goes to whatever in it has the keyboard, and \
@@ -1159,35 +1167,35 @@ fn desktop_tools() -> Vec<Value> {
             &["window", "key"],
         ),
         tool(
-            "desktop_changes",
+            "takeover_changes",
             "What changed in the desktop programs this session works with since your last \
-             desktop_changes: windows and dialogs shown and closed, a window coming to the \
+             takeover_changes: windows and dialogs shown and closed, a window coming to the \
              front, menus, and fields, labels, boxes and items whose value, name or state \
              changed, one short line each, newest last. Horadric watches a program from the \
              first time this session looks at it or operates it. Far cheaper than a snapshot \
              or a picture: ask this first to learn what happened after you or the user acted, \
-             or while a program works, and take a desktop_snapshot only when you need refs to \
+             or while a program works, and take a takeover_snapshot only when you need refs to \
              act.",
             json!({
                 "window": {
                     "anyOf": [{ "type": "string" }, { "type": "number" }],
                     "description": "Only this program's changes: its window's id from \
-                        desktop_windows, or part of its title. Without it, every program \
+                        takeover_windows, or part of its title. Without it, every program \
                         watched",
                 },
                 "since": {
                     "type": "integer",
                     "description": "The changes after this number (each answer says where it \
-                        ended), instead of after your last desktop_changes. Programs that run \
+                        ended), instead of after your last takeover_changes. Programs that run \
                         as administrator are counted apart and always go on from your last \
-                        desktop_changes",
+                        takeover_changes",
                 },
                 "reason": reason(),
             }),
             &[],
         ),
         tool(
-            "desktop_wait",
+            "takeover_wait",
             "Wait until something happens in a desktop program, instead of taking snapshots or \
              screenshots in a loop, then say what held and every change seen meanwhile. Give \
              one or more of appears, gone, text and quiet_ms: it returns as soon as any of them \
@@ -1196,7 +1204,7 @@ fn desktop_tools() -> Vec<Value> {
             json!({
                 "window": {
                     "anyOf": [{ "type": "string" }, { "type": "number" }],
-                    "description": "The window to watch: its id from desktop_windows, or part \
+                    "description": "The window to watch: its id from takeover_windows, or part \
                         of its title. Without it, every program this session watches already",
                 },
                 "appears": {
@@ -1324,18 +1332,18 @@ browser_close when you are done, unless the user is using it. It keeps one login
 the user's own use of it, so take care on sites where they are logged in.";
 
 /// What a Windows session is told of the desktop tools, after the browser.
-pub(crate) const DESKTOP: &str = "The desktop_ tools \
+pub(crate) const DESKTOP: &str = "The takeover_ tools \
 do the same for programs on the user's Windows desktop (an engineering tool like Sysmac Studio, \
-its watch window, its dialogs): list them with desktop_windows, read one with desktop_snapshot, \
-look with desktop_screenshot, read lists and output panes with desktop_text, act with \
-desktop_click, desktop_type and desktop_press, and know \
+its watch window, its dialogs): list them with takeover_windows, read one with takeover_snapshot, \
+look with takeover_screenshot, read lists and output panes with takeover_text, act with \
+takeover_click, takeover_type and takeover_press, and know \
 that the user approves each program once per session and confirms each risky action. Refs from \
-desktop_snapshot are surer than points on the screen, so act by ref or name. Horadric watches \
-each program you have looked at or operated: ask desktop_changes what changed since you last \
+takeover_snapshot are surer than points on the screen, so act by ref or name. Horadric watches \
+each program you have looked at or operated: ask takeover_changes what changed since you last \
 looked, and wait for a dialog, a text, a window to close or the program to go quiet with \
-desktop_wait, rather than taking snapshots or screenshots again and again; take a new \
-desktop_snapshot only when you need refs. The user watches \
-the control happen, so give every desktop call but desktop_windows a reason: one short sentence, \
+takeover_wait, rather than taking snapshots or screenshots again and again; take a new \
+takeover_snapshot only when you need refs. The user watches \
+the control happen, so give every takeover call but takeover_windows a reason: one short sentence, \
 in the user's language, saying what you are about to do and why.";
 
 #[cfg(test)]
@@ -1490,7 +1498,7 @@ B.";
         let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" });
         assert_eq!(s.handle(&init).unwrap()["result"]["instructions"], said);
         // The lore needs no Horadric, the desktop does.
-        let a = s.handle(&call("desktop_windows", json!({}))).unwrap();
+        let a = s.handle(&call("takeover_windows", json!({}))).unwrap();
         assert_eq!(a["result"]["isError"], true);
         assert_eq!(a["result"]["content"][0]["text"], NOT_STARTED);
     }
@@ -1524,7 +1532,7 @@ B.";
         {
             let name = t["name"].as_str().unwrap();
             assert!(
-                ["browser_", "desktop_", "forge_", "remote_", "desk_", "lore_"]
+                ["browser_", "takeover_", "forge_", "remote_", "desk_", "lore_"]
                     .iter()
                     .any(|p| name.starts_with(p)),
                 "{t}"
@@ -1544,7 +1552,7 @@ B.";
 
     #[cfg(windows)]
     #[test]
-    fn the_desktop_tools_are_offered_with_the_browser() {
+    fn the_takeover_tools_are_offered_with_the_browser() {
         let (mut s, _) = server(|_| Ok(json!({})));
         let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
         let tools = s.handle(&list).unwrap()["result"]["tools"].clone();
@@ -1558,23 +1566,23 @@ B.";
                 .unwrap_or_else(|| panic!("no {n}"))
         };
         for n in [
-            "desktop_windows",
-            "desktop_snapshot",
-            "desktop_screenshot",
-            "desktop_click",
-            "desktop_type",
-            "desktop_press",
-            "desktop_text",
-            "desktop_changes",
-            "desktop_wait",
+            "takeover_windows",
+            "takeover_snapshot",
+            "takeover_screenshot",
+            "takeover_click",
+            "takeover_type",
+            "takeover_press",
+            "takeover_text",
+            "takeover_changes",
+            "takeover_wait",
         ] {
             named(n);
         }
         assert_eq!(
-            named("desktop_changes")["inputSchema"]["required"],
+            named("takeover_changes")["inputSchema"]["required"],
             json!([])
         );
-        assert_eq!(named("desktop_wait")["inputSchema"]["required"], json!([]));
+        assert_eq!(named("takeover_wait")["inputSchema"]["required"], json!([]));
         for k in [
             "appears",
             "gone",
@@ -1584,19 +1592,19 @@ B.";
             "window",
         ] {
             assert!(
-                !named("desktop_wait")["inputSchema"]["properties"][k].is_null(),
+                !named("takeover_wait")["inputSchema"]["properties"][k].is_null(),
                 "{k}"
             );
         }
-        assert!(named("desktop_changes")["description"]
+        assert!(named("takeover_changes")["description"]
             .as_str()
             .unwrap()
             .contains("only when you need refs"));
         assert_eq!(
-            named("desktop_type")["inputSchema"]["required"],
+            named("takeover_type")["inputSchema"]["required"],
             json!(["window", "text"])
         );
-        for n in ["desktop_click", "desktop_type", "desktop_press"] {
+        for n in ["takeover_click", "takeover_type", "takeover_press"] {
             let risky = &named(n)["inputSchema"]["properties"]["risky"];
             assert_eq!(risky["type"], "boolean", "{n}");
             assert!(
@@ -1605,13 +1613,13 @@ B.";
             );
         }
         for n in [
-            "desktop_snapshot",
-            "desktop_screenshot",
-            "desktop_click",
-            "desktop_type",
-            "desktop_press",
-            "desktop_changes",
-            "desktop_wait",
+            "takeover_snapshot",
+            "takeover_screenshot",
+            "takeover_click",
+            "takeover_type",
+            "takeover_press",
+            "takeover_changes",
+            "takeover_wait",
         ] {
             let reason = &named(n)["inputSchema"]["properties"]["reason"];
             assert_eq!(reason["type"], "string", "{n}");
@@ -1623,23 +1631,23 @@ B.";
                 "{n}"
             );
         }
-        assert!(named("desktop_windows")["inputSchema"]["properties"]["reason"].is_null());
+        assert!(named("takeover_windows")["inputSchema"]["properties"]["reason"].is_null());
         let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" });
         let said = s.handle(&init).unwrap()["result"]["instructions"].clone();
-        assert!(said.as_str().unwrap().contains("desktop_snapshot"));
-        assert!(said.as_str().unwrap().contains("give every desktop call"));
+        assert!(said.as_str().unwrap().contains("takeover_snapshot"));
+        assert!(said.as_str().unwrap().contains("give every takeover call"));
         assert!(said
             .as_str()
             .unwrap()
-            .contains("desktop_changes what changed"));
-        assert!(said.as_str().unwrap().contains("desktop_wait"));
+            .contains("takeover_changes what changed"));
+        assert!(said.as_str().unwrap().contains("takeover_wait"));
     }
 
     #[cfg(windows)]
     #[test]
-    fn a_desktop_wait_for_nothing_asks_nothing() {
+    fn a_takeover_wait_for_nothing_asks_nothing() {
         let (mut s, calls) = server(|_| Ok(json!({ "allowed": true })));
-        let a = s.handle(&call("desktop_wait", json!({}))).unwrap();
+        let a = s.handle(&call("takeover_wait", json!({}))).unwrap();
         assert_eq!(a["result"]["isError"], true);
         assert!(a["result"]["content"][0]["text"]
             .as_str()
@@ -1648,11 +1656,40 @@ B.";
         assert!(calls.borrow().is_empty());
     }
 
+    /// The names the tools were first shipped under are in prompts and
+    /// saved runewords, so they are answered, by the same engine, and
+    /// listed nowhere.
     #[cfg(windows)]
     #[test]
-    fn a_desktop_call_without_a_window_asks_nothing() {
+    fn the_old_desktop_names_are_answered_but_not_listed() {
         let (mut s, calls) = server(|_| Ok(json!({ "allowed": true })));
-        let a = s.handle(&call("desktop_snapshot", json!({}))).unwrap();
+        let mut said = |name: String, args: Value| {
+            let a = s.handle(&call(&name, args)).unwrap();
+            assert_eq!(a["result"]["isError"], true, "{name}");
+            a["result"]["content"][0]["text"].as_str().unwrap().to_string()
+        };
+        for verb in ["snapshot", "screenshot", "click", "type", "press", "text"] {
+            let old = said(format!("desktop_{verb}"), json!({}));
+            assert!(old.contains("say which window"), "{verb}: {old}");
+            assert_eq!(old, said(format!("takeover_{verb}"), json!({})), "{verb}");
+        }
+        let waited = said("desktop_wait".into(), json!({}));
+        assert!(waited.contains("say what to wait for"), "{waited}");
+        // A name of neither family is not the engine's.
+        let other = said("desk_snapshot".into(), json!({}));
+        assert!(other.contains("there is no tool"), "{other}");
+        assert!(calls.borrow().is_empty());
+        let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
+        let listed = s.handle(&list).unwrap()["result"]["tools"].to_string();
+        assert!(listed.contains("\"takeover_click\""));
+        assert!(!listed.contains("desktop_"), "an old name is listed or named");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_takeover_call_without_a_window_asks_nothing() {
+        let (mut s, calls) = server(|_| Ok(json!({ "allowed": true })));
+        let a = s.handle(&call("takeover_snapshot", json!({}))).unwrap();
         assert_eq!(a["result"]["isError"], true);
         assert!(a["result"]["content"][0]["text"]
             .as_str()
