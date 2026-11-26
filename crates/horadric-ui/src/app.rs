@@ -7519,6 +7519,7 @@ impl App {
         self.keeping_ended(id);
         self.drop_turns(id);
         crate::vault::run::drop_key(id);
+        crate::vault::run::drop_key(&horadric_hooks::open_url::key_name(id));
         if let Some(c) = self.consoles.remove(id) {
             if c.exit_code().is_none() {
                 c.kill();
@@ -8757,6 +8758,7 @@ impl App {
         crate::vault::identity::note_started(id, &dir);
         env_set.extend(own_set);
         env_set.push(secret_key(id));
+        env_set.extend(console::pane_env(id));
         // The CLI keeps what each prompt's edits overwrote only when told
         // to off a terminal, and a rewind to an earlier prompt puts the
         // files back from that.

@@ -40,6 +40,7 @@ mod mcp;
 mod node;
 mod node_state;
 mod node_wire;
+mod open_url;
 #[cfg(windows)]
 mod portal;
 #[cfg(windows)]
@@ -146,6 +147,9 @@ Usage:
                                Code's JSON on stdin and passes it to the app
   horadric mcp                   The MCP server Horadric gives its sessions: the tools
                                that open, drive and close the project's browser pane
+  horadric open-url URL          Open URL in the browser pane of this terminal's project
+                               (what BROWSER runs in Horadric's terminals), else in the
+                               system browser
   horadric remote open [--dev] DEST
                                Watch the desktop of a Windows machine reached by ssh DEST,
                                whose Horadric runs with HORADRIC_SCREEN_SHARE=1, in the
@@ -280,6 +284,12 @@ fn main() -> ExitCode {
         Some("name") => name_command(&args[1..]),
         Some("mcp") => mcp::run(),
         Some("remote") => remote::run(&args[1..]),
+        Some("open-url") => open_url::run(&args[1..]),
+        // `BROWSER` names this program alone, since most openers run it as
+        // one program with the link as its only argument.
+        Some(url) if args.len() == 1 && horadric_hooks::open_url::web_url(url).is_some() => {
+            open_url::run(&args)
+        }
         #[cfg(windows)]
         Some("portal") => portal::run(&args[1..]),
         #[cfg(windows)]
