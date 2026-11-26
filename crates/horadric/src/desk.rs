@@ -9,12 +9,16 @@
 //! goes out only in a header, and only after whatever answers on the port
 //! has proven it holds the same one.
 //!
-//! Nobody is asked before a tool runs: the human opening the desk is the
-//! permission. With no desk open a tool says so and does nothing: the
-//! window names the desk's session in a file while it is open, and a
-//! hand that still answers without it belongs to a desk that was closed.
+//! Nobody is asked before a tool runs: the human asked for the desk to
+//! open itself when an agent needs it. A call that finds it closed asks
+//! the app to open it, as the tray's Agent's desk, Open does, and waits
+//! for its hand. The window names the desk's session in a file while it
+//! is open, and a hand that still answers without it belongs to a desk
+//! that was closed.
 
 use std::path::PathBuf;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use horadric_core::remote::Response;
 use horadric_core::screen_share::Region;
@@ -23,9 +27,29 @@ use serde_json::{json, Value};
 
 use crate::remote::{Failed, Hello, Link, SHORT_WAIT};
 
-/// What every tool answers while no desk is open.
-pub(crate) const CLOSED: &str = "The agent's desk is not open. The human opens it from \
-     Horadric's tray menu (Agent's desk).";
+/// What every tool answers when the desk is not open and could not be
+/// opened from here.
+pub(crate) const CLOSED: &str = "The agent's desk is not open, and this call could not open \
+     it. The human can open it from Horadric's tray menu (Agent's desk).";
+
+/// The longest a call waits for a desk it asked the app to open. A fresh
+/// sign-in starts the hand through RunOnce about half a minute later; a
+/// slow one takes longer.
+const WAKE_MOST: Duration = Duration::from_secs(90);
+
+/// How often a call that opened the desk looks for its hand.
+const WAKE_EVERY: Duration = Duration::from_secs(1);
+
+/// Every so many looks the app is asked how the opening goes, so a
+/// failure is told when it happens rather than at the end of the wait.
+const STATE_EVERY: u32 = 3;
+
+/// One opening at a time in this process: a second call waits for the
+/// first's and then finds the desk open.
+static WAKING: Mutex<()> = Mutex::new(());
+
+/// A call to the app, as `crate::mcp::ask_app` makes it for this session.
+type App = Box<dyn Fn(&Value) -> Result<Value, String>>;
 
 /// Where the hand says what is open.
 const APPS_PATH: &str = "/apps";
@@ -45,6 +69,58 @@ struct Desk {
     port: u16,
     token_file: Option<PathBuf>,
     session_file: Option<PathBuf>,
+    /// Who opens a closed desk: none outside a session Horadric runs.
+    app: Option<App>,
+}
+
+/// What the app's answer about the desk means to a waiting call.
+#[derive(Debug, PartialEq)]
+enum Step {
+    /// The desk is open or on its way; the window's words, if any.
+    Wait(String),
+    /// It will not be ready: why, in a sentence for the agent.
+    Stop(String),
+}
+
+/// Reads the app's answer to `desk.open` or `desk.state`.
+fn step(answer: Result<Value, String>) -> Step {
+    let answer = match answer {
+        Ok(a) => a,
+        Err(e) => return Step::Stop(format!("Horadric did not open the agent's desk: {e}")),
+    };
+    let status = answer["status"].as_str().unwrap_or_default().trim().to_string();
+    match answer["desk"].as_str() {
+        Some("open") | Some("opening") => Step::Wait(status),
+        Some("failed") if status.is_empty() => {
+            Step::Stop("The agent's desk did not open.".into())
+        }
+        Some("failed") => Step::Stop(format!("The agent's desk did not open: {status}")),
+        Some("closed") => Step::Stop(
+            "The agent's desk closed before it was ready, or its window could not be made. \
+             Ask the human before trying again."
+                .into(),
+        ),
+        _ => Step::Stop(
+            "This Horadric can not open the agent's desk by itself (it may be older than \
+             this session's tools). The human can open it from Horadric's tray menu (Agent's \
+             desk)."
+                .into(),
+        ),
+    }
+}
+
+/// What a call says when the desk it opened was not ready in time.
+fn late(status: &str) -> String {
+    let says = if status.is_empty() {
+        String::new()
+    } else {
+        format!(" Its window says: {status}")
+    };
+    format!(
+        "The agent's desk was opened but was not ready within {} seconds.{says} Try the call \
+         again in a moment.",
+        WAKE_MOST.as_secs()
+    )
 }
 
 impl Desk {
@@ -55,6 +131,7 @@ impl Desk {
             port: desk::port(horadric_hooks::dev()),
             token_file: horadric_hooks::state_dir().map(|d| d.join(desk::TOKEN_FILE)),
             session_file: horadric_hooks::state_dir().map(|d| d.join(desk::SESSION_FILE)),
+            app: app_here(),
         }
     }
 
@@ -66,39 +143,92 @@ impl Desk {
             .is_some_and(|text| desk::read_session(&text).is_some())
     }
 
-    /// A link to the hand, proven: the token from its file, and an answer
-    /// to the proof from the port. No window, no token or nobody there is
-    /// a desk that is not open.
+    fn token(&self) -> Option<String> {
+        (self.token_file.as_ref())
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|t| remote::parse_token(&t))
+    }
+
+    /// Whether a hand may be reached: the window is open, a token is
+    /// written and somebody listens. The proof is still to come.
+    fn ready(&self) -> bool {
+        // A quick look: the proof would wait seconds on a port nobody
+        // listens on.
+        self.open() && self.token().is_some() && crate::remote::answers(self.port)
+    }
+
+    /// A link to the hand, proven. A desk that is not open is opened
+    /// first, when this process has an app to ask.
     fn reach(&self) -> Result<Link, String> {
+        match self.reach_once() {
+            Err(None) => {}
+            other => return other.map_err(|e| e.unwrap_or_else(|| CLOSED.into())),
+        }
+        let Some(app) = &self.app else {
+            return Err(CLOSED.into());
+        };
+        // A poisoned lock is only a call that panicked while it waited.
+        let _one = WAKING.lock().unwrap_or_else(|e| e.into_inner());
+        self.wake(app)?;
+        self.reach_once()
+            .map_err(|e| e.unwrap_or_else(|| CLOSED.into()))
+    }
+
+    /// Asks the app to open the desk and waits until its hand may be
+    /// reached, the app says it will not be, or [`WAKE_MOST`] is up.
+    fn wake(&self, app: &App) -> Result<(), String> {
+        if self.ready() {
+            return Ok(());
+        }
+        let mut now = step(app(&json!({ "op": "desk.open" })));
+        let start = Instant::now();
+        let mut looks = 0u32;
+        loop {
+            let status = match now {
+                Step::Stop(why) => return Err(why),
+                Step::Wait(status) => status,
+            };
+            if self.ready() {
+                return Ok(());
+            }
+            if start.elapsed() >= WAKE_MOST {
+                return Err(late(&status));
+            }
+            std::thread::sleep(WAKE_EVERY);
+            looks += 1;
+            now = if looks % STATE_EVERY == 0 {
+                step(app(&json!({ "op": "desk.state" })))
+            } else {
+                Step::Wait(status)
+            };
+        }
+    }
+
+    /// [`Desk::reach`] without opening anything. No window, no token or
+    /// nobody there is a desk that is not open: `Err(None)`.
+    fn reach_once(&self) -> Result<Link, Option<String>> {
         // Asked first and at every call: a closed desk stays signed in,
         // so its hand would still answer and prove itself.
         if !self.open() {
-            return Err(CLOSED.into());
+            return Err(None);
         }
-        let token = self
-            .token_file
-            .as_ref()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|t| remote::parse_token(&t))
-            .ok_or(CLOSED)?;
-        // A quick look first: a closed desk is the usual reason, and the
-        // proof would wait seconds on a port nobody listens on.
+        let token = self.token().ok_or(None)?;
         if !crate::remote::answers(self.port) {
-            return Err(CLOSED.into());
+            return Err(None);
         }
         match crate::remote::hello(self.port, &token) {
             Hello::Proven => Ok(Link {
                 port: self.port,
                 token,
             }),
-            Hello::Silent(_) => Err(CLOSED.into()),
-            Hello::Wrong => Err(format!(
+            Hello::Silent(_) => Err(None),
+            Hello::Wrong => Err(Some(format!(
                 "something else answers on the desk's port ({}): it could not prove it holds \
                  the desk's token, so nothing was sent to it. A hand only starts when the \
                  desk signs in: ending the desk from Horadric's tray menu (Agent's desk, End \
                  the desk) and opening it again starts a new one.",
                 self.port
-            )),
+            ))),
         }
     }
 
@@ -116,6 +246,21 @@ impl Desk {
         }
         Err("the desk's hand refused its own token (403)".into())
     }
+}
+
+/// The app this session's calls go to, as `crate::mcp::run` finds it:
+/// none outside a session Horadric started, which has nobody to ask.
+fn app_here() -> Option<App> {
+    let session = std::env::var(horadric_hooks::SESSION_ENV)
+        .ok()
+        .filter(|s| !s.is_empty())?;
+    let owner = std::env::var(horadric_hooks::OWNER_ENV)
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or_else(horadric_hooks::port);
+    Some(Box::new(move |body: &Value| {
+        crate::mcp::ask_app(owner, Some(&session), body)
+    }))
 }
 
 /// A failure of `crate::remote`'s, which speaks of a remote and a tunnel,
@@ -142,8 +287,9 @@ pub(crate) fn is_tool(name: &str) -> bool {
 }
 
 /// What every description says of when the tools work.
-const OPEN: &str = "It works only while the user has the agent's desk open (Horadric's tray \
-     menu, Agent's desk): closed, the tool says so and does nothing.";
+const OPEN: &str = "When the agent's desk is closed, the call opens it itself (as Horadric's \
+     tray menu, Agent's desk, does) and waits for it, so the first call may take up to a \
+     minute or more; when it can not open, the tool says why and does nothing.";
 
 /// What every input tool's description says.
 const ACT: &str = "On the agent's desk, as desk_screenshot shows it. Look with \
@@ -675,6 +821,7 @@ mod tests {
             port,
             token_file: Some(file),
             session_file: Some(session),
+            app: None,
         }
     }
 
@@ -751,6 +898,7 @@ mod tests {
             port,
             token_file: None,
             session_file: no_file.session_file.clone(),
+            app: None,
         };
         for at in [&gone, &no_file, &no_token, &nowhere] {
             for (name, args) in calls() {
@@ -794,6 +942,7 @@ mod tests {
             port: 1,
             token_file: None,
             session_file: None,
+            app: None,
         };
         let e = |name: &str, args: Value| answer(&nowhere, name, &args).unwrap_err();
         assert!(e("desk_click", json!({ "x": 1 })).contains("say y"));
@@ -1051,6 +1200,105 @@ mod tests {
         assert_eq!(
             worded("the tunnel did not answer: x"),
             "the desk's hand did not answer: x"
+        );
+    }
+
+    #[test]
+    fn what_the_app_says_of_the_desk_is_a_wait_or_a_reason() {
+        let said = |desk: &str, status: &str| step(Ok(json!({ "desk": desk, "status": status })));
+        assert_eq!(said("open", ""), Step::Wait(String::new()));
+        assert_eq!(
+            said("opening", " Waiting for your Windows password. "),
+            Step::Wait("Waiting for your Windows password.".into())
+        );
+        let Step::Stop(why) = said("failed", "That account is locked.") else {
+            panic!("a failure is no wait");
+        };
+        assert!(why.ends_with("did not open: That account is locked."), "{why}");
+        assert!(matches!(said("failed", ""), Step::Stop(w) if w.ends_with("did not open.")));
+        assert!(matches!(said("closed", ""), Step::Stop(w) if w.contains("closed")));
+        // An app that knows no desk.open answers with an error or nothing
+        // it means, and is never waited on.
+        assert!(matches!(step(Ok(json!({ "ok": true }))), Step::Stop(w) if w.contains("tray")));
+        assert!(
+            matches!(step(Err("no op desk.open".into())), Step::Stop(w) if w.contains("no op"))
+        );
+        assert!(late("").contains("90 seconds. Try"), "{}", late(""));
+        assert!(late("Signing in.").contains("says: Signing in."));
+    }
+
+    /// An app that answers each op with what `answer` makes of it, and
+    /// keeps the ops it was asked.
+    fn app(answer: impl Fn(&str) -> Value + 'static) -> (App, Arc<Mutex<Vec<String>>>) {
+        let ops: Arc<Mutex<Vec<String>>> = Arc::default();
+        let kept = Arc::clone(&ops);
+        let app: App = Box::new(move |body: &Value| {
+            let op = body["op"].as_str().unwrap_or_default().to_string();
+            kept.lock().unwrap().push(op.clone());
+            Ok(answer(&op))
+        });
+        (app, ops)
+    }
+
+    #[test]
+    fn a_closed_desk_is_opened_and_the_call_goes_through() {
+        let (port, asked) = hand(TOKEN, (200, "{}"));
+        let mut at = desk("wakes", port, Some(TOKEN));
+        let session = at.session_file.clone().unwrap();
+        std::fs::remove_file(&session).unwrap();
+        // The app opens the window, which names the session.
+        let named = session.clone();
+        let (opener, ops) = app(move |op| {
+            if op == "desk.open" {
+                std::fs::write(&named, desk::session_line(3)).unwrap();
+            }
+            json!({ "desk": "opening", "status": "" })
+        });
+        at.app = Some(opener);
+        let done = answer(&at, "desk_apps", &json!({})).unwrap();
+        assert!(said_text(&done).contains("Mail"), "{}", said_text(&done));
+        assert_eq!(*ops.lock().unwrap(), vec!["desk.open".to_string()]);
+        // Open now: the next call asks the app nothing.
+        answer(&at, "desk_apps", &json!({})).unwrap();
+        assert_eq!(ops.lock().unwrap().len(), 1);
+        assert!(!asked.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_desk_that_can_not_open_says_why_at_once() {
+        let (port, asked) = hand(TOKEN, (200, "{}"));
+        let mut at = desk("fails", port, Some(TOKEN));
+        std::fs::remove_file(at.session_file.as_ref().unwrap()).unwrap();
+        let (opener, ops) = app(|_| {
+            json!({ "desk": "failed", "status": "The desk needs your Windows password to sign in." })
+        });
+        at.app = Some(opener);
+        let start = Instant::now();
+        let e = answer(&at, "desk_click", &json!({ "x": 1, "y": 2 })).unwrap_err();
+        assert!(e.contains("needs your Windows password"), "{e}");
+        assert!(start.elapsed() < WAKE_EVERY, "{:?}", start.elapsed());
+        assert_eq!(ops.lock().unwrap().len(), 1);
+        assert!(asked.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_failure_while_opening_is_heard_before_the_wait_is_up() {
+        let free = {
+            let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let mut at = desk("fails-later", free, Some(TOKEN));
+        std::fs::remove_file(at.session_file.as_ref().unwrap()).unwrap();
+        let (opener, ops) = app(|op| match op {
+            "desk.open" => json!({ "desk": "opening", "status": "Signing in." }),
+            _ => json!({ "desk": "failed", "status": "That account is locked." }),
+        });
+        at.app = Some(opener);
+        let e = answer(&at, "desk_screenshot", &json!({})).unwrap_err();
+        assert!(e.contains("That account is locked."), "{e}");
+        assert_eq!(
+            *ops.lock().unwrap(),
+            vec!["desk.open".to_string(), "desk.state".to_string()]
         );
     }
 }
