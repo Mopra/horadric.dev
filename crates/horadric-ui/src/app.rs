@@ -2565,6 +2565,15 @@ pub(crate) fn ask_aside(d: &Dialog, aside: &dialog::Aside) -> dialog::Answer {
     }
 }
 
+/// As [`ask_aside`], for a question bypass may answer: None when it was
+/// put away because bypass came on, see [`dialog::show_aside_releasable`].
+pub(crate) fn ask_aside_releasable(d: &Dialog, aside: &dialog::Aside) -> Option<dialog::Answer> {
+    match with_app(|app| Rc::clone(&app.shared)) {
+        Some(shared) => dialog::show_aside_releasable(&shared.gpu, &shared.metrics, d, aside),
+        None => Some(dialog::Answer::Unanswered),
+    }
+}
+
 /// Asks beside the cluster of project `key`, outside the app's borrow: the
 /// question runs a modal loop that dispatches the app's messages.
 fn ask_beside(key: Option<&str>, question: &ask::Ask) -> Option<ask::Answer> {

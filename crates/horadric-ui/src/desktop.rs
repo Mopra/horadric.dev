@@ -56,6 +56,8 @@
 //! never lets a session into a program, and never counts for one that
 //! runs as administrator. It is never kept, and what it lets through
 //! unasked is still held for Esc, which stops it and turns bypass off.
+//! A risky question on screen when bypass comes on is put away and its
+//! call decided again (see [`releasable`]); any other question stays.
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -93,7 +95,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 mod desktop_admin;
 
 use super::ghost::{self, Allowed};
-use super::{ask_aside, post, with_app, App, WM_HORADRIC_DESKTOP};
+use super::{ask_aside, ask_aside_releasable, post, with_app, App, WM_HORADRIC_DESKTOP};
 use crate::dialog::{Answer, Aside, Dialog, Tone};
 use crate::toast::Kind;
 
@@ -198,6 +200,18 @@ pub(super) fn bypassed(decision: Decision, bypass: bool, elevated: bool) -> (Dec
 /// call. `pressed` is the button, None for put away. A refusal leaves the
 /// grant as it was: the next call asks again rather than being refused
 /// unseen.
+/// Whether a question on screen is put away when bypass comes on, to be
+/// decided again under it: only one bypass would answer. Read off
+/// [`bypassed`], so the two can not come to disagree.
+pub(super) fn releasable(risky: bool, elevated: bool) -> bool {
+    let ask = if risky {
+        Decision::AskRisky
+    } else {
+        Decision::AskApprove
+    };
+    bypassed(ask, true, elevated).1
+}
+
 pub(super) fn approved(
     grant: Grant,
     action: Action,
@@ -1295,6 +1309,15 @@ impl App {
         }
     }
 
+    /// A question bypass put away unanswered: its call goes back to the
+    /// front, ahead of those that came after it, and is decided again as
+    /// if it had just come. Nothing is noted against it, since nobody
+    /// refused it or left it unanswered.
+    fn released(&mut self, q: Question) {
+        self.desktop.asking = None;
+        self.desktop.waiting.push_front(q.pending);
+    }
+
     /// Acts on the human's answer. A question back when there is another
     /// to ask about the same call: allowed to operate, it may still be a
     /// risky one.
@@ -1404,7 +1427,18 @@ pub(super) fn ask_waiting(hwnd: HWND) {
             avoid: windows_of(q.pending.request.hwnd),
             within: q.left,
         };
-        let answer = ask_owned(&dialog(&q), &aside);
+        // Only a question bypass would answer goes when bypass comes on.
+        // An approval, or anything in an elevated program, stays up for
+        // the human, whose answer it still needs.
+        let may_release = releasable(q.risky, q.pending.elevated);
+        let Some(answer) = ask_owned(&dialog(&q), &aside, may_release) else {
+            next = with_app(|app| {
+                app.released(q);
+                app.next_question()
+            })
+            .flatten();
+            continue;
+        };
         next = match with_app(|app| app.answered(q, answer)) {
             Some(again @ Some(_)) => again,
             Some(None) => with_app(App::next_question).flatten(),
@@ -1533,7 +1567,8 @@ struct OwnedDialog {
     default: usize,
 }
 
-fn ask_owned(d: &OwnedDialog, aside: &Aside) -> Answer {
+/// None when the question was `releasable` and bypass put it away.
+fn ask_owned(d: &OwnedDialog, aside: &Aside, releasable: bool) -> Option<Answer> {
     let dialog = Dialog {
         tone: d.tone,
         title: &d.title,
@@ -1542,7 +1577,10 @@ fn ask_owned(d: &OwnedDialog, aside: &Aside) -> Answer {
         default: d.default,
         check: None,
     };
-    ask_aside(&dialog, aside)
+    match releasable {
+        true => ask_aside_releasable(&dialog, aside),
+        false => Some(ask_aside(&dialog, aside)),
+    }
 }
 
 #[cfg(test)]
@@ -1613,6 +1651,16 @@ mod tests {
             let asked = decide(grant, Action::Operate, true);
             assert_eq!(bypassed(asked, true, false), (Decision::AskApprove, false));
         }
+    }
+
+    #[test]
+    fn only_a_question_bypass_would_answer_goes_when_bypass_comes_on() {
+        assert!(releasable(true, false));
+        // The approval question lets a session into a program, which
+        // bypass never does, and an elevated program is never bypassed.
+        assert!(!releasable(false, false));
+        assert!(!releasable(true, true));
+        assert!(!releasable(false, true));
     }
 
     #[test]

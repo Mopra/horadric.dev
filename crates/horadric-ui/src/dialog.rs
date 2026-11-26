@@ -161,8 +161,6 @@ thread_local! {
 /// when [`release_aside`] put the question away unanswered, which is
 /// neither a yes nor a no. The caller then decides the call it asked
 /// about afresh, as if it had just come.
-// Nothing asks through it until the desktop questions do.
-#[allow(dead_code)]
 pub fn show_aside_releasable(
     gpu: &Gpu,
     metrics: &Metrics,
