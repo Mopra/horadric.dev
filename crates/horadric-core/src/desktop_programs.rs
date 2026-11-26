@@ -65,6 +65,50 @@ pub const ADMIN_FOLDER: &str = "Horadric";
 /// can not rewrite it.
 pub const ADMIN_LOG_FILE: &str = "desktop-elevated.log";
 
+/// Whether sessions may take over programs on the human's own desktop at
+/// all, chosen in the tray menu and kept with the app's settings. Off is
+/// there because a question is itself a cost: without it any session can
+/// put one on the human's screen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// Every call is refused and the tools are not listed.
+    Off,
+    /// The human is asked before each program, and before each risky
+    /// action. A word this build does not know reads as this one, so a
+    /// state file from a newer build still loads.
+    #[default]
+    #[serde(other)]
+    Ask,
+}
+
+/// What a session hears of any call while takeover is off.
+pub const OFF: &str =
+    "Takeover is off. The human turns it on from Horadric's tray menu (Takeover).";
+
+impl Mode {
+    /// The word on the wire and in the state file.
+    pub fn word(self) -> &'static str {
+        match self {
+            Mode::Off => "off",
+            Mode::Ask => "ask",
+        }
+    }
+
+    /// Reads [`Mode::word`]. Anything else, and no answer at all, is ask:
+    /// an app that does not answer in time must not hide the tools.
+    pub fn from_word(word: Option<&str>) -> Mode {
+        match word {
+            Some("off") => Mode::Off,
+            _ => Mode::Ask,
+        }
+    }
+
+    pub fn is_ask(&self) -> bool {
+        *self == Mode::Ask
+    }
+}
+
 /// How far a listed program is let in. There is deliberately no level that
 /// covers risky actions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -2020,5 +2064,21 @@ mod tests {
             assert_eq!(sid_text(&sid_bytes(sid)).as_deref(), Some(sid));
         }
         assert_eq!(sid_text(&[1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0]), None);
+    }
+
+    #[test]
+    fn the_takeover_mode_reads_as_ask_unless_it_says_off() {
+        assert_eq!(Mode::default(), Mode::Ask);
+        for m in [Mode::Off, Mode::Ask] {
+            assert_eq!(Mode::from_word(Some(m.word())), m);
+            let kept = serde_json::to_string(&m).unwrap();
+            assert_eq!(kept, format!("{:?}", m.word()));
+            assert_eq!(serde_json::from_str::<Mode>(&kept).unwrap(), m);
+        }
+        assert_eq!(Mode::from_word(None), Mode::Ask);
+        assert_eq!(Mode::from_word(Some("always")), Mode::Ask);
+        // A newer build's word must not make the whole state file unreadable.
+        assert_eq!(serde_json::from_str::<Mode>("\"always\"").unwrap(), Mode::Ask);
+        assert!(OFF.starts_with("Takeover is off."));
     }
 }

@@ -260,6 +260,8 @@ mod terminal;
 #[cfg(windows)]
 mod tip;
 #[cfg(windows)]
+mod takeover_mode;
+#[cfg(windows)]
 mod toast;
 #[cfg(windows)]
 mod tray;

@@ -799,6 +799,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     crate::dictate::use_chord(keys[Action::Dictate.index()]);
     web::set_sizes(&saved.page_sizes);
     ghost::set_speed_saved(saved.desktop_glide_ms);
+    crate::takeover_mode::set_mode(saved.takeover);
     theme::set_accents(&saved.accents);
     web::set_docks(&saved.page_docks);
     sanctuary::set_docks(&saved.sky_docks);
@@ -1691,6 +1692,7 @@ fn tray_menu(hwnd: HWND) {
     match menu {
         Some(Choice::Settings) => open_settings(None),
         Some(Choice::Desk(line)) => crate::desk::window::tray_pick(line),
+        Some(Choice::Takeover(line)) => crate::takeover_mode::tray_pick(line),
         Some(Choice::New) => pick_and_start(hwnd, projects.first().map(PathBuf::from)),
         Some(Choice::Recent(path)) => start_logged(PathBuf::from(path)),
         Some(Choice::QuestLog(path)) => {
@@ -9635,6 +9637,7 @@ impl App {
             stones_cast: self.tome.cast.clone(),
             cast_without_asking: !self.tome.ask,
             desktop_glide_ms: ghost::speed_saved(),
+            takeover: crate::takeover_mode::mode(),
             stones_hidden: self.tome.hidden.clone(),
             stones_order: self.tome.order.clone(),
             errands: self.tome.errands.clone(),

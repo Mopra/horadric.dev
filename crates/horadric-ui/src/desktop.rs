@@ -65,7 +65,7 @@ use std::time::{Instant, SystemTime};
 use std::time::Duration;
 
 use horadric_core::desktop_programs::{
-    self as listed, Act, GrantKey, Kind as ActKind, Level, Refusals, Source,
+    self as listed, Act, GrantKey, Kind as ActKind, Level, Mode, Refusals, Source,
 };
 use horadric_hooks::listener::{BrowserCall, Reply};
 use serde_json::{json, Value};
@@ -340,6 +340,12 @@ pub(super) fn elevating_notice(session: &str, body: &Value) -> (String, String) 
              start others with its rights. No keeps the helper out.{dev}"
         ),
     )
+}
+
+/// Whether a `desktop.` call with this `op` is refused because takeover
+/// is off: all but the word that an action already allowed has ended.
+pub(super) fn off_refuses(mode: Mode, op: Option<&str>) -> bool {
+    mode == Mode::Off && op != Some("desktop.done")
 }
 
 /// The tile's last line while a session operates a program.
@@ -926,7 +932,17 @@ impl App {
                 .reply
                 .send(json!({ "error": "this session is not one of Horadric's" }));
         }
-        if call.body.get("op").and_then(Value::as_str) == Some("desktop.done") {
+        let op = call.body.get("op").and_then(Value::as_str);
+        if op == Some("desktop.mode") {
+            let mode = crate::takeover_mode::mode().word();
+            return call.reply.send(json!({ "mode": mode }));
+        }
+        // A done still closes what an allowed action began before the
+        // human turned takeover off. Everything else asks for something.
+        if off_refuses(crate::takeover_mode::mode(), op) {
+            return call.reply.send(json!({ "error": listed::OFF }));
+        }
+        if op == Some("desktop.done") {
             let d = parse_done(&call.body);
             ghost::done(&self.shared, &d.what, d.ok, &d.outcome);
             return call.reply.send(json!({}));
@@ -1238,6 +1254,11 @@ impl App {
                 // was told the call failed: asking now would act late.
                 continue;
             }
+            // Turned off while this waited behind another question.
+            if crate::takeover_mode::mode() == Mode::Off {
+                p.reply.send(json!({ "error": listed::OFF }));
+                continue;
+            }
             let asked = self.decision_for(&p);
             match bypassed(asked, ghost::bypass(), p.elevated) {
                 (Decision::Allow, held) => self.allow(p, held),
@@ -1276,6 +1297,12 @@ impl App {
     /// risky one.
     fn answered(&mut self, mut q: Question, answer: Answer) -> Option<Question> {
         self.desktop.asking = None;
+        // Turned off while the question was up: off is the later word,
+        // whatever was pressed.
+        if crate::takeover_mode::mode() == Mode::Off {
+            q.pending.reply.send(json!({ "error": listed::OFF }));
+            return None;
+        }
         let r = &q.pending.request;
         let key = q.pending.key();
         let question = if q.risky {
@@ -2024,5 +2051,15 @@ mod tests {
         other["op"] = json!("desktop.click");
         assert!(parse(&other).is_err());
         assert!(parse(&json!({"op": "desktop.allow", "action": "see"})).is_err());
+    }
+
+    #[test]
+    fn off_refuses_every_call_but_the_end_of_one_allowed_before() {
+        for op in ["desktop.allow", "desktop.elevating", "desktop.other"] {
+            assert!(off_refuses(Mode::Off, Some(op)), "{op}");
+            assert!(!off_refuses(Mode::Ask, Some(op)), "{op}");
+        }
+        assert!(off_refuses(Mode::Off, None));
+        assert!(!off_refuses(Mode::Off, Some("desktop.done")));
     }
 }

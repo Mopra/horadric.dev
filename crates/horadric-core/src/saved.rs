@@ -218,6 +218,10 @@ pub struct SavedState {
     /// once the Thinking plate's slider moved it from the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desktop_glide_ms: Option<u32>,
+    /// Whether sessions may take over programs on the human's own desktop,
+    /// from the tray menu's Takeover. Asking, the default, is not written.
+    #[serde(default, skip_serializing_if = "crate::desktop_programs::Mode::is_ask")]
+    pub takeover: crate::desktop_programs::Mode,
     /// The built in stones the human put away, by label, which the tome
     /// leaves out until they are shown again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

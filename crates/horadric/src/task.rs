@@ -1056,7 +1056,7 @@ fn start(cwd: &Path) -> Result<(), String> {
         ),
         (
             "Horadric's MCP tool list, when not deferred".into(),
-            chars(&crate::mcp::tool_list().to_string()),
+            chars(&crate::mcp::tool_list(true).to_string()),
         ),
     ]);
     let home = std::env::var_os("USERPROFILE")
