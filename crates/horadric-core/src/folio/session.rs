@@ -49,6 +49,9 @@ pub struct McpServer {
     pub sign_in: Option<String>,
     /// The CLI could not sign in to it, so only the terminal's `/mcp` can.
     pub sign_in_failed: bool,
+    /// Its sign-in ends on a web page the CLI never hears from (a claude.ai
+    /// connector's), so only dialling it again finds out it went through.
+    pub recheck: bool,
     /// A reconnect or toggle of ours is on its way.
     pub busy: bool,
     /// Where it is configured: `plugin`, `claudeai`, or a settings scope

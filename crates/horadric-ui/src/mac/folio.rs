@@ -958,6 +958,9 @@ fn tend(
                 with(&id, |c| c.mcp_soon = false);
                 with(&id, |c| {
                     if c.ready() && c.folio.mcp_wanted() != McpWant::No {
+                        for line in c.folio.mcp_rechecks() {
+                            c.send(Some(line));
+                        }
                         let line = c.folio.mcp_status();
                         c.send(Some(line));
                     }

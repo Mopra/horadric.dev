@@ -26,6 +26,10 @@
 //!   content}`; the server gets exactly that. A url one that finishes
 //!   sends `system/elicitation_complete` with its id.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
+
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use super::{
@@ -54,6 +58,55 @@ pub struct McpState {
     stale: bool,
     /// Status asks since a wait began, see [`POLLS`].
     polls: u32,
+    /// This session's name and what the machine's sessions know together,
+    /// see [`McpTold`]. None says every trouble in every session, as
+    /// before there was one.
+    pub shared: Option<(String, Arc<Mutex<McpTold>>)>,
+}
+
+/// What this machine's sessions know together of servers in trouble, so
+/// one is said once and not by every session of every project: a fresh
+/// project's status lists a dozen connectors nobody ever signed in to.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpTold {
+    /// Servers seen connected here. One that wants a sign-in gets a card
+    /// only when it worked before: then it broke, and was not just never
+    /// set up.
+    #[serde(default)]
+    pub worked: BTreeSet<String>,
+    /// Servers a card said were in trouble, each with the session whose
+    /// card it was, until it connects again.
+    #[serde(default)]
+    pub told: BTreeMap<String, String>,
+    /// Changed since it was last written.
+    #[serde(skip)]
+    pub dirty: bool,
+}
+
+impl McpTold {
+    /// Whether session `me` says with a card that `name` is in trouble.
+    /// Live, the first session to hear of it does. A replay only repeats
+    /// the card that was this session's, so what it rebuilds is what was
+    /// there.
+    fn says(&mut self, me: &str, name: &str, status: &str, live: bool) -> bool {
+        if !live {
+            return self.told.get(name).is_some_and(|by| by == me);
+        }
+        let never_worked = status == "needs-auth" && !self.worked.contains(name);
+        if never_worked || self.told.contains_key(name) {
+            return false;
+        }
+        self.told.insert(name.to_string(), me.to_string());
+        self.dirty = true;
+        true
+    }
+
+    /// `name` is connected: it worked, and its next trouble is news.
+    fn mended(&mut self, name: &str) {
+        let new = self.worked.insert(name.to_string());
+        let told = self.told.remove(name).is_some();
+        self.dirty |= new || told;
+    }
 }
 
 /// The servers as a card in the transcript shows them.
@@ -200,6 +253,33 @@ impl Folio {
         )
     }
 
+    /// The lines that dial again each server whose sign-in the CLI cannot
+    /// hear end, see [`McpServer::recheck`]: to send before a status ask
+    /// that waits. Every third ask only, since each one dials claude.ai.
+    pub fn mcp_rechecks(&mut self) -> Vec<String> {
+        if !self.mcp.polls.is_multiple_of(3) {
+            return Vec::new();
+        }
+        let waiting: Vec<String> = (self.mcp.servers.iter())
+            .filter(|s| s.recheck && s.sign_in.as_ref().is_some_and(|u| !u.is_empty()))
+            .map(|s| s.name.clone())
+            .filter(|n| {
+                let asked = Sent::McpReconnect(n.clone());
+                !self.requests.values().any(|s| *s == asked)
+            })
+            .collect();
+        (waiting.into_iter())
+            .map(|name| {
+                let id = self.request(Sent::McpReconnect(name.clone()));
+                control_request_line(
+                    &id,
+                    "mcp_reconnect",
+                    serde_json::json!({"serverName": name}),
+                )
+            })
+            .collect()
+    }
+
     /// `mcp_toggle`: the line to write.
     pub fn mcp_toggle(&mut self, server: &str, enabled: bool) -> String {
         self.mcp_mark(server, |s| s.busy = true);
@@ -321,6 +401,7 @@ impl Folio {
             if s.status != "needs-auth" {
                 s.sign_in = None;
             }
+            s.recheck = s.sign_in.is_some() && was.is_some_and(|o| o.recheck);
             // An error from signing in or reconnecting stays until the
             // status moves.
             if let Some(o) = was.filter(|o| o.status == s.status) {
@@ -362,10 +443,25 @@ impl Folio {
                 changed = true;
             }
         }
-        let fresh: Vec<McpServer> = (self.mcp.servers.iter())
-            .filter(|s| troubled(&s.status) && !self.mcp.warned.contains(&s.name))
-            .cloned()
-            .collect();
+        // A replay's lines are old: what they say changes nothing the
+        // machine knows.
+        let live = self.clock.is_some();
+        let shared = self.mcp.shared.clone();
+        let mut told = shared.as_ref().and_then(|(_, t)| t.lock().ok());
+        let me = shared.as_ref().map_or("", |(me, _)| me.as_str());
+        let mut fresh = Vec::new();
+        for s in &self.mcp.servers {
+            if !troubled(&s.status) || self.mcp.warned.contains(&s.name) {
+                continue;
+            }
+            let says = match told.as_mut() {
+                Some(t) => t.says(me, &s.name, &s.status, live),
+                None => true,
+            };
+            if says {
+                fresh.push(s.clone());
+            }
+        }
         // A sign-in that went through and failed later says so again.
         let fine: Vec<String> = (self.mcp.servers.iter())
             .filter(|s| s.status == "connected")
@@ -373,7 +469,11 @@ impl Folio {
             .collect();
         for name in fine {
             self.mcp.warned.remove(&name);
+            if let Some(t) = told.as_mut().filter(|_| live) {
+                t.mended(&name);
+            }
         }
+        drop(told);
         if fresh.is_empty() {
             return changed;
         }
@@ -411,7 +511,13 @@ impl Folio {
                     }
                     (None, Some(url)) => {
                         self.mcp.to_open.push(url.clone());
-                        self.mcp_mark(&server, |s| s.sign_in = Some(url.clone()));
+                        // Not for a replayed answer: a sign-in left
+                        // behind is not dialled again at every attach.
+                        let recheck = body["callbackExpected"] == false && self.clock.is_some();
+                        self.mcp_mark(&server, |s| {
+                            s.sign_in = Some(url.clone());
+                            s.recheck = recheck;
+                        });
                     }
                     // Signed in already: nothing to open, the status says.
                     (None, None) => {
@@ -422,14 +528,22 @@ impl Folio {
                 true
             }
             Sent::McpReconnect(server) | Sent::McpToggle(server) => {
-                let e = error.unwrap_or_default().to_string();
+                // "Server status: needs-auth" says where the server stands,
+                // not that the asking failed: the status says the same.
+                let stands = error.is_some_and(|e| e.starts_with("Server status:"));
+                let e = error.filter(|_| !stands).unwrap_or_default().to_string();
                 self.mcp_mark(&server, |s| {
                     s.busy = false;
                     if !e.is_empty() {
                         s.error = e.clone();
                     }
                 });
-                self.mcp.stale = true;
+                // A recheck that found the sign-in not through changed
+                // nothing, and a status ask for each would use up the wait.
+                let rechecked = (self.mcp.servers.iter()).any(|s| s.name == server && s.recheck);
+                if !(stands && rechecked) {
+                    self.mcp.stale = true;
+                }
                 true
             }
             _ => false,
@@ -1239,6 +1353,87 @@ mod tests {
         let off = f.mcp_toggle("broken", false);
         let v: Value = serde_json::from_str(&off).unwrap();
         assert_eq!(v["request"]["enabled"], false);
+    }
+
+    fn hear(f: &mut Folio) {
+        let line = f.mcp_status();
+        f.feed(&STATUS.replace("\"ID\"", &format!("\"{}\"", id_of(&line))));
+    }
+
+    fn told_of(f: &Folio) -> Vec<&str> {
+        (cards(f).iter())
+            .flat_map(|c| c.servers.iter().map(|s| s.name.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn trouble_is_said_once_on_a_machine_and_only_of_what_worked() {
+        let told = Arc::new(Mutex::new(McpTold::default()));
+        let session = |me: &str, live: bool| {
+            let mut f = Folio::new();
+            f.clock = live.then_some(1);
+            f.mcp.shared = Some((me.to_string(), told.clone()));
+            f
+        };
+        // A failure is said. A sign-in nobody ever made is not.
+        let mut a = session("a", true);
+        hear(&mut a);
+        assert_eq!(told_of(&a), ["broken"]);
+        assert!(told.lock().unwrap().dirty);
+        // Not by the next session too.
+        let mut b = session("b", true);
+        hear(&mut b);
+        assert!(cards(&b).is_empty());
+
+        // What worked and wants a sign-in again is news, once.
+        let remote = |status: &str| json!({"mcpServers": [{"name": "remote", "status": status}]});
+        let line = b.mcp_status();
+        answer(&mut b, &line, remote("connected"));
+        let line = b.mcp_status();
+        answer(&mut b, &line, remote("needs-auth"));
+        assert_eq!(told_of(&b), ["remote"]);
+        hear(&mut a);
+        assert_eq!(told_of(&a), ["broken"]);
+
+        // A replay rebuilds the card that was its session's, no other.
+        let mut again = session("a", false);
+        hear(&mut again);
+        assert_eq!(told_of(&again), ["broken"]);
+        let mut other = session("c", false);
+        hear(&mut other);
+        assert!(cards(&other).is_empty());
+        // A session started again on its conversation does not repeat it.
+        let mut resumed = session("a", true);
+        hear(&mut resumed);
+        assert!(cards(&resumed).is_empty());
+    }
+
+    #[test]
+    fn a_sign_in_the_cli_cannot_hear_end_is_dialled_again() {
+        let mut f = Folio::new();
+        f.clock = Some(1);
+        hear(&mut f);
+        let sign_in = f.mcp_sign_in("remote");
+        answer(
+            &mut f,
+            &sign_in,
+            json!({"authUrl": "https://claude.ai/connect", "requiresUserAction": true,
+                "callbackExpected": false}),
+        );
+        let lines = f.mcp_rechecks();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("mcp_reconnect") && lines[0].contains("remote"));
+        assert!(f.mcp_rechecks().is_empty(), "one at a time");
+        // Not through yet: said as an error, which it is not.
+        f.feed(
+            &json!({"type": "control_response", "response": {"subtype": "error",
+            "request_id": id_of(&lines[0]), "error": "Server status: needs-auth"}})
+            .to_string(),
+        );
+        let s = &cards(&f)[0].servers[1];
+        assert_eq!(s.error, "");
+        assert!(s.sign_in.is_some() && !s.busy);
+        assert_eq!(f.mcp_wanted(), McpWant::Soon, "no status ask of its own");
     }
 
     #[test]

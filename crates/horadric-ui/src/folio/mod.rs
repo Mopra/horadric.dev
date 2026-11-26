@@ -1001,6 +1001,11 @@ fn drain() {
             }
             // Before the lines, which may ask whether an edit waits.
             chat.folio.review = chat.input.review;
+            // A watched transcript is another session's: it says nothing
+            // of servers itself.
+            if chat.folio.mcp.shared.is_none() && chat.watch.is_none() {
+                chat.folio.mcp.shared = Some((id.clone(), mcp::told()));
+            }
             let (cleared, live) = (chat.folio.cleared, chat.live);
             for event in events {
                 // A replay's lines are old, and when they came is lost.

@@ -6,11 +6,11 @@
 //! says nothing when a status changes.
 
 use std::process::Stdio;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use horadric_core::folio::{
-    AskState, Block, ElicitAction, Elicitation, FieldKind, McpCard, McpRemoval, McpServer, McpWant,
-    ELICIT_SEP,
+    AskState, Block, ElicitAction, Elicitation, FieldKind, McpCard, McpRemoval, McpServer, McpTold,
+    McpWant, ELICIT_SEP,
 };
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::HWND;
@@ -181,6 +181,42 @@ pub(super) fn settle() {
     }
 }
 
+/// What every session here knows together of servers in trouble, read
+/// once from the state folder.
+pub(super) fn told() -> Arc<Mutex<McpTold>> {
+    static TOLD: OnceLock<Arc<Mutex<McpTold>>> = OnceLock::new();
+    TOLD.get_or_init(|| {
+        let read = told_path()
+            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+        Arc::new(Mutex::new(read.unwrap_or_default()))
+    })
+    .clone()
+}
+
+fn told_path() -> Option<std::path::PathBuf> {
+    Some(crate::store::dir()?.join("mcp-told.json"))
+}
+
+/// Writes [`told`] when a session changed it.
+fn keep_told() {
+    let told = told();
+    let Ok(mut t) = told.lock() else {
+        return;
+    };
+    if !t.dirty {
+        return;
+    }
+    t.dirty = false;
+    let (Some(path), Ok(text)) = (told_path(), serde_json::to_string_pretty(&*t)) else {
+        return;
+    };
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, text).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
+
 fn field_id(request_id: &str, name: &str) -> String {
     format!("{FIELD}{request_id}:{name}")
 }
@@ -238,6 +274,7 @@ pub(super) fn show(chat: &mut Chat) {
 /// After each drain: opens the sign-in pages the CLI gave, and asks for
 /// status when it is due.
 pub(super) fn tend(chat: &mut Chat) {
+    keep_told();
     let pages = chat.folio.take_mcp_pages();
     // A replay's pages were opened when they came.
     if !chat.live || chat.ended || chat.hosted.is_none() || chat.watch.is_some() {
@@ -281,6 +318,9 @@ pub(super) fn tick(router: HWND) {
         for chat in chats.values_mut() {
             let ready = chat.live && !chat.ended && chat.watch.is_none();
             if ready && chat.folio.mcp_wanted() != McpWant::No {
+                for line in chat.folio.mcp_rechecks() {
+                    send(chat, &line);
+                }
                 let line = chat.folio.mcp_status();
                 send(chat, &line);
             }
