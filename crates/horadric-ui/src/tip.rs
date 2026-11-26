@@ -79,8 +79,10 @@ pub type Line = Cow<'static, str>;
 /// on any one clock.
 #[derive(Debug, Default)]
 pub struct Tips {
-    /// The window the cursor is over, and what it says is under it.
+    /// The window the cursor is over, what is under it, and what that
+    /// says.
     owner: isize,
+    item: u64,
     text: Option<Line>,
     showing: bool,
     /// Clicked: nothing shows until the cursor is on something else.
@@ -90,12 +92,35 @@ pub struct Tips {
 }
 
 impl Tips {
-    /// The cursor moved over `owner`, and is on something that says `text`.
+    /// The cursor moved over `owner`, and is on something that says
+    /// `text`, named by its words alone.
+    #[cfg(test)]
     pub fn over(&mut self, owner: isize, text: Option<Line>, now: u64) -> Do {
+        let item = text.as_deref().map_or(0, hash);
+        self.over_item(owner, item, text, now)
+    }
+
+    /// The cursor moved over `owner`, and is on `item`, which says `text`.
+    /// An item whose line changes while the cursor stays on it (a tile's
+    /// name found cut, its hirelings' list) is the same item: a line
+    /// showing shows the new words, and one put away by a click stays
+    /// away.
+    pub fn over_item(&mut self, owner: isize, item: u64, text: Option<Line>, now: u64) -> Do {
         if owner == self.owner && text == self.text {
             return Do::Nothing;
         }
+        if owner == self.owner && item == self.item && self.text.is_some() {
+            if let Some(t) = text.clone() {
+                self.text = text;
+                return if self.showing && !self.quiet {
+                    Do::Show(t)
+                } else {
+                    Do::Nothing
+                };
+            }
+        }
         self.owner = owner;
+        self.item = item;
         self.text = text.clone();
         self.quiet = false;
         let Some(text) = text else {
@@ -413,12 +438,22 @@ pub fn over(shared: &Rc<Shared>, owner: HWND, text: Option<&'static str>) {
 
 /// As [`over`], for a line made while the app runs.
 pub fn over_line(shared: &Rc<Shared>, owner: HWND, text: Option<Line>) {
+    let item = text.as_deref().map_or(0, hash);
+    over_item(shared, owner, item, text);
+}
+
+/// As [`over_line`], naming what is under the cursor by `item`, so its
+/// line can change without counting as a move onto something else.
+pub fn over_item(shared: &Rc<Shared>, owner: HWND, item: u64, text: Option<Line>) {
     SHARED.with(|s| {
         if s.borrow().is_none() {
             *s.borrow_mut() = Some(Rc::clone(shared));
         }
     });
-    let next = TIPS.with(|t| t.borrow_mut().over(owner.0 as isize, text, now()));
+    let next = TIPS.with(|t| {
+        t.borrow_mut()
+            .over_item(owner.0 as isize, item, text, now())
+    });
     act(next);
 }
 
@@ -430,6 +465,14 @@ pub fn away(owner: HWND) {
 /// A mouse button went down on `owner`.
 pub fn press(owner: HWND) {
     act(TIPS.with(|t| t.borrow_mut().press(owner.0 as isize)));
+}
+
+/// A name for anything hashable, to tell items apart by.
+pub fn hash(of: impl std::hash::Hash) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    of.hash(&mut h);
+    h.finish()
 }
 
 fn act(next: Do) {
@@ -798,6 +841,34 @@ mod tests {
         assert_eq!(t.over(1, Some("a".into()), 900), Do::Nothing);
         assert_eq!(t.due(), Do::Nothing);
         assert_eq!(t.over(1, Some("b".into()), 950), Do::Wait(DELAY));
+    }
+
+    #[test]
+    fn a_line_that_changes_on_the_same_item_stays_away_after_a_click() {
+        let mut t = Tips::default();
+        t.over_item(1, 7, Some("a".into()), 0);
+        t.due();
+        assert_eq!(t.press(1), Do::Hide);
+        assert_eq!(t.over_item(1, 7, Some("a, cut".into()), 50), Do::Nothing);
+        assert_eq!(t.due(), Do::Nothing);
+        // Onto something else, it is told again after the wait.
+        assert_eq!(t.over_item(1, 8, Some("b".into()), 900), Do::Wait(DELAY));
+    }
+
+    #[test]
+    fn a_line_showing_takes_the_new_words_of_its_item() {
+        let mut t = Tips::default();
+        t.over_item(1, 7, Some("a".into()), 0);
+        t.due();
+        assert_eq!(
+            t.over_item(1, 7, Some("a, cut".into()), 50),
+            Do::Show("a, cut".into())
+        );
+        // Still waiting, the wait shows the new words when it is over.
+        let mut t = Tips::default();
+        t.over_item(1, 7, Some("a".into()), 0);
+        assert_eq!(t.over_item(1, 7, Some("a2".into()), 100), Do::Nothing);
+        assert_eq!(t.due(), Do::Show("a2".into()));
     }
 
     #[test]

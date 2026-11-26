@@ -152,8 +152,9 @@ pub struct TerminalWindow {
     /// The project key of the sessions shown, and its name.
     project: RefCell<String>,
     project_name: RefCell<String>,
-    /// Where the project is, the line its name in the caption shows.
-    place: RefCell<Option<String>>,
+    /// The project's folder, for where its name in the caption says it
+    /// is. A brother's is told at hover time, so a rename shows at once.
+    dir: RefCell<Option<std::path::PathBuf>>,
     /// In grid order. Boxed on purpose: each pane's window procedure holds
     /// a raw pointer to it, so it must not move.
     #[allow(clippy::vec_box)]
@@ -235,7 +236,7 @@ impl TerminalWindow {
             shared,
             icon: Cell::new(0),
             project: RefCell::new(String::new()),
-            place: RefCell::new(None),
+            dir: RefCell::new(None),
             project_name: RefCell::new(String::new()),
             panes: RefCell::new(Vec::new()),
             grid: RefCell::new(Vec::new()),
@@ -315,9 +316,9 @@ impl TerminalWindow {
         }
     }
 
-    /// Says where the project shown is, for hovering its name.
-    pub fn set_place(&self, place: Option<String>) {
-        *self.place.borrow_mut() = place;
+    /// Gives the folder of the project shown, for hovering its name.
+    pub fn set_dir(&self, dir: Option<std::path::PathBuf>) {
+        *self.dir.borrow_mut() = dir;
     }
 
     /// Shows these sessions of a project, in this order, each with its
@@ -1264,7 +1265,9 @@ impl TerminalWindow {
         }
         self.with_caption_r(|c| c.on_name(p.x, p.y))
             .filter(|&on| on)
-            .and_then(|_| self.place.borrow().clone())
+            .and_then(|_| {
+                crate::project::whereabouts(&self.project.borrow(), self.dir.borrow().as_deref())
+            })
             .map(Cow::Owned)
     }
 

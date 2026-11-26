@@ -824,13 +824,15 @@ pub struct Target {
     trimmed: RefCell<Trimmed>,
 }
 
-/// A title a cluster draws in a row of its own, by the row's place.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// A title a cluster draws in a row of its own, by what the row shows
+/// rather than where: a scroll or a tile moving on before the next frame
+/// must not lend one row's cut to another.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Titled {
-    /// A tile's session name.
-    Tile(usize),
+    /// A tile's session name, by the session's id.
+    Tile(String),
     /// A quest's title in the log.
-    Quest(usize),
+    Quest(String),
 }
 
 /// Which of a cluster's titles were drawn cut short.
@@ -1239,8 +1241,8 @@ impl Target {
     }
 
     /// Whether the last frame drew `which` cut short.
-    pub fn trimmed(&self, which: Titled) -> bool {
-        self.trimmed.borrow().contains(&which)
+    pub fn trimmed(&self, which: &Titled) -> bool {
+        self.trimmed.borrow().contains(which)
     }
 }
 
@@ -1402,6 +1404,10 @@ impl Painter<'_> {
 
     /// Everything that holds still between frames.
     unsafe fn still(&self, gpu: &Gpu, m: &Metrics, scene: &Scene) {
+        // The titles cut are this drawing's, not those of rows long gone.
+        if let Some(t) = self.trimmed {
+            t.borrow_mut().clear();
+        }
         self.plate(m, scene.layout.size);
         self.wash(scene);
         if scene.on_stage || scene.brother.is_some() {
@@ -3754,7 +3760,7 @@ impl Painter<'_> {
         // One on its way out has no place of its own to hover.
         if i != usize::MAX {
             let full = self.measure(gpu, &gpu.name, s.label());
-            self.note_trim(Titled::Tile(i), full, name_rect.w);
+            self.note_trim(Titled::Tile(s.id.clone()), full, name_rect.w);
         }
         let age_c = match phase {
             Phase::Waiting(_) => c,
@@ -4281,7 +4287,7 @@ impl Painter<'_> {
             let title_r = Rect::new(title_x, r.y, right - word_w - 8.0 - title_x, r.h);
             self.text(&gpu.body, ink.fade(shown), &row.title, title_r);
             let full = self.measure(gpu, &gpu.body, &row.title);
-            self.note_trim(Titled::Quest(i), full, title_r.w);
+            self.note_trim(Titled::Quest(row.title.clone()), full, title_r.w);
             if strike > 0.0 {
                 let long = full.min(title_r.w);
                 let y = (r.y + r.h / 2.0).round() + 0.5;
@@ -4499,13 +4505,8 @@ impl Painter<'_> {
     /// Notes whether title `which`, `full` DIPs wide and drawn in `room`,
     /// was cut short.
     fn note_trim(&self, which: Titled, full: f32, room: f32) {
-        if let Some(t) = self.trimmed {
-            let mut t = t.borrow_mut();
-            if crate::tip::cut(full, room) {
-                t.insert(which);
-            } else {
-                t.remove(&which);
-            }
+        if let Some(t) = self.trimmed.filter(|_| crate::tip::cut(full, room)) {
+            t.borrow_mut().insert(which);
         }
     }
 

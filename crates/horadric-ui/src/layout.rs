@@ -529,7 +529,7 @@ pub fn min_files_body(m: &Metrics) -> f32 {
 }
 
 /// Which part of the cluster a point is on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Hit {
     New,
     Header,

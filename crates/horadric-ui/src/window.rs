@@ -1673,7 +1673,7 @@ impl Cluster {
                 .and_then(|s| s.into_iter().nth(i))
                 .map(|s| Cow::Owned(s.tip)),
             Hit::Task(i) => self.item_at(i).map(|item| {
-                let cut = self.trimmed(Titled::Quest(i));
+                let cut = self.trimmed(&Titled::Quest(item.title.clone()));
                 let title = cut.then_some(item.title.as_str());
                 Cow::Owned(tip::quest(title, item.why.as_deref()))
             }),
@@ -1688,7 +1688,7 @@ impl Cluster {
                 // it has a line of its own.
                 let name = session
                     .as_ref()
-                    .filter(|_| hot == Hit::Tile(i) && self.trimmed(Titled::Tile(i)))
+                    .filter(|s| hot == Hit::Tile(i) && self.trimmed(&Titled::Tile(s.id.clone())))
                     .map(|s| s.label().to_string());
                 tip::cluster(hot).map(|t| match (&name, &hirelings) {
                     (None, None) => Cow::Borrowed(t),
@@ -1704,7 +1704,7 @@ impl Cluster {
             }),
             _ => tip::cluster(hot).map(Cow::Borrowed),
         };
-        tip::over_line(&self.shared, self.hwnd, line);
+        tip::over_item(&self.shared, self.hwnd, tip::hash(hot), line);
         let old = self.hot.replace(hot);
         if old != hot && (old.lights() || hot.lights()) {
             self.invalidate();
@@ -1712,7 +1712,7 @@ impl Cluster {
     }
 
     /// Whether the last frame drew `which` cut short.
-    fn trimmed(&self, which: Titled) -> bool {
+    fn trimmed(&self, which: &Titled) -> bool {
         self.target
             .borrow()
             .as_ref()
