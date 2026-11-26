@@ -176,9 +176,22 @@ each with one purpose:
   still running. It also lists the shell commands that session runs
   beside the control.
 
-Holding Esc (0.6 seconds) stops the session's action. A tap of Esc
-passes through to the program in front, and only the human's own keys
-count, never ones a session sends.
+What Esc stops, exactly:
+
+- Held 0.6 seconds, it refuses the click whose mark is on its way and
+  has not landed, and ends Bypass (with what Bypass alone let through).
+  Clicks queued behind it were asked before the stop and still go. Only
+  the human's own key counts there, never one a session sends, and a
+  tap passes through to the program in front.
+- Down between two pieces of typing (the engine types 20 characters at
+  a time) or just before a final Enter, it stops the typing there and
+  Enter is not pressed. The engine looks at the key itself, so here it
+  can not tell the human's Esc from one a program sent, which only ever
+  stops typing. A text set into a field at once, as most fields take
+  it, is in before Esc is looked at; only its Enter can still be
+  stopped.
+- A key press, a click already landed and anything the program does
+  after are not stopped.
 
 The plate has one switch, Bypass, turned on by holding the mouse on it,
 for a human who trusts the work and watches it. It is on for one

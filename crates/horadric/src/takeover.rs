@@ -2253,6 +2253,9 @@ fn type_keys(pid: u32, text: &str) -> Result<(), String> {
     let mut typed = 0;
     for piece in chars.chunks(TYPED_PIECE) {
         front_is(pid).map_err(|why| typed_short(typed, chars.len(), &why))?;
+        if esc_held() {
+            return Err(typed_short(typed, chars.len(), ESC_STOPPED));
+        }
         let piece: String = piece.iter().collect();
         let inputs: Vec<INPUT> = text_strokes(&piece).into_iter().map(key_input).collect();
         if !send(&inputs) {
@@ -2262,6 +2265,19 @@ fn type_keys(pid: u32, text: &str) -> Result<(), String> {
         thread::sleep(Duration::from_millis(15));
     }
     Ok(())
+}
+
+/// What the agent hears when Esc was down where the engine looks.
+const ESC_STOPPED: &str = "the human held Esc";
+
+/// Whether Esc is down this moment, as the keyboard says. Looked at by
+/// the engine itself between the pieces of typing and before a final
+/// Enter, the cheapest way to hear the human there: the overlay's own
+/// stop only reaches a click still on its way. It can not tell the
+/// human's key from one a program sent, which only ever stops typing.
+fn esc_held() -> bool {
+    const VK_ESCAPE: i32 = 0x1B;
+    unsafe { GetAsyncKeyState(VK_ESCAPE) < 0 }
 }
 
 /// Whether the human holds a mouse button down right now.
@@ -3916,6 +3932,12 @@ impl Takeover {
             ));
         }
         if submit {
+            if esc_held() {
+                return Err(format!(
+                    "{said}, but Enter was not pressed: {ESC_STOPPED}. Ask in the chat before \
+                     going on."
+                ));
+            }
             if aim.writable {
                 self.focus(w, aim)
                     .map_err(|e| format!("{said}, but Enter was not pressed: {e}"))?;
