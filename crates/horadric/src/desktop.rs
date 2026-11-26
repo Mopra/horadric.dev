@@ -4542,7 +4542,7 @@ mod tests {
 
     #[test]
     fn a_wait_in_a_program_looks_only_at_its_windows() {
-        let mut other = win(2, "Synchronization", "SysmacStudio.exe");
+        let mut other = win(2, "Synchronization", "AcmeStudio.exe");
         other.pid = 9;
         let all = vec![win(1, "Ghost target", "python.exe"), other];
         assert_eq!(wait_titles(all.clone(), Some(7)), vec!["Ghost target"]);
@@ -4671,7 +4671,7 @@ mod tests {
 
     #[test]
     fn the_allow_body_names_the_program_the_action_and_where_it_lands() {
-        let w = win(66, "Proj - Sysmac Studio", "SysmacStudio.exe");
+        let w = win(66, "Proj - Acme Studio", "AcmeStudio.exe");
         assert_eq!(
             allow_body(
                 &w,
@@ -4685,9 +4685,9 @@ mod tests {
                 "op": "desktop.allow",
                 "window": {
                     "hwnd": 66,
-                    "title": "Proj - Sysmac Studio",
-                    "exe": "SysmacStudio.exe",
-                    "path": r"C:\Program Files\SysmacStudio.exe",
+                    "title": "Proj - Acme Studio",
+                    "exe": "AcmeStudio.exe",
+                    "path": r"C:\Program Files\AcmeStudio.exe",
                     "pid": 7,
                 },
                 "action": "operate",
@@ -4774,7 +4774,7 @@ mod tests {
             ..Said::default()
         };
         let yes = target("Button", "Yes", "6");
-        let why = risk(Doing::Click, &scene("Sysmac Studio", true, &said, yes));
+        let why = risk(Doing::Click, &scene("Acme Studio", true, &said, yes));
         assert!(why.is_some_and(|w| w.contains("transfer")));
     }
 
@@ -4938,7 +4938,7 @@ mod tests {
 
     #[test]
     fn an_act_is_sent_in_parts_beside_the_sentence() {
-        let w = win(5, "Import solution", "SysmacStudio.exe");
+        let w = win(5, "Import solution", "AcmeStudio.exe");
         let said = Said {
             texts: vec!["Replace?".into()],
             file_dialog: true,
@@ -4982,7 +4982,7 @@ mod tests {
 
     #[test]
     fn the_done_body_says_how_it_went_in_one_line() {
-        let w = win(66, "Proj", "SysmacStudio.exe");
+        let w = win(66, "Proj", "AcmeStudio.exe");
         assert_eq!(
             done_body(
                 &w,
@@ -4995,8 +4995,8 @@ mod tests {
                 "window": {
                     "hwnd": 66,
                     "title": "Proj",
-                    "exe": "SysmacStudio.exe",
-                    "path": r"C:\Program Files\SysmacStudio.exe",
+                    "exe": "AcmeStudio.exe",
+                    "path": r"C:\Program Files\AcmeStudio.exe",
                     "pid": 7,
                 },
                 "what": "press Enter in \"Proj\"",
@@ -5052,13 +5052,13 @@ mod tests {
         let list = [
             win(10, "Untitled - Notepad", "notepad.exe"),
             win(20, "Notepad", "other.exe"),
-            win(30, "Proj", "SysmacStudio.exe"),
+            win(30, "Proj", "AcmeStudio.exe"),
         ];
         assert_eq!(pick_window(&list, "30").unwrap().hwnd, 30);
         assert!(pick_window(&list, "31").is_none());
         assert_eq!(pick_window(&list, "notepad").unwrap().hwnd, 20);
         assert_eq!(pick_window(&list, "UNTITLED").unwrap().hwnd, 10);
-        assert_eq!(pick_window(&list, "sysmac").unwrap().hwnd, 30);
+        assert_eq!(pick_window(&list, "acme").unwrap().hwnd, 30);
         assert!(pick_window(&list, "  ").is_none());
     }
 

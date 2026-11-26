@@ -2,7 +2,7 @@
 //!
 //! Windows shows a session that is not elevated only the title bar of an
 //! elevated program and drops the input it sends there. Some programs,
-//! Sysmac Studio among them, restart themselves as administrator however
+//! engineering tools among them, restart themselves as administrator however
 //! they are started, so the user can not simply run them without. For a
 //! window like that `horadric mcp` starts `horadric takeover-helper` as
 //! administrator (Windows asks the user, unless its settings elevate
@@ -1668,38 +1668,38 @@ mod tests {
 
     #[test]
     fn an_administrator_window_is_marked_by_a_field_not_by_its_name() {
-        let body = json!({"window": {"exe": "SysmacStudio.exe", "pid": 4}, "action": "see"});
+        let body = json!({"window": {"exe": "AcmeStudio.exe", "pid": 4}, "action": "see"});
         let marked = as_administrator(body);
-        assert_eq!(marked["window"]["exe"], "SysmacStudio.exe");
+        assert_eq!(marked["window"]["exe"], "AcmeStudio.exe");
         assert_eq!(marked["window"]["pid"], 4);
         assert_eq!(marked["administrator"], true);
         assert_eq!(as_administrator(json!({}))["administrator"], true);
     }
 
-    const SYSMAC: &str = r"C:\Program Files\OMRON\Sysmac Studio\SysmacStudio.exe";
+    const STUDIO: &str = r"C:\Program Files\Acme\Acme Studio\AcmeStudio.exe";
 
     #[test]
     fn a_helper_is_bound_to_one_file() {
-        assert!(same_program(SYSMAC, &SYSMAC.to_uppercase()));
-        assert!(same_program(SYSMAC, &SYSMAC.replace('\\', "/")));
-        assert!(!same_program(SYSMAC, r"C:\Users\x\Downloads\SysmacStudio.exe"));
+        assert!(same_program(STUDIO, &STUDIO.to_uppercase()));
+        assert!(same_program(STUDIO, &STUDIO.replace('\\', "/")));
+        assert!(!same_program(STUDIO, r"C:\Users\x\Downloads\AcmeStudio.exe"));
         assert!(!same_program("", ""));
-        assert_eq!(unbindable(SYSMAC), None);
+        assert_eq!(unbindable(STUDIO), None);
         // No path, no helper: there would be nothing to bind it to.
         assert!(unbindable("").is_some());
-        assert!(unbindable("SysmacStudio.exe").is_some());
+        assert!(unbindable("AcmeStudio.exe").is_some());
         assert!(unbindable("C:\\a\" b.exe").is_some());
         // Never Horadric itself, whose windows hold the questions.
         let own = unbindable(r"C:\Users\x\AppData\Local\Programs\Horadric\horadric.exe");
         assert!(own.unwrap().contains("Horadric's own"));
-        let told = not_bound_text(SYSMAC, r"C:\Windows\regedit.exe");
+        let told = not_bound_text(STUDIO, r"C:\Windows\regedit.exe");
         assert!(told.contains("alone") && told.contains("regedit.exe"), "{told}");
     }
 
     fn act(kind: listed::Kind, control: &str, name: &str, key: &str) -> Act {
         Act {
             kind: Some(kind),
-            window: "Proj - Sysmac Studio".into(),
+            window: "Proj - Acme Studio".into(),
             control: control.into(),
             name: name.into(),
             key: key.into(),
@@ -1744,13 +1744,13 @@ mod tests {
 
     #[test]
     fn the_helper_s_first_question_says_what_can_not_be_promised() {
-        let q = first_question(SYSMAC, "click Button \"Online\"", 60);
-        assert!(q.contains(SYSMAC) && q.contains("click Button \"Online\""), "{q}");
+        let q = first_question(STUDIO, "click Button \"Online\"", 60);
+        assert!(q.contains(STUDIO) && q.contains("click Button \"Online\""), "{q}");
         assert!(q.contains("can not be limited to this program"), "{q}");
         assert!(q.contains("mouse only") && q.contains("60 s"), "{q}");
-        let r = risky_question(SYSMAC, "Synchronization", "click Button \"Transfer\"", "x", 30);
+        let r = risky_question(STUDIO, "Synchronization", "click Button \"Transfer\"", "x", 30);
         assert!(r.contains("in the window \"Synchronization\"") && r.contains("because x"));
-        assert!(!risky_question(SYSMAC, " ", "press Delete", "x", 30).contains("in the window"));
+        assert!(!risky_question(STUDIO, " ", "press Delete", "x", 30).contains("in the window"));
     }
 
     #[test]
@@ -1895,7 +1895,7 @@ mod tests {
             });
             assert!(connect(down.as_raw_handle() as usize));
             assert!(connect(up.as_raw_handle() as usize));
-            let mut helper = Helper::over(up, down, HANDLE::default(), SYSMAC);
+            let mut helper = Helper::over(up, down, HANDLE::default(), STUDIO);
             // Give the reading thread time to be waiting in its read.
             thread::sleep(Duration::from_millis(200));
             let mut told = Vec::new();
@@ -1928,9 +1928,9 @@ mod tests {
 
     #[test]
     fn an_open_question_says_nothing_was_done_and_to_call_again() {
-        let t = still_asking_text("SysmacStudio.exe", Duration::from_millis(90_500));
+        let t = still_asking_text("AcmeStudio.exe", Duration::from_millis(90_500));
         assert!(
-            t.contains("SysmacStudio.exe") && t.contains("90 s ago"),
+            t.contains("AcmeStudio.exe") && t.contains("90 s ago"),
             "{t}"
         );
         assert!(
@@ -1941,9 +1941,9 @@ mod tests {
 
     #[test]
     fn the_app_is_told_before_windows_asks() {
-        let b = elevating_body(json!({"exe": "SysmacStudio.exe", "pid": 4}));
+        let b = elevating_body(json!({"exe": "AcmeStudio.exe", "pid": 4}));
         assert_eq!(b["op"], "desktop.elevating");
-        assert_eq!(b["window"]["exe"], "SysmacStudio.exe");
+        assert_eq!(b["window"]["exe"], "AcmeStudio.exe");
     }
 
     #[test]

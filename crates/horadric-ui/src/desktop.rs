@@ -5,7 +5,7 @@
 //! What the human allows is kept per session and per program, by the
 //! program's full path and whether it runs as administrator, for the life
 //! of the app: a program's dialogs are the same program, so allowing
-//! Sysmac Studio covers its Transfer dialog too. A program that only
+//! Acme Studio covers its Transfer dialog too. A program that only
 //! hosts other things (mmc, ApplicationFrameHost, explorer) is kept by
 //! what it shows. A risky action is never kept. Each one is asked, since
 //! one wrong click there can stop a machine, unless an administrator
@@ -1631,18 +1631,18 @@ mod tests {
     #[test]
     fn a_held_program_is_named_with_who_holds_it() {
         let said = busy_text(
-            "Sysmac Studio",
+            "Acme Studio",
             "Fix PLC",
             "id fix-plc-3721, started 10:01",
             false,
         );
-        assert!(said.starts_with("Sysmac Studio is held by another session, \"Fix PLC\""));
+        assert!(said.starts_with("Acme Studio is held by another session, \"Fix PLC\""));
         assert!(said.contains("id fix-plc-3721, started 10:01"));
         assert!(said.contains("still at work"));
         assert!(busy_text("a", "b", "c", true).contains("waiting for the human"));
         assert_eq!(
-            program_key("SysmacStudio.exe", ""),
-            program_key("SYSMACSTUDIO.EXE", r"C:\O\SysmacStudio.exe")
+            program_key("AcmeStudio.exe", ""),
+            program_key("ACMESTUDIO.EXE", r"C:\O\AcmeStudio.exe")
         );
     }
 
@@ -1688,8 +1688,8 @@ mod tests {
     #[test]
     fn the_list_is_matched_on_the_file_of_the_path() {
         assert_eq!(
-            listed_name("other.exe", r"C:\O\SysmacStudio.exe"),
-            "SysmacStudio.exe"
+            listed_name("other.exe", r"C:\O\AcmeStudio.exe"),
+            "AcmeStudio.exe"
         );
         assert_eq!(listed_name("a.exe", ""), "a.exe");
         // A name is only a name: nothing in it says how a program runs.
@@ -1769,7 +1769,7 @@ mod tests {
     fn the_notice_before_windows_asks_says_who_wants_what() {
         let body = json!({
             "op": "desktop.elevating",
-            "window": {"exe": "SysmacStudio.exe", "title": "Sysmac Studio - Line 2"},
+            "window": {"exe": "AcmeStudio.exe", "title": "Acme Studio - Line 2"},
         });
         let (title, text) = elevating_notice("plc fix", &body);
         assert!(title.contains("administrator rights"), "{title}");
@@ -1777,12 +1777,12 @@ mod tests {
         assert!(text.contains("asks you itself") && text.contains("can not be limited"));
         assert!(!text.contains("approve each program and risky action here"));
         let mut with_path = body.clone();
-        with_path["window"]["path"] = json!(r"C:\O\SysmacStudio.exe");
+        with_path["window"]["path"] = json!(r"C:\O\AcmeStudio.exe");
         assert!(elevating_notice("s", &with_path)
             .1
-            .contains(r"for that one program (C:\O\SysmacStudio.exe)"));
+            .contains(r"for that one program (C:\O\AcmeStudio.exe)"));
         assert!(
-            text.starts_with("plc fix wants to reach SysmacStudio, which runs as administrator"),
+            text.starts_with("plc fix wants to reach AcmeStudio, which runs as administrator"),
             "{text}"
         );
         assert!(!text.contains("development build"));
@@ -1802,7 +1802,7 @@ mod tests {
 
     #[test]
     fn a_program_is_named_without_its_exe() {
-        assert_eq!(program_name("Sysmac Studio.exe"), "Sysmac Studio");
+        assert_eq!(program_name("Acme Studio.exe"), "Acme Studio");
         assert_eq!(program_name("NOTEPAD.EXE"), "NOTEPAD");
         assert_eq!(program_name("tool"), "tool");
         assert_eq!(program_name(".exe"), ".exe");
@@ -1827,28 +1827,28 @@ mod tests {
 
     #[test]
     fn a_refusal_tells_the_agent_what_was_refused() {
-        let exe = "Sysmac Studio.exe";
+        let exe = "Acme Studio.exe";
         let said = |risky, action| refusal_text(Refusal::Refused, action, risky, exe);
         assert!(said(false, Action::Operate)
-            .starts_with("the human refused operating Sysmac Studio.exe. They are not asked"));
+            .starts_with("the human refused operating Acme Studio.exe. They are not asked"));
         assert!(said(false, Action::See)
-            .starts_with("the human refused letting you see Sysmac Studio.exe. "));
+            .starts_with("the human refused letting you see Acme Studio.exe. "));
         assert!(said(true, Action::Operate)
-            .starts_with("the human refused this change in Sysmac Studio.exe. "));
+            .starts_with("the human refused this change in Acme Studio.exe. "));
         assert!(said(true, Action::Operate).contains("120 s"));
         assert!(refusal_text(Refusal::OnlyLook, Action::Operate, false, exe)
-            .starts_with("the human allowed only looking at Sysmac Studio.exe"));
+            .starts_with("the human allowed only looking at Acme Studio.exe"));
     }
 
     #[test]
     fn the_tile_says_what_is_being_operated() {
         assert_eq!(
-            operating_line("Sysmac Studio", "click Button \"Transfer\""),
-            "operating Sysmac Studio: click Button \"Transfer\""
+            operating_line("Acme Studio", "click Button \"Transfer\""),
+            "operating Acme Studio: click Button \"Transfer\""
         );
         assert_eq!(
-            operating_line("Sysmac Studio", "  "),
-            "operating Sysmac Studio"
+            operating_line("Acme Studio", "  "),
+            "operating Acme Studio"
         );
     }
 
@@ -1865,8 +1865,8 @@ mod tests {
             "window": {
                 "hwnd": 1,
                 "title": "Watch",
-                "exe": "Sysmac Studio.exe",
-                "path": r"C:\x\Sysmac Studio.exe",
+                "exe": "Acme Studio.exe",
+                "path": r"C:\x\Acme Studio.exe",
                 "pid": 2,
             },
             "action": "operate",
@@ -1879,8 +1879,8 @@ mod tests {
             parse(&body),
             Ok(Request {
                 title: "Watch".into(),
-                exe: "Sysmac Studio.exe".into(),
-                path: r"C:\x\Sysmac Studio.exe".into(),
+                exe: "Acme Studio.exe".into(),
+                path: r"C:\x\Acme Studio.exe".into(),
                 hwnd: 1,
                 action: Action::Operate,
                 what: "click Button \"OK\"".into(),
@@ -1897,13 +1897,13 @@ mod tests {
     fn an_operate_call_s_parts_are_read_for_the_patterns() {
         let body = json!({
             "op": "desktop.allow",
-            "window": {"exe": "SysmacStudio.exe", "title": "Proj - Sysmac Studio"},
+            "window": {"exe": "AcmeStudio.exe", "title": "Proj - Acme Studio"},
             "action": "operate",
             "what": "click Button \"Yes\"",
             "risky": true,
             "act": {
                 "kind": "click",
-                "window": "Sysmac Studio",
+                "window": "Acme Studio",
                 "control": "Button",
                 "name": "Yes",
                 "key": "",
@@ -1915,7 +1915,7 @@ mod tests {
             r.act,
             Act {
                 kind: Some(ActKind::Click),
-                window: "Sysmac Studio".into(),
+                window: "Acme Studio".into(),
                 control: "Button".into(),
                 name: "Yes".into(),
                 key: String::new(),
@@ -1924,7 +1924,7 @@ mod tests {
         );
         assert_eq!(
             what_where(&r.what, &r.act, &r.title),
-            "click Button \"Yes\" in window \"Sysmac Studio\" saying \"Delete the project?\""
+            "click Button \"Yes\" in window \"Acme Studio\" saying \"Delete the project?\""
         );
         // Looking has no parts, whatever is sent.
         let mut see = body.clone();
@@ -1939,14 +1939,14 @@ mod tests {
     #[test]
     fn the_window_is_said_only_when_it_is_not_the_main_one() {
         let act = Act {
-            window: "Proj - Sysmac Studio".into(),
+            window: "Proj - Acme Studio".into(),
             ..Act::default()
         };
         assert_eq!(
             what_where(
                 "click MenuItem \"Transfer...\"",
                 &act,
-                "Proj - Sysmac Studio"
+                "Proj - Acme Studio"
             ),
             "click MenuItem \"Transfer...\""
         );
@@ -1978,7 +1978,7 @@ mod tests {
             Refusal::NoAnswer(45),
             Action::Operate,
             true,
-            "SysmacStudio.exe",
+            "AcmeStudio.exe",
         );
         assert!(told.starts_with("no technician answered"), "{told}");
         assert!(told.contains("within 45 s") && told.contains("ask in the chat"));

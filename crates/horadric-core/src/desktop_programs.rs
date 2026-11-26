@@ -22,7 +22,7 @@
 //!   "answer_within": 60,
 //!   "programs": [
 //!     {
-//!       "program": "C:\Program Files\OMRON\Sysmac Studio\SysmacStudio.exe",
+//!       "program": "C:\Program Files\Acme\Acme Studio\AcmeStudio.exe",
 //!       "level": "operate",
 //!       "pre_approved": [
 //!         { "action": "click", "control": "Button", "name": "_Delete", "window": "Open Project" },
@@ -749,7 +749,7 @@ pub fn unapprove(
 
 /// Takes `program` off the list, run as administrator or not as
 /// `elevated` says: every entry naming it the same way, or, given only a
-/// name, every entry whose path ends in that name too, since "deny Sysmac"
+/// name, every entry whose path ends in that name too, since "deny Acme"
 /// means none of it. Says how many went.
 pub fn deny(entries: &mut Vec<Entry>, program: &str, elevated: bool) -> usize {
     let before = entries.len();
@@ -1330,7 +1330,7 @@ pub fn unsafe_text(what: &str, why: &str) -> String {
 mod tests {
     use super::*;
 
-    const SYSMAC: &str = r"C:\Program Files\OMRON\Sysmac Studio\SysmacStudio.exe";
+    const STUDIO: &str = r"C:\Program Files\Acme\Acme Studio\AcmeStudio.exe";
 
     fn entry(program: &str, level: Level) -> Entry {
         Entry {
@@ -1356,14 +1356,14 @@ mod tests {
     fn the_file_is_read_with_its_levels() {
         let text = r#"{
             "programs": [
-                { "program": "C:\\Program Files\\OMRON\\Sysmac Studio\\SysmacStudio.exe", "level": "operate" },
+                { "program": "C:\\Program Files\\Acme\\Acme Studio\\AcmeStudio.exe", "level": "operate" },
                 { "program": " notepad.exe ", "level": "Look" }
             ]
         }"#;
         assert_eq!(
             programs(text),
             Ok(vec![
-                entry(SYSMAC, Level::Operate),
+                entry(STUDIO, Level::Operate),
                 entry("notepad.exe", Level::Look)
             ])
         );
@@ -1404,43 +1404,43 @@ mod tests {
 
     #[test]
     fn a_path_matches_only_that_path() {
-        assert!(matches(SYSMAC, SYSMAC, "SysmacStudio.exe"));
+        assert!(matches(STUDIO, STUDIO, "AcmeStudio.exe"));
         assert!(matches(
-            "c:/program files/omron/sysmac studio/sysmacstudio.exe",
-            SYSMAC,
-            "SysmacStudio.exe"
+            "c:/program files/acme/acme studio/acmestudio.exe",
+            STUDIO,
+            "AcmeStudio.exe"
         ));
         assert!(!matches(
-            SYSMAC,
-            r"C:\Users\x\Downloads\SysmacStudio.exe",
-            "SysmacStudio.exe"
+            STUDIO,
+            r"C:\Users\x\Downloads\AcmeStudio.exe",
+            "AcmeStudio.exe"
         ));
-        assert!(!matches(SYSMAC, "", "SysmacStudio.exe"));
+        assert!(!matches(STUDIO, "", "AcmeStudio.exe"));
     }
 
     #[test]
     fn a_name_matches_that_exe_anywhere() {
-        let elsewhere = r"D:\Tools\SysmacStudio.exe";
-        assert!(matches("SysmacStudio.exe", elsewhere, "SysmacStudio.exe"));
-        assert!(matches("sysmacstudio", elsewhere, "SysmacStudio.exe"));
-        assert!(matches("SysmacStudio", elsewhere, ""));
-        assert!(!matches("Sysmac", elsewhere, "SysmacStudio.exe"));
-        assert!(!matches("SysmacStudio.exe", "", "?"));
+        let elsewhere = r"D:\Tools\AcmeStudio.exe";
+        assert!(matches("AcmeStudio.exe", elsewhere, "AcmeStudio.exe"));
+        assert!(matches("acmestudio", elsewhere, "AcmeStudio.exe"));
+        assert!(matches("AcmeStudio", elsewhere, ""));
+        assert!(!matches("Acme", elsewhere, "AcmeStudio.exe"));
+        assert!(!matches("AcmeStudio.exe", "", "?"));
         assert!(!matches("notepad.exe", r"C:\Windows\notepad.exe.bak", ""));
     }
 
     #[test]
     fn a_path_entry_wins_over_a_name_entry() {
         let list = vec![
-            entry("SysmacStudio.exe", Level::Operate),
-            entry(SYSMAC, Level::Look),
+            entry("AcmeStudio.exe", Level::Operate),
+            entry(STUDIO, Level::Look),
         ];
         assert_eq!(
-            find(&list, SYSMAC, "SysmacStudio.exe", false).map(|e| e.level),
+            find(&list, STUDIO, "AcmeStudio.exe", false).map(|e| e.level),
             Some(Level::Look)
         );
         assert_eq!(
-            find(&list, r"D:\SysmacStudio.exe", "SysmacStudio.exe", false).map(|e| e.level),
+            find(&list, r"D:\AcmeStudio.exe", "AcmeStudio.exe", false).map(|e| e.level),
             Some(Level::Operate)
         );
         assert_eq!(find(&list, r"C:\Windows\notepad.exe", "notepad.exe", false), None);
@@ -1463,14 +1463,14 @@ mod tests {
     #[test]
     fn allowing_replaces_the_same_program() {
         let mut list = vec![];
-        allow(&mut list, SYSMAC, Level::Look, false).unwrap();
+        allow(&mut list, STUDIO, Level::Look, false).unwrap();
         allow(&mut list, "notepad", Level::Look, false).unwrap();
-        allow(&mut list, &SYSMAC.to_uppercase(), Level::Operate, false).unwrap();
+        allow(&mut list, &STUDIO.to_uppercase(), Level::Operate, false).unwrap();
         allow(&mut list, "NOTEPAD.EXE", Level::Operate, false).unwrap();
         assert_eq!(
             list,
             vec![
-                entry(&SYSMAC.to_uppercase(), Level::Operate),
+                entry(&STUDIO.to_uppercase(), Level::Operate),
                 entry("NOTEPAD.EXE", Level::Operate)
             ]
         );
@@ -1482,19 +1482,19 @@ mod tests {
     #[test]
     fn denying_a_name_takes_its_paths_too() {
         let mut list = vec![
-            entry(SYSMAC, Level::Operate),
-            entry("SysmacStudio.exe", Level::Look),
+            entry(STUDIO, Level::Operate),
+            entry("AcmeStudio.exe", Level::Look),
             entry("notepad.exe", Level::Look),
         ];
-        assert_eq!(deny(&mut list, "sysmacstudio", false), 2);
+        assert_eq!(deny(&mut list, "acmestudio", false), 2);
         assert_eq!(list, vec![entry("notepad.exe", Level::Look)]);
         assert_eq!(deny(&mut list, "calc.exe", false), 0);
         let mut list = vec![
-            entry(SYSMAC, Level::Operate),
-            entry("SysmacStudio", Level::Look),
+            entry(STUDIO, Level::Operate),
+            entry("AcmeStudio", Level::Look),
         ];
-        assert_eq!(deny(&mut list, SYSMAC, false), 1);
-        assert_eq!(list, vec![entry("SysmacStudio", Level::Look)]);
+        assert_eq!(deny(&mut list, STUDIO, false), 1);
+        assert_eq!(list, vec![entry("AcmeStudio", Level::Look)]);
     }
 
     #[test]
@@ -1505,10 +1505,10 @@ mod tests {
                 at,
                 "fix plc",
                 Source::List(Level::Operate),
-                SYSMAC,
+                STUDIO,
                 "click\nOK"
             ),
-            format!("{at}  fix plc  operate from the list, not asked  {SYSMAC}  (click OK)\n")
+            format!("{at}  fix plc  operate from the list, not asked  {STUDIO}  (click OK)\n")
         );
         assert_eq!(
             log_line(at, "s", Source::Asked(Some(Level::Look)), "a.exe", " "),
@@ -1530,7 +1530,7 @@ mod tests {
     #[test]
     fn the_file_reads_back_what_was_written() {
         let list = vec![
-            entry(SYSMAC, Level::Operate),
+            entry(STUDIO, Level::Operate),
             entry("notepad.exe", Level::Look),
         ];
         assert_eq!(programs(&file(&list)), Ok(list));
@@ -1579,7 +1579,7 @@ mod tests {
         let text = r#"{
             "answer_within": 20,
             "programs": [{
-                "program": "SysmacStudio.exe",
+                "program": "AcmeStudio.exe",
                 "level": "operate",
                 "pre_approved": [
                     { "action": "click", "control": "Button", "name": "_Delete", "window": "Open Project" },
@@ -1639,7 +1639,7 @@ mod tests {
         assert!(delete.matches(&hit));
         // Another window, control, name or kind of action is not it.
         for other in [
-            act(Kind::Click, "Sysmac Studio", "Button", "_Delete", ""),
+            act(Kind::Click, "Acme Studio", "Button", "_Delete", ""),
             act(Kind::Click, "Open Project", "MenuItem", "_Delete", ""),
             act(Kind::Click, "Open Project", "Button", "Delete All", ""),
             act(Kind::Press, "Open Project", "Button", "_Delete", "Delete"),
@@ -1674,13 +1674,13 @@ mod tests {
         assert!(!upload.matches(&a));
         upload.session = Some("*".into());
         assert!(!upload.matches(&a));
-        let mut list = vec![entry(SYSMAC, Level::Operate)];
-        assert!(approve(&mut list, SYSMAC, false, upload).is_err());
+        let mut list = vec![entry(STUDIO, Level::Operate)];
+        assert!(approve(&mut list, STUDIO, false, upload).is_err());
 
         let mut yes = approval(Kind::Click);
         yes.name = Some("Yes".into());
         yes.text = Some("*delete the project*".into());
-        let mut confirm = act(Kind::Click, "Sysmac Studio", "Button", "Yes", "");
+        let mut confirm = act(Kind::Click, "Acme Studio", "Button", "Yes", "");
         assert!(!yes.matches(&confirm));
         confirm.texts = vec!["Do you want to delete the project \"OM01347\"?".into()];
         assert!(yes.matches(&confirm));
@@ -1702,27 +1702,27 @@ mod tests {
 
     #[test]
     fn approving_and_unapproving_change_one_entry() {
-        let mut list = vec![entry(SYSMAC, Level::Operate), entry("notepad", Level::Look)];
+        let mut list = vec![entry(STUDIO, Level::Operate), entry("notepad", Level::Look)];
         let mut del = approval(Kind::Click);
         del.name = Some("_Delete".into());
         assert_eq!(
-            approve(&mut list, &SYSMAC.to_lowercase(), false, del.clone()),
-            Ok(SYSMAC.into())
+            approve(&mut list, &STUDIO.to_lowercase(), false, del.clone()),
+            Ok(STUDIO.into())
         );
         // The same twice is kept once.
-        approve(&mut list, SYSMAC, false, del.clone()).unwrap();
+        approve(&mut list, STUDIO, false, del.clone()).unwrap();
         assert_eq!(list[0].pre_approved, vec![del.clone()]);
         assert!(approve(&mut list, "notepad", false, del.clone()).is_err());
         assert!(approve(&mut list, "calc.exe", false, del.clone()).is_err());
-        assert!(approve(&mut list, SYSMAC, false, approval(Kind::Click)).is_err());
+        assert!(approve(&mut list, STUDIO, false, approval(Kind::Click)).is_err());
         // Allowing again keeps them, and will not lower it below operate.
-        allow(&mut list, SYSMAC, Level::Operate, false).unwrap();
+        allow(&mut list, STUDIO, Level::Operate, false).unwrap();
         assert_eq!(list[0].pre_approved.len(), 1);
-        assert!(allow(&mut list, SYSMAC, Level::Look, false).is_err());
-        assert!(unapprove(&mut list, SYSMAC, false, 2).is_err());
-        assert!(unapprove(&mut list, SYSMAC, false, 0).is_err());
+        assert!(allow(&mut list, STUDIO, Level::Look, false).is_err());
+        assert!(unapprove(&mut list, STUDIO, false, 2).is_err());
+        assert!(unapprove(&mut list, STUDIO, false, 0).is_err());
         assert_eq!(
-            unapprove(&mut list, SYSMAC, false, 1),
+            unapprove(&mut list, STUDIO, false, 1),
             Ok(r#"click "_Delete""#.into())
         );
         assert!(list[0].pre_approved.is_empty());
@@ -1786,11 +1786,11 @@ mod tests {
         let mut del = approval(Kind::Click);
         del.name = Some("_Delete".into());
         del.window = Some("Open Project".into());
-        let mut sysmac = entry(SYSMAC, Level::Operate);
-        sysmac.pre_approved.push(del);
+        let mut acme = entry(STUDIO, Level::Operate);
+        acme.pre_approved.push(del);
         let read = List {
             programs: vec![
-                sysmac,
+                acme,
                 elevated("regedit.exe", Level::Look),
                 entry("notepad", Level::Look),
             ],
@@ -1799,14 +1799,14 @@ mod tests {
         let (list, misplaced) = user_list(read);
         assert_eq!(
             list.programs,
-            vec![entry(SYSMAC, Level::Operate), entry("notepad", Level::Look)]
+            vec![entry(STUDIO, Level::Operate), entry("notepad", Level::Look)]
         );
         assert_eq!(list.answer_within, Some(30));
         assert_eq!(misplaced.len(), 2);
         assert_eq!(
             misplaced[0].command,
             format!(
-                r#"horadric takeover approve "{SYSMAC}" click "_Delete" --window "Open Project""#
+                r#"horadric takeover approve "{STUDIO}" click "_Delete" --window "Open Project""#
             )
         );
         assert_eq!(
@@ -1823,28 +1823,28 @@ mod tests {
 
     #[test]
     fn an_elevated_program_is_listed_only_by_the_administrators() {
-        let user = vec![entry("SysmacStudio.exe", Level::Operate)];
+        let user = vec![entry("AcmeStudio.exe", Level::Operate)];
         let none: Vec<Entry> = Vec::new();
         // The user's list named it by name, which once covered its
         // elevated self. Now it says where to list it instead.
-        let l = level_for(&user, &none, SYSMAC, "SysmacStudio.exe", true);
+        let l = level_for(&user, &none, STUDIO, "AcmeStudio.exe", true);
         assert_eq!(l.level, None);
         assert_eq!(
             l.moved,
             Some(format!(
-                r#"horadric takeover allow --elevated "{SYSMAC}" operate"#
+                r#"horadric takeover allow --elevated "{STUDIO}" operate"#
             ))
         );
-        let admin = vec![elevated(SYSMAC, Level::Look)];
-        let l = level_for(&user, &admin, SYSMAC, "SysmacStudio.exe", true);
+        let admin = vec![elevated(STUDIO, Level::Look)];
+        let l = level_for(&user, &admin, STUDIO, "AcmeStudio.exe", true);
         assert_eq!((l.level, l.moved), (Some(Level::Look), None));
         // The entry for the elevated program says nothing of the normal
         // one, and the other way round.
-        let l = level_for(&none, &admin, SYSMAC, "SysmacStudio.exe", false);
+        let l = level_for(&none, &admin, STUDIO, "AcmeStudio.exe", false);
         assert_eq!((l.level, l.moved), (None, None));
-        let plain = vec![entry(SYSMAC, Level::Operate)];
+        let plain = vec![entry(STUDIO, Level::Operate)];
         assert_eq!(
-            level_for(&none, &plain, SYSMAC, "SysmacStudio.exe", true).level,
+            level_for(&none, &plain, STUDIO, "AcmeStudio.exe", true).level,
             None
         );
     }
@@ -1888,8 +1888,8 @@ mod tests {
     #[test]
     fn the_elevated_flag_is_kept_in_the_file_and_tells_entries_apart() {
         let mut list = vec![];
-        allow(&mut list, SYSMAC, Level::Look, false).unwrap();
-        allow(&mut list, SYSMAC, Level::Operate, true).unwrap();
+        allow(&mut list, STUDIO, Level::Look, false).unwrap();
+        allow(&mut list, STUDIO, Level::Operate, true).unwrap();
         assert_eq!(list.len(), 2);
         let text = file(&list);
         assert_eq!(text.matches("\"elevated\": true").count(), 1);
@@ -1898,26 +1898,26 @@ mod tests {
             r#"{"programs": [{"program": "a.exe", "level": "look", "elevated": "yes"}]}"#
         )
         .is_err());
-        assert_eq!(deny(&mut list, SYSMAC, true), 1);
-        assert_eq!(list, vec![entry(SYSMAC, Level::Look)]);
+        assert_eq!(deny(&mut list, STUDIO, true), 1);
+        assert_eq!(list, vec![entry(STUDIO, Level::Look)]);
     }
 
     #[test]
     fn a_grant_is_kept_by_path_and_by_whether_it_runs_elevated() {
         let key = |path: &str, exe: &str, high: bool| GrantKey::new("s1", path, exe, high, "");
         assert_eq!(
-            key(SYSMAC, "SysmacStudio.exe", false),
-            key(&SYSMAC.to_uppercase().replace('\\', "/"), "x", false)
+            key(STUDIO, "AcmeStudio.exe", false),
+            key(&STUDIO.to_uppercase().replace('\\', "/"), "x", false)
         );
         // The same name in another folder is another program.
         assert_ne!(
-            key(SYSMAC, "SysmacStudio.exe", false),
-            key(r"C:\Users\x\Downloads\SysmacStudio.exe", "SysmacStudio.exe", false)
+            key(STUDIO, "AcmeStudio.exe", false),
+            key(r"C:\Users\x\Downloads\AcmeStudio.exe", "AcmeStudio.exe", false)
         );
         // Elevated is a field, not part of a name a file could carry.
         assert_ne!(
-            key(SYSMAC, "SysmacStudio.exe", false),
-            key(SYSMAC, "SysmacStudio.exe", true)
+            key(STUDIO, "AcmeStudio.exe", false),
+            key(STUDIO, "AcmeStudio.exe", true)
         );
         assert_ne!(
             key("", "a.exe as administrator", false),
@@ -1925,8 +1925,8 @@ mod tests {
         );
         assert_eq!(key("", "A.EXE", false), key("", "a.exe ", false));
         assert_ne!(
-            GrantKey::new("s1", SYSMAC, "", false, ""),
-            GrantKey::new("s2", SYSMAC, "", false, "")
+            GrantKey::new("s1", STUDIO, "", false, ""),
+            GrantKey::new("s2", STUDIO, "", false, "")
         );
     }
 
@@ -1934,7 +1934,7 @@ mod tests {
     fn a_host_is_granted_by_what_it_shows() {
         assert!(is_host("mmc.exe") && is_host(r"C:\Windows\explorer.exe"));
         assert!(is_host("ApplicationFrameHost.exe") && is_host("RUNDLL32"));
-        assert!(!is_host("notepad.exe") && !is_host("SysmacStudio.exe"));
+        assert!(!is_host("notepad.exe") && !is_host("AcmeStudio.exe"));
         assert_eq!(hosted("notepad.exe", Some("x"), "t", 7), "");
         assert_eq!(
             hosted(
