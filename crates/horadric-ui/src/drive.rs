@@ -27,14 +27,31 @@ use crate::web;
 use crate::window::project_name;
 
 impl App {
+    /// Whether a call comes from a session the app started itself (a
+    /// terminal or a Folio it runs) and shows that session's key.
+    fn keyed(&self, session: &str, body: &Value) -> bool {
+        let ours = self.consoles.contains_key(session) || self.folios.contains_key(session);
+        ours && run::key_ok(session, body["key"].as_str().unwrap_or(""))
+    }
+
     pub(super) fn browser_call(&mut self, call: BrowserCall) {
         // A desktop program is no project's, so these ask nothing of it.
+        // They do show the session's key like every other call, before
+        // anything else: without it any local program could put questions
+        // on the human's screen under a session's name, write the
+        // history, hold a program against the sessions or keep bypass
+        // alive.
         if call
             .body
             .get("op")
             .and_then(Value::as_str)
             .is_some_and(|op| op.starts_with("desktop."))
         {
+            if !self.keyed(&call.session, &call.body) {
+                return call.reply.send(error(
+                    "Horadric takes desktop calls only from a session it runs, with that                      session's key. A session begun before Horadric kept keys gets them once it                      is closed and resumed in Horadric; a session started outside Horadric gets                      them only when resumed inside Horadric.",
+                ));
+            }
             return self.desktop_call(call);
         }
         let reply = call.reply;
@@ -53,9 +70,7 @@ impl App {
         // counts only from a session the app started itself (a terminal or
         // a Folio it runs) that shows its key. `horadric mcp` sends the key
         // with every call.
-        let ours =
-            self.consoles.contains_key(&call.session) || self.folios.contains_key(&call.session);
-        if !ours || !run::key_ok(&call.session, call.body["key"].as_str().unwrap_or("")) {
+        if !self.keyed(&call.session, &call.body) {
             return reply.send(error(
                 "Horadric takes browser pane and Forge calls only from a session it runs, with \
                  that session's key. A session begun before Horadric kept keys gets them once \

@@ -2,20 +2,34 @@
 //! mcp`. The MCP process does the seeing and the clicking; before each call
 //! it asks here whether it may, and the human decides.
 //!
-//! What the human allows is kept per session and per program, by its exe,
-//! for the life of the app: a program's dialogs are the same program, so
-//! allowing Sysmac Studio covers its Transfer dialog too. A risky action is
-//! never kept. Each one is asked, since one wrong click there can stop a
-//! machine, unless the human pre-approved that very action on the list.
+//! What the human allows is kept per session and per program, by the
+//! program's full path and whether it runs as administrator, for the life
+//! of the app: a program's dialogs are the same program, so allowing
+//! Sysmac Studio covers its Transfer dialog too. A program that only
+//! hosts other things (mmc, ApplicationFrameHost, explorer) is kept by
+//! what it shows. A risky action is never kept. Each one is asked, since
+//! one wrong click there can stop a machine, unless an administrator
+//! pre-approved that very action.
 //!
-//! The human can also list programs ahead of time, in
-//! `desktop-programs.json` (see [`horadric_core::desktop_programs`]). A
-//! listed program is let in that far for every session without the
-//! approval question, and the file is read again whenever it changes. A
-//! risky action is asked all the same, unless it matches one of the
-//! program's pre-approved patterns. Each grant from the list is shown once
-//! per session and program and written to `desktop.log`, with the answers
-//! to the questions and every pre-approved risky action beside it.
+//! Programs can be listed ahead of time, in two files named
+//! `desktop-programs.json` (see [`horadric_core::desktop_programs`]). The
+//! user's, beside the app's state, any program can write, so it only
+//! stands in for the approval question of a program that is not elevated.
+//! The administrators', which only an elevated shell can write and which
+//! is checked for that on every read, lists the programs that run as
+//! administrator and holds the pre-approved risky actions. Each grant
+//! from a list is shown once per session and program and written to
+//! `desktop.log`, with the answers to the questions and every
+//! pre-approved risky action beside it.
+//!
+//! The app's word is not what guards a program that runs as
+//! administrator: `horadric desktop-helper`, which alone can act there,
+//! asks the human itself. So what is risky in such a program is asked by
+//! the helper, not here as well.
+//!
+//! A question refused, or left unanswered, is not asked again for two
+//! minutes, and only a few wait per session, so a session can not keep
+//! the human answering.
 //!
 //! A question is put aside from the program it is about (see
 //! [`crate::dialog::show_aside`]), so the program's own dialogs stay in
@@ -38,8 +52,10 @@
 //! on the way.
 //!
 //! The plate's Bypass lets a human who trusts the work and watches it skip
-//! the questions. It is never kept, and what it lets through unasked is
-//! still held for Esc, which stops it and turns bypass off.
+//! the risky question in a program the session may already operate. It
+//! never lets a session into a program, and never counts for one that
+//! runs as administrator. It is never kept, and what it lets through
+//! unasked is still held for Esc, which stops it and turns bypass off.
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -48,14 +64,33 @@ use std::time::{Instant, SystemTime};
 
 use std::time::Duration;
 
-use horadric_core::desktop_programs::{self as listed, Act, Entry, Kind as ActKind, Level, Source};
+use horadric_core::desktop_programs::{
+    self as listed, Act, GrantKey, Kind as ActKind, Level, Refusals, Source,
+};
 use horadric_hooks::listener::{BrowserCall, Reply};
 use serde_json::{json, Value};
-use windows::Win32::Foundation::{HWND, RECT};
-use windows::Win32::System::SystemInformation::GetLocalTime;
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetLastActivePopup, GetWindowRect, IsIconic, IsWindow, IsWindowVisible,
+use windows::core::GUID;
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, PROPERTYKEY, RECT};
+use windows::Win32::Security::{
+    GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel,
+    TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
 };
+use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc;
+use windows::Win32::System::SystemInformation::GetLocalTime;
+use windows::Win32::System::Threading::{
+    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+};
+use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetLastActivePopup, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindow,
+    IsWindowVisible,
+};
+
+/// The administrators' list on disk. One file for the app and for the
+/// binary's elevated helper and `desktop` command, see its notes.
+#[path = "desktop_admin.rs"]
+mod desktop_admin;
 
 use super::ghost::{self, Allowed};
 use super::{ask_aside, post, with_app, App, WM_HORADRIC_DESKTOP};
@@ -100,6 +135,11 @@ pub(super) enum Refusal {
     OnlyLook,
     /// Nobody answered within so many seconds.
     NoAnswer(u64),
+    /// The same question was refused or left unanswered a moment ago, and
+    /// is not asked again for so many seconds.
+    Held(listed::Question, u64),
+    /// Too many of the session's questions wait already.
+    Crowded,
 }
 
 /// The approval question's buttons, in order.
@@ -140,12 +180,16 @@ pub(super) fn by_the_list(own: Grant, level: Option<Level>, action: Action, risk
         && decide(effective(own, level), action, risky) == Decision::Allow
 }
 
-/// What bypass makes of a decision: a question it would ask becomes an
-/// allowed call, true when held for the human's Esc. Nothing else moves:
-/// what is allowed goes as ever, and a refusal stays one.
-pub(super) fn bypassed(decision: Decision, bypass: bool) -> (Decision, bool) {
+/// What bypass makes of a decision: the risky question becomes an allowed
+/// call, true when held for the human's Esc. That question is only ever
+/// asked of a session that may operate the program already, so bypass
+/// never lets a session into a program: the approval question is asked
+/// with bypass on as with it off. Nor does it count for a program that
+/// runs as administrator. Nothing else moves: what is allowed goes as
+/// ever, and a refusal stays one.
+pub(super) fn bypassed(decision: Decision, bypass: bool, elevated: bool) -> (Decision, bool) {
     match decision {
-        Decision::AskApprove | Decision::AskRisky if bypass => (Decision::Allow, true),
+        Decision::AskRisky if bypass && !elevated => (Decision::Allow, true),
         d => (d, false),
     }
 }
@@ -200,13 +244,11 @@ pub(super) fn pressed_of(answer: Answer, secs: u64) -> Result<Option<usize>, Ref
     }
 }
 
-/// The button Enter presses at first: the least that does what was asked.
-pub(super) fn approve_default(action: Action) -> usize {
-    match action {
-        Action::See => 1,
-        Action::Operate => 0,
-    }
-}
+/// The button Enter presses at first: the one that refuses, in every
+/// question. A key meant for another window must never let an agent in.
+pub(super) const APPROVE_DEFAULT: usize = 2;
+/// The same for the risky question.
+pub(super) const RISKY_DEFAULT: usize = 1;
 
 /// A program's name as the human knows it, from its exe.
 pub(super) fn program_name(exe: &str) -> &str {
@@ -220,16 +262,29 @@ pub(super) fn program_name(exe: &str) -> &str {
 /// Why a call was refused, written to the agent so it stops asking and
 /// says so in the chat instead.
 pub(super) fn refusal_text(why: Refusal, action: Action, risky: bool, exe: &str) -> String {
+    // Said with each no, so the agent does not try the same again at once.
+    let hold = format!(
+        ". They are not asked about it again for {} s: say in the chat what you need instead of \
+         trying again",
+        listed::REFUSED_FOR.as_secs()
+    );
     match (why, action) {
         (Refusal::OnlyLook, _) => format!(
-            "the human allowed only looking at {exe}, not operating it; ask them in the chat if \
-             you need to operate it"
+            "the human allowed only looking at {exe}, not operating it{hold}"
         ),
-        (Refusal::Refused, Action::See) => format!("the human refused letting you see {exe}"),
-        (Refusal::Refused, Action::Operate) if risky => {
-            format!("the human refused this change in {exe}")
+        (Refusal::Refused, Action::See) => {
+            format!("the human refused letting you see {exe}{hold}")
         }
-        (Refusal::Refused, Action::Operate) => format!("the human refused operating {exe}"),
+        (Refusal::Refused, Action::Operate) if risky => {
+            format!("the human refused this change in {exe}{hold}")
+        }
+        (Refusal::Refused, Action::Operate) => {
+            format!("the human refused operating {exe}{hold}")
+        }
+        (Refusal::Held(question, secs), _) => {
+            listed::refused_text(question, exe, Duration::from_secs(secs))
+        }
+        (Refusal::Crowded, _) => listed::crowded_text(exe),
         (Refusal::NoAnswer(secs), _) => {
             let what = if risky {
                 "this change"
@@ -238,9 +293,11 @@ pub(super) fn refusal_text(why: Refusal, action: Action, risky: bool, exe: &str)
             };
             format!(
                 "no technician answered Horadric's question about {what} in {exe} within \
-                 {secs} s, so nothing was done. Nobody may be at this machine: ask in the chat. \
-                 If this action is safe to do without asking, the human can pre-approve it on \
-                 the list (horadric desktop approve)"
+                 {secs} s, so nothing was done, and the question is not asked again for {} s. \
+                 Nobody may be at this machine: ask in the chat. If this action is safe to do \
+                 without asking, an administrator can pre-approve it from an elevated shell \
+                 (horadric desktop approve)",
+                listed::REFUSED_FOR.as_secs()
             )
         }
     }
@@ -259,12 +316,19 @@ pub(super) fn elevating_notice(session: &str, body: &Value) -> (String, String) 
         ("" | "?", t) => format!("the program of {t:?}"),
         (e, _) => program_name(e).to_string(),
     };
+    let only = match window["path"].as_str().map(str::trim) {
+        Some(path) if !path.is_empty() => format!(" ({path})"),
+        _ => String::new(),
+    };
     (
         "Windows will ask for administrator rights".to_string(),
         format!(
-            "{session} wants to reach {program}, which runs as administrator. Horadric's helper \
-             needs administrator rights for that: Yes lets it, and you still approve each \
-             program and risky action here; No keeps it out."
+            "{session} wants to reach {program}, which runs as administrator. Windows will ask \
+             to let Horadric's helper run as administrator, for that one program{only}. The \
+             helper then asks you itself, in a window of its own, before the first click or key \
+             there and before every risky action. Operating a program that runs as \
+             administrator can not be limited to that program: its Open and Save dialogs can \
+             start others with its rights. No keeps the helper out."
         ),
     )
 }
@@ -283,6 +347,8 @@ pub(super) fn refusal_word(why: Refusal) -> &'static str {
         Refusal::Refused => "refused by the human",
         Refusal::OnlyLook => "only looking was allowed",
         Refusal::NoAnswer(_) => "no answer",
+        Refusal::Held(..) => "not asked again so soon",
+        Refusal::Crowded => "too many questions waiting",
     }
 }
 
@@ -315,8 +381,8 @@ pub(super) fn busy_text(program: &str, name: &str, ident: &str, asking: bool) ->
     )
 }
 
-/// The key a program is held by: its plain exe name, whether reached
-/// through the helper or not.
+/// The key a program is held by, for one session driving it at a time:
+/// its exe name, run as administrator or not.
 pub(super) fn program_key(exe: &str, path: &str) -> String {
     listed_name(exe, path).to_lowercase()
 }
@@ -341,6 +407,10 @@ pub(super) struct Request {
     /// An operate action in parts, for the pre-approved patterns. Empty
     /// for looking, and from an MCP process before parts were sent.
     pub act: Act,
+    /// The call says the program runs as administrator, reached through
+    /// the elevated helper. The session's word: it makes the app
+    /// stricter, never laxer.
+    pub administrator: bool,
 }
 
 /// A finished action, as `desktop.done` tells it.
@@ -459,6 +529,7 @@ pub(super) fn parse(body: &Value) -> Result<Request, String> {
             Action::Operate => act_of(body.get("act")),
             Action::See => Act::default(),
         },
+        administrator: body.get("administrator").and_then(Value::as_bool) == Some(true),
     })
 }
 
@@ -470,21 +541,40 @@ pub(super) struct Pending {
     /// When it came, so a question asked after others waits only the rest
     /// of its time.
     since: Instant,
+    /// The program runs as administrator: the call says so, or the app
+    /// saw it. The user's list, a grant for the normal program and bypass
+    /// all stop short of it.
+    elevated: bool,
+    /// The app saw for itself that the program runs above it. Nothing
+    /// that is not elevated can then act in it, whatever the app answers,
+    /// so its risky actions are the elevated helper's to ask about. A
+    /// call's own word for it is never enough to skip a question here.
+    verified: bool,
+    /// What tells this window from the others of a host, see
+    /// [`listed::hosted`].
+    hosted: String,
 }
 
 impl Pending {
-    fn key(&self) -> (String, String) {
-        grant_key(&self.session, &self.request.exe)
+    fn key(&self) -> GrantKey {
+        let r = &self.request;
+        GrantKey::new(&self.session, &r.path, &r.exe, self.elevated, &self.hosted)
     }
 
     /// The program as the log names it: its path when known.
-    fn program(&self) -> &str {
+    fn program(&self) -> String {
         let r = &self.request;
-        if r.path.is_empty() {
-            &r.exe
+        let named = if r.path.is_empty() { &r.exe } else { &r.path };
+        if self.elevated {
+            format!("{named} as administrator")
         } else {
-            &r.path
+            named.clone()
         }
+    }
+
+    /// The program as the questions and the agent's answers name it.
+    fn shown(&self) -> String {
+        shown_program(&self.request.exe, self.elevated)
     }
 
     /// What it does, as the log says it.
@@ -496,41 +586,71 @@ impl Pending {
     fn refuse(&self, why: Refusal) {
         let r = &self.request;
         self.reply
-            .send(json!({ "error": refusal_text(why, r.action, r.risky, &r.exe) }));
+            .send(json!({ "error": refusal_text(why, r.action, r.risky, &self.shown()) }));
     }
 }
 
-fn grant_key(session: &str, exe: &str) -> (String, String) {
-    (session.to_string(), exe.to_lowercase())
+/// A program's name with how it runs, when that is as administrator.
+pub(super) fn shown_program(exe: &str, elevated: bool) -> String {
+    if elevated {
+        format!("{exe} (as administrator)")
+    } else {
+        exe.to_string()
+    }
 }
 
-/// The exe name the list is matched against. A program reached through
-/// the helper is named "X.exe as administrator", which keeps its answered
-/// grant apart, but it is the same program on the list.
+/// The exe name the lists are matched against: the file of the path when
+/// the call gave one.
 pub(super) fn listed_name<'a>(exe: &'a str, path: &'a str) -> &'a str {
     match path.rsplit(['\\', '/']).next() {
         Some(name) if !name.trim().is_empty() => name,
-        _ => exe.strip_suffix(" as administrator").unwrap_or(exe),
+        _ => exe,
     }
 }
 
-/// The list as last read, and the file's stamp then, so it is read again
-/// only when it changes.
+/// Something the human is told about the lists, once.
+struct Notice {
+    title: &'static str,
+    text: String,
+    /// It also goes to the log, as a list that could not be read.
+    unreadable: bool,
+}
+
+/// The two lists as last read, and each file's stamp then, so they are
+/// read again only when they change.
 #[derive(Default)]
-struct Listed {
-    stamp: Option<(SystemTime, u64)>,
-    list: listed::List,
+struct Lists {
+    user_stamp: Option<(SystemTime, u64)>,
+    /// The user's list as it counts, see [`listed::user_list`].
+    user: listed::List,
+    admin_stamp: Option<(SystemTime, u64)>,
+    admin: listed::List,
+    /// Why the administrators' list is not used, as last told. While set
+    /// the file is read on every call: mending who may write it does not
+    /// change its stamp.
+    admin_refused: Option<String>,
+}
+
+fn stamp_of(file: &std::path::Path) -> Option<(SystemTime, u64)> {
+    std::fs::metadata(file)
+        .ok()
+        .map(|m| (m.modified().unwrap_or(SystemTime::UNIX_EPOCH), m.len()))
 }
 
 /// What the human allowed, and the calls waiting to be asked.
 #[derive(Default)]
 pub(super) struct Desktop {
-    grants: HashMap<(String, String), Grant>,
+    grants: HashMap<GrantKey, Grant>,
+    /// The questions refused of late, which are not asked again yet.
+    refused: Refusals<GrantKey>,
     waiting: VecDeque<Pending>,
-    list: Listed,
+    lists: Lists,
     /// The session, program and level each grant from the list was shown
     /// for, so it is shown once and not on every screenshot.
     told: HashSet<(String, String, Level)>,
+    /// The elevated programs the human was told the user's list no longer
+    /// covers.
+    moved: HashSet<String>,
     /// The session that last operated each program, by [`program_key`].
     drivers: HashMap<String, String>,
     /// The session and program of the question on screen.
@@ -538,47 +658,196 @@ pub(super) struct Desktop {
 }
 
 impl Desktop {
-    /// Reads the list again if its file changed. A list that can not be
-    /// read counts as empty, so the human is asked, and says why once per
-    /// version of the file.
-    fn refresh(&mut self) -> Option<String> {
-        let file = horadric_hooks::tasks::desktop_programs_file()?;
-        let stamp = std::fs::metadata(&file)
-            .ok()
-            .map(|m| (m.modified().unwrap_or(SystemTime::UNIX_EPOCH), m.len()));
-        if stamp == self.list.stamp {
+    /// Reads each list again if its file changed, and says what the human
+    /// should hear of it. A list that can not be read, or that a program
+    /// that is not elevated could have written, counts as empty, so the
+    /// human is asked.
+    fn refresh(&mut self) -> Vec<Notice> {
+        let mut notices = Vec::new();
+        if let Some(file) = horadric_hooks::tasks::desktop_programs_file() {
+            let stamp = stamp_of(&file);
+            if stamp != self.lists.user_stamp {
+                self.lists.user_stamp = stamp;
+                let at = |why: String| format!("{}: {why}", file.display());
+                let text = match std::fs::read_to_string(&file) {
+                    Ok(text) => Ok(text),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+                    Err(e) => Err(at(e.to_string())),
+                };
+                match text.and_then(|t| listed::parse(&t).map_err(at)) {
+                    Ok(read) => {
+                        let (list, misplaced) = listed::user_list(read);
+                        self.lists.user = list;
+                        if let Some(first) = misplaced.first() {
+                            notices.push(Notice {
+                                title: "Part of your list of desktop programs is no longer used",
+                                text: misplaced_text(first, misplaced.len()),
+                                unreadable: false,
+                            });
+                        }
+                    }
+                    Err(why) => {
+                        self.lists.user = listed::List::default();
+                        notices.push(Notice {
+                            title: "The list of allowed desktop programs can not be read",
+                            text: format!(
+                                "{why}. Horadric asks instead. `horadric desktop list` shows it."
+                            ),
+                            unreadable: true,
+                        });
+                    }
+                }
+            }
+        }
+        let stamp = desktop_admin::file().as_deref().and_then(stamp_of);
+        if stamp != self.lists.admin_stamp || self.lists.admin_refused.is_some() {
+            self.lists.admin_stamp = stamp;
+            let (list, refused) = match desktop_admin::read() {
+                desktop_admin::Read::List(list) => (list, None),
+                desktop_admin::Read::Missing => (listed::List::default(), None),
+                desktop_admin::Read::Refused(why) => (listed::List::default(), Some(why)),
+            };
+            self.lists.admin = list;
+            if let Some(why) = refused.as_ref().filter(|w| Some(*w) != self.lists.admin_refused.as_ref()) {
+                notices.push(Notice {
+                    title: "The administrators' list of desktop programs is not used",
+                    text: format!("{why}. Horadric asks instead."),
+                    unreadable: true,
+                });
+            }
+            self.lists.admin_refused = refused;
+        }
+        notices
+    }
+
+    /// How far the lists let the program of `p` in.
+    fn listed(&self, p: &Pending) -> listed::Listed {
+        let r = &p.request;
+        listed::level_for(
+            &self.lists.user.programs,
+            &self.lists.admin.programs,
+            &r.path,
+            listed_name(&r.exe, &r.path),
+            p.elevated,
+        )
+    }
+
+    /// How long a question waits for the human, in seconds: what the
+    /// administrators' list says, else the user's.
+    fn answer_within(&self) -> u64 {
+        listed::List {
+            programs: Vec::new(),
+            answer_within: self
+                .lists
+                .admin
+                .answer_within
+                .or(self.lists.user.answer_within),
+        }
+        .answer_within()
+    }
+}
+
+/// What the human is told of entries the user's list can no longer hold.
+fn misplaced_text(first: &listed::Misplaced, count: usize) -> String {
+    let more = match count {
+        1 => String::new(),
+        n => format!(" (and {} more, `horadric desktop list` shows each)", n - 1),
+    };
+    format!(
+        "{}{more}: any program can write the list in %APPDATA%, so it no longer covers programs \
+         that run as administrator or risky actions. Those are asked again until an administrator \
+         lists them, from an elevated shell: {}",
+        first.what, first.command
+    )
+}
+
+/// How a window's program stands to the app, as the app sees it itself.
+struct Seen {
+    /// The program runs above the app, or will not say how it runs. None
+    /// when the window is gone or was not named.
+    above: Option<bool>,
+    /// The window's AppUserModelID, asked for a host's window only.
+    app_id: Option<String>,
+}
+
+/// The integrity level of process `pid`, or of the app when none: what
+/// Windows walls input and UI Automation by.
+fn level_of(pid: Option<u32>) -> Option<u32> {
+    unsafe {
+        let process = match pid {
+            Some(id) => OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, id).ok()?,
+            None => GetCurrentProcess(),
+        };
+        let mut token = HANDLE::default();
+        let opened = OpenProcessToken(process, TOKEN_QUERY, &mut token);
+        if pid.is_some() {
+            let _ = CloseHandle(process);
+        }
+        opened.ok()?;
+        let mut len = 0;
+        let _ = GetTokenInformation(token, TokenIntegrityLevel, None, 0, &mut len);
+        // In u64s, so the label's pointer inside is aligned.
+        let mut buf = vec![0u64; (len as usize).div_ceil(8).max(1)];
+        let read = GetTokenInformation(
+            token,
+            TokenIntegrityLevel,
+            Some(buf.as_mut_ptr().cast()),
+            len,
+            &mut len,
+        );
+        let _ = CloseHandle(token);
+        read.ok()?;
+        let sid = (*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL)).Label.Sid;
+        let count = GetSidSubAuthorityCount(sid);
+        if count.is_null() || *count == 0 {
             return None;
         }
-        self.list.stamp = stamp;
-        let text = match stamp {
-            Some(_) => std::fs::read_to_string(&file).unwrap_or_default(),
-            None => String::new(),
+        let rid = GetSidSubAuthority(sid, u32::from(*count) - 1);
+        (!rid.is_null()).then(|| *rid)
+    }
+}
+
+/// Looks at the window a call names. The call's own word for how the
+/// program runs is the session's, and a session can send what it likes.
+fn seen_of(hwnd: isize, exe: &str) -> Seen {
+    let h = HWND(hwnd as *mut _);
+    let mut pid = 0u32;
+    if hwnd == 0 || !unsafe { IsWindow(Some(h)) }.as_bool() {
+        return Seen {
+            above: None,
+            app_id: None,
         };
-        match listed::parse(&text) {
-            Ok(list) => {
-                self.list.list = list;
-                None
-            }
-            Err(why) => {
-                self.list.list = listed::List::default();
-                Some(format!("{}: {why}", file.display()))
-            }
-        }
     }
+    unsafe { GetWindowThreadProcessId(h, Some(&mut pid)) };
+    let above = match (level_of(None), level_of(Some(pid))) {
+        (Some(me), Some(them)) => them > me,
+        // A program that will not say may be above, as the MCP process
+        // takes it too.
+        _ => true,
+    };
+    let app_id = listed::is_host(exe)
+        .then(|| unsafe { app_id_of(h) })
+        .flatten();
+    Seen {
+        above: Some(above),
+        app_id,
+    }
+}
 
-    fn entry_of(&self, r: &Request) -> Option<&Entry> {
-        let name = listed_name(&r.exe, &r.path);
-        listed::find(&self.list.list.programs, &r.path, name)
-    }
-
-    fn level_of(&self, r: &Request) -> Option<Level> {
-        self.entry_of(r).map(|e| e.level)
-    }
-
-    /// How long a question waits for the human, in seconds.
-    fn answer_within(&self) -> u64 {
-        self.list.list.answer_within()
-    }
+/// The AppUserModelID Windows keeps on a window, which for a packaged app
+/// shown by ApplicationFrameHost names the app.
+unsafe fn app_id_of(h: HWND) -> Option<String> {
+    let store: IPropertyStore = SHGetPropertyStoreForWindow(h).ok()?;
+    // PKEY_AppUserModel_ID.
+    let key = PROPERTYKEY {
+        fmtid: GUID::from_u128(0x9f4c2855_9f79_4b39_a8d0_e1d42de1d5f3),
+        pid: 5,
+    };
+    let value = store.GetValue(&key).ok()?;
+    let text = PropVariantToStringAlloc(&value).ok()?;
+    let id = text.to_string().ok();
+    CoTaskMemFree(Some(text.0 as *const core::ffi::c_void));
+    id.filter(|id| !id.trim().is_empty())
 }
 
 /// Adds a line to `desktop.log`. A log that can not be written loses the
@@ -630,6 +899,8 @@ thread_local! {
 }
 
 impl App {
+    /// A `desktop.` call from `horadric mcp`. The caller has shown the
+    /// session's key already, see [`App::browser_call`].
     pub(super) fn desktop_call(&mut self, call: BrowserCall) {
         let known = self
             .shared
@@ -655,20 +926,27 @@ impl App {
             Ok(r) => r,
             Err(e) => return call.reply.send(json!({ "error": e })),
         };
+        let seen = seen_of(request.hwnd, &request.exe);
         let pending = Pending {
             session: call.session,
+            elevated: request.administrator || seen.above == Some(true),
+            verified: seen.above == Some(true),
+            hosted: listed::hosted(
+                &request.exe,
+                seen.app_id.as_deref(),
+                &request.title,
+                request.hwnd,
+            ),
             request,
             reply: call.reply,
             since: Instant::now(),
         };
-        if let Some(why) = self.desktop.refresh() {
-            let name = self.name_of(&pending.session);
-            log(&name, Source::Unreadable, &why, "");
-            self.toasts.show(
-                Kind::Failed,
-                "The list of allowed desktop programs can not be read",
-                &format!("{why}. Horadric asks instead. `horadric desktop list` shows it."),
-            );
+        for notice in self.desktop.refresh() {
+            if notice.unreadable {
+                let name = self.name_of(&pending.session);
+                log(&name, Source::Unreadable, &notice.text, "");
+            }
+            self.toasts.show(Kind::Failed, notice.title, &notice.text);
         }
         if let Some(why) = self.held_by_another(&pending) {
             ghost::refused(
@@ -679,11 +957,43 @@ impl App {
             return pending.reply.send(json!({ "error": why }));
         }
         let asked = self.decision_for(&pending);
-        if let (Decision::Allow, held) = bypassed(asked, ghost::bypass()) {
-            return self.allow(pending, held);
+        match bypassed(asked, ghost::bypass(), pending.elevated) {
+            (Decision::Allow, held) => return self.allow(pending, held),
+            (Decision::Refuse(why), _) => return self.refuse(pending, why),
+            (ask, _) => {
+                if let Some(why) = self.not_asked(&pending, ask, true) {
+                    return self.refuse(pending, why);
+                }
+            }
         }
         self.desktop.waiting.push_back(pending);
         post(self.notify.0 as isize, WM_HORADRIC_DESKTOP, 0);
+    }
+
+    /// Why a question is not put to the human: the same one was refused,
+    /// or went unanswered, a moment ago, or (`arriving`, for a call just
+    /// come) too many of the session's questions wait already. Without
+    /// this a session could keep a question on the human's screen for as
+    /// long as it liked.
+    fn not_asked(&self, p: &Pending, ask: Decision, arriving: bool) -> Option<Refusal> {
+        let question = match ask {
+            Decision::AskRisky => listed::Question::Risky,
+            _ => listed::Question::Approve,
+        };
+        if let Some(left) = self
+            .desktop
+            .refused
+            .left(&p.key(), question, Instant::now())
+        {
+            return Some(Refusal::Held(question, left.as_secs()));
+        }
+        let waiting = self
+            .desktop
+            .waiting
+            .iter()
+            .filter(|w| w.session == p.session)
+            .count();
+        (arriving && waiting >= listed::MOST_WAITING).then_some(Refusal::Crowded)
     }
 
     /// A session's id and when it started, as the human reads them.
@@ -766,38 +1076,65 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// The pattern on the list that lets this risky call go ahead unasked,
-    /// in words, when the session may operate the program.
-    fn pre_approval(&self, p: &Pending, own: Grant) -> Option<String> {
+    /// The pattern on the administrators' list that lets this risky call
+    /// go ahead unasked, in words, when the session may operate the
+    /// program. The user's list holds none that count.
+    fn pre_approval(&self, p: &Pending, grant: Grant) -> Option<String> {
         let r = &p.request;
-        let entry = self.desktop.entry_of(r)?;
-        if !r.risky || effective(own, Some(entry.level)) != Grant::Operate {
+        if !r.risky || grant != Grant::Operate {
             return None;
         }
-        listed::pre_approved(entry, &r.act, &self.name_of(&p.session)).map(|a| a.describe())
+        listed::pre_approval(
+            &self.desktop.lists.admin.programs,
+            &r.path,
+            listed_name(&r.exe, &r.path),
+            p.elevated,
+            &r.act,
+        )
     }
 
     /// What becomes of a call with what the human answered and what the
-    /// list allows, before bypass. Going ahead on the list alone is shown
+    /// lists allow, before bypass. Going ahead on a list alone is shown
     /// once and logged, so the human can tell it was not asked; a risky
     /// action going ahead on a pre-approved pattern is logged every time.
     fn decision_for(&mut self, p: &Pending) -> Decision {
         let own = self.grant_of(p);
-        let level = self.desktop.level_of(&p.request);
+        let found = self.desktop.listed(p);
+        let level = found.level;
         let r = &p.request;
-        let pre = self.pre_approval(p, own);
-        let risky = r.risky && pre.is_none();
+        if let Some(command) = found.moved {
+            if self.desktop.moved.insert(p.program().to_lowercase()) {
+                self.toasts.show(
+                    Kind::Failed,
+                    "Your list no longer covers a program that runs as administrator",
+                    &format!(
+                        "{} runs as administrator, and any program can write the list in \
+                         %APPDATA%, so its entry there is not used and you are asked. To allow it \
+                         ahead of time, run from an elevated shell: {command}",
+                        program_name(listed_name(&r.exe, &r.path))
+                    ),
+                );
+            }
+        }
+        // Nothing that is not elevated can act in a program the app saw
+        // running above it, so what is risky there is asked by the
+        // elevated helper, which reads the window itself, and not twice.
+        let pre = match p.verified {
+            true => None,
+            false => self.pre_approval(p, effective(own, level)),
+        };
+        let risky = r.risky && pre.is_none() && !p.verified;
         let decision = decide(effective(own, level), r.action, risky);
         if let Some(pattern) = pre {
             let name = self.name_of(&p.session);
-            log(&name, Source::PreApproved(pattern), p.program(), &p.what());
+            log(&name, Source::PreApproved(pattern), &p.program(), &p.what());
         }
         if let Some(level) = level.filter(|_| by_the_list(own, level, r.action, risky)) {
             let told = (p.session.clone(), p.program().to_lowercase(), level);
             if self.desktop.told.insert(told) {
                 let name = self.name_of(&p.session);
-                let program = program_name(listed_name(&r.exe, &r.path));
-                log(&name, Source::List(level), p.program(), &p.what());
+                let program = shown_program(program_name(listed_name(&r.exe, &r.path)), p.elevated);
+                log(&name, Source::List(level), &p.program(), &p.what());
                 let may = match level {
                     Level::Look => "look at",
                     Level::Operate => "operate",
@@ -823,12 +1160,12 @@ impl App {
     fn allow(&mut self, p: Pending, unasked: bool) {
         if unasked {
             let name = self.name_of(&p.session);
-            log(&name, Source::Bypass, p.program(), &p.what());
+            log(&name, Source::Bypass, &p.program(), &p.what());
         }
-        let r = p.request;
         let name = self.name_of(&p.session);
         let ident = self.ident_of(&p.session);
-        let program = program_name(&r.exe).to_string();
+        let program = shown_program(program_name(&p.request.exe), p.elevated);
+        let r = p.request;
         if r.action == Action::Operate {
             self.desktop
                 .drivers
@@ -868,7 +1205,8 @@ impl App {
     }
 
     /// The next waiting call that needs the human, answering on the way
-    /// those that what was allowed since now covers.
+    /// those that what was allowed since now covers, and refusing those
+    /// whose question the human has just refused.
     fn next_question(&mut self) -> Option<Question> {
         while let Some(p) = self.desktop.waiting.pop_front() {
             if !p.reply.wanted() {
@@ -877,10 +1215,14 @@ impl App {
                 continue;
             }
             let asked = self.decision_for(&p);
-            match bypassed(asked, ghost::bypass()) {
+            match bypassed(asked, ghost::bypass(), p.elevated) {
                 (Decision::Allow, held) => self.allow(p, held),
                 (Decision::Refuse(why), _) => self.refuse(p, why),
                 (ask, _) => {
+                    if let Some(why) = self.not_asked(&p, ask, false) {
+                        self.refuse(p, why);
+                        continue;
+                    }
                     let r = &p.request;
                     self.desktop.asking = Some((p.session.clone(), program_key(&r.exe, &r.path)));
                     return Some(Question {
@@ -911,6 +1253,12 @@ impl App {
     fn answered(&mut self, mut q: Question, answer: Answer) -> Option<Question> {
         self.desktop.asking = None;
         let r = &q.pending.request;
+        let key = q.pending.key();
+        let question = if q.risky {
+            listed::Question::Risky
+        } else {
+            listed::Question::Approve
+        };
         let pressed = match pressed_of(answer, q.within) {
             Ok(pressed) => pressed,
             Err(why) => {
@@ -918,7 +1266,10 @@ impl App {
                     risky: q.risky,
                     secs: q.within,
                 };
-                log(&q.name, source, q.pending.program(), &q.pending.what());
+                log(&q.name, source, &q.pending.program(), &q.pending.what());
+                // Nobody is there: the next call hears so at once rather
+                // than waiting a minute each.
+                self.desktop.refused.note(&key, question, Instant::now());
                 self.refuse(q.pending, why);
                 return None;
             }
@@ -929,16 +1280,16 @@ impl App {
             log(
                 &q.name,
                 Source::Risky(done),
-                q.pending.program(),
+                &q.pending.program(),
                 &q.pending.what(),
             );
             decision
         } else {
-            // Only what the human answers is kept here. The list is read
-            // afresh on every call, so taking a program off it takes
+            // Only what the human answers is kept here. The lists are read
+            // afresh on every call, so taking a program off one takes
             // effect at once.
             let (grant, decision) = approved(self.grant_of(&q.pending), r.action, r.risky, pressed);
-            self.desktop.grants.insert(q.pending.key(), grant);
+            self.desktop.grants.insert(key.clone(), grant);
             let level = match pressed {
                 Some(0) => Some(Level::Operate),
                 Some(1) => Some(Level::Look),
@@ -947,15 +1298,28 @@ impl App {
             log(
                 &q.name,
                 Source::Asked(level),
-                q.pending.program(),
+                &q.pending.program(),
                 &q.pending.what(),
             );
             decision
         };
         match decision {
+            Decision::Refuse(Refusal::Refused | Refusal::OnlyLook) => {
+                self.desktop.refused.note(&key, question, Instant::now());
+            }
+            _ => self.desktop.refused.clear(&key, question),
+        }
+        match decision {
             Decision::Allow => self.allow(q.pending, false),
             Decision::Refuse(why) => self.refuse(q.pending, why),
+            // The helper asks about what is risky in a program the app
+            // saw running above it.
+            Decision::AskRisky if q.pending.verified => self.allow(q.pending, false),
             Decision::AskRisky => {
+                if let Some(why) = self.not_asked(&q.pending, Decision::AskRisky, false) {
+                    self.refuse(q.pending, why);
+                    return None;
+                }
                 q.risky = true;
                 let r = &q.pending.request;
                 self.desktop.asking =
@@ -1039,7 +1403,8 @@ pub(super) fn union(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
 
 fn dialog(q: &Question) -> OwnedDialog {
     let r = &q.pending.request;
-    let program = program_name(&r.exe);
+    let elevated = q.pending.elevated;
+    let program = &shown_program(program_name(&r.exe), elevated);
     let window = match r.title.trim() {
         "" => String::new(),
         t => format!(" in the window \"{t}\""),
@@ -1050,15 +1415,15 @@ fn dialog(q: &Question) -> OwnedDialog {
             title: format!("{} wants to change something in {program}", q.name),
             text: format!(
                 "It wants to {}{window}.\n\nSession {}.\n\nThis is asked every time, even with \
-                 {program} allowed, unless this very action is pre-approved on the list \
-                 (horadric desktop approve). Unanswered after {} s, the session is told nobody \
-                 answered.",
+                 {program} allowed, unless an administrator pre-approved this very action \
+                 (horadric desktop approve, from an elevated shell). Unanswered after {} s, the \
+                 session is told nobody answered.",
                 what_or(&q.pending.what(), "act"),
                 q.ident,
                 q.within
             ),
             buttons: &RISKY,
-            default: 1,
+            default: RISKY_DEFAULT,
         }
     } else {
         OwnedDialog {
@@ -1067,20 +1432,33 @@ fn dialog(q: &Question) -> OwnedDialog {
             text: format!(
                 "First it wants to {}{window}.\n\nSession {}.\n\nLooking is screenshots and reading the \
                  window. Operating is clicking and typing in it, and in its dialogs. What you \
-                 allow lasts until Horadric restarts. To allow it for every session ahead of \
-                 time, list it: horadric desktop allow \"{}\" operate (or look). Unanswered \
+                 allow lasts until Horadric restarts.{} To allow it for every session ahead of \
+                 time, list it: horadric desktop allow {}\"{}\" operate (or look){}. Unanswered \
                  after {} s, the session is told nobody answered.",
                 what_or(&r.what, "look at it"),
                 q.ident,
+                if elevated {
+                    " It runs as administrator, so Horadric's helper asks you once more itself, \
+                     in a window of its own, before the first click or key and before each risky \
+                     action."
+                } else {
+                    ""
+                },
+                if elevated { "--elevated " } else { "" },
                 if r.path.is_empty() {
                     listed_name(&r.exe, "")
                 } else {
                     &r.path
                 },
+                if elevated {
+                    ", from an elevated shell"
+                } else {
+                    ""
+                },
                 q.within
             ),
             buttons: &APPROVE,
-            default: approve_default(r.action),
+            default: APPROVE_DEFAULT,
         }
     }
 }
@@ -1154,21 +1532,33 @@ mod tests {
     }
 
     #[test]
-    fn bypass_lets_a_question_through_held_and_leaves_the_rest() {
-        for ask in [Decision::AskApprove, Decision::AskRisky] {
-            assert_eq!(bypassed(ask, true), (Decision::Allow, true));
-            assert_eq!(bypassed(ask, false), (ask, false));
+    fn bypass_skips_only_the_risky_question_of_a_program_already_operated() {
+        let risky = Decision::AskRisky;
+        assert_eq!(bypassed(risky, true, false), (Decision::Allow, true));
+        assert_eq!(bypassed(risky, false, false), (risky, false));
+        // Never for a program that runs as administrator.
+        assert_eq!(bypassed(risky, true, true), (risky, false));
+        // It never lets a session into a program.
+        let approve = Decision::AskApprove;
+        for elevated in [true, false] {
+            assert_eq!(bypassed(approve, true, elevated), (approve, false));
         }
         for bypass in [true, false] {
-            assert_eq!(bypassed(Decision::Allow, bypass), (Decision::Allow, false));
+            assert_eq!(
+                bypassed(Decision::Allow, bypass, false),
+                (Decision::Allow, false)
+            );
             for why in [Refusal::Refused, Refusal::OnlyLook] {
                 let no = Decision::Refuse(why);
-                assert_eq!(bypassed(no, bypass), (no, false));
+                assert_eq!(bypassed(no, bypass, false), (no, false));
             }
         }
-        // A risky click in a program never approved goes through bypass.
-        let asked = decide(Grant::None, Action::Operate, true);
-        assert_eq!(bypassed(asked, true), (Decision::Allow, true));
+        // A risky click in a program never approved is asked about the
+        // program first, bypass or not.
+        for grant in [Grant::None, Grant::See] {
+            let asked = decide(grant, Action::Operate, true);
+            assert_eq!(bypassed(asked, true, false), (Decision::AskApprove, false));
+        }
     }
 
     #[test]
@@ -1196,9 +1586,8 @@ mod tests {
         assert!(said.contains("id fix-plc-3721, started 10:01"));
         assert!(said.contains("still at work"));
         assert!(busy_text("a", "b", "c", true).contains("waiting for the human"));
-        // The same program, run as administrator or not.
         assert_eq!(
-            program_key("SysmacStudio.exe as administrator", ""),
+            program_key("SysmacStudio.exe", ""),
             program_key("SYSMACSTUDIO.EXE", r"C:\O\SysmacStudio.exe")
         );
     }
@@ -1243,19 +1632,19 @@ mod tests {
     }
 
     #[test]
-    fn the_list_is_matched_on_the_plain_exe_name() {
+    fn the_list_is_matched_on_the_file_of_the_path() {
         assert_eq!(
-            listed_name(
-                "SysmacStudio.exe as administrator",
-                r"C:\O\SysmacStudio.exe"
-            ),
-            "SysmacStudio.exe"
-        );
-        assert_eq!(
-            listed_name("SysmacStudio.exe as administrator", ""),
+            listed_name("other.exe", r"C:\O\SysmacStudio.exe"),
             "SysmacStudio.exe"
         );
         assert_eq!(listed_name("a.exe", ""), "a.exe");
+        // A name is only a name: nothing in it says how a program runs.
+        assert_eq!(
+            listed_name("a.exe as administrator", ""),
+            "a.exe as administrator"
+        );
+        assert_eq!(shown_program("a.exe", true), "a.exe (as administrator)");
+        assert_eq!(shown_program("a.exe", false), "a.exe");
     }
 
     #[test]
@@ -1308,9 +1697,18 @@ mod tests {
     }
 
     #[test]
-    fn the_default_button_is_the_least_that_does_it() {
-        assert_eq!(APPROVE[approve_default(Action::See)], "Only let it look");
-        assert_eq!(APPROVE[approve_default(Action::Operate)], "Let it operate");
+    fn the_default_button_of_every_question_refuses() {
+        assert_eq!(APPROVE[APPROVE_DEFAULT], "Refuse");
+        assert_eq!(RISKY[RISKY_DEFAULT], "Refuse");
+    }
+
+    #[test]
+    fn a_question_held_back_says_for_how_long() {
+        let held = Refusal::Held(listed::Question::Approve, 45);
+        let told = refusal_text(held, Action::Operate, false, "a.exe");
+        assert!(told.contains("another 45 s") && told.contains("a.exe"), "{told}");
+        assert!(refusal_text(Refusal::Crowded, Action::See, false, "a.exe").contains("already wait"));
+        assert_ne!(refusal_word(held), refusal_word(Refusal::Crowded));
     }
 
     #[test]
@@ -1321,6 +1719,14 @@ mod tests {
         });
         let (title, text) = elevating_notice("plc fix", &body);
         assert!(title.contains("administrator rights"), "{title}");
+        // What the helper really does, and what it can not promise.
+        assert!(text.contains("asks you itself") && text.contains("can not be limited"));
+        assert!(!text.contains("approve each program and risky action here"));
+        let mut with_path = body.clone();
+        with_path["window"]["path"] = json!(r"C:\O\SysmacStudio.exe");
+        assert!(elevating_notice("s", &with_path)
+            .1
+            .contains(r"for that one program (C:\O\SysmacStudio.exe)"));
         assert!(
             text.starts_with("plc fix wants to reach SysmacStudio, which runs as administrator"),
             "{text}"
@@ -1345,32 +1751,31 @@ mod tests {
     }
 
     #[test]
-    fn grants_are_kept_by_exe_whatever_its_case() {
-        assert_eq!(
-            grant_key("s1", "Sysmac Studio.exe"),
-            grant_key("s1", "SYSMAC STUDIO.EXE")
-        );
-        assert_ne!(
-            grant_key("s1", "Sysmac Studio.exe"),
-            grant_key("s2", "Sysmac Studio.exe")
-        );
+    fn a_call_s_word_for_administrator_is_read_as_a_field() {
+        let mut body = json!({
+            "op": "desktop.allow",
+            "window": {"exe": "a.exe as administrator"},
+            "action": "see",
+        });
+        // The name says nothing.
+        assert!(!parse(&body).unwrap().administrator);
+        body["administrator"] = json!(true);
+        assert!(parse(&body).unwrap().administrator);
+        body["administrator"] = json!("yes");
+        assert!(!parse(&body).unwrap().administrator);
     }
 
     #[test]
     fn a_refusal_tells_the_agent_what_was_refused() {
         let exe = "Sysmac Studio.exe";
-        assert_eq!(
-            refusal_text(Refusal::Refused, Action::Operate, false, exe),
-            "the human refused operating Sysmac Studio.exe"
-        );
-        assert_eq!(
-            refusal_text(Refusal::Refused, Action::See, false, exe),
-            "the human refused letting you see Sysmac Studio.exe"
-        );
-        assert_eq!(
-            refusal_text(Refusal::Refused, Action::Operate, true, exe),
-            "the human refused this change in Sysmac Studio.exe"
-        );
+        let said = |risky, action| refusal_text(Refusal::Refused, action, risky, exe);
+        assert!(said(false, Action::Operate)
+            .starts_with("the human refused operating Sysmac Studio.exe. They are not asked"));
+        assert!(said(false, Action::See)
+            .starts_with("the human refused letting you see Sysmac Studio.exe. "));
+        assert!(said(true, Action::Operate)
+            .starts_with("the human refused this change in Sysmac Studio.exe. "));
+        assert!(said(true, Action::Operate).contains("120 s"));
         assert!(refusal_text(Refusal::OnlyLook, Action::Operate, false, exe)
             .starts_with("the human allowed only looking at Sysmac Studio.exe"));
     }
@@ -1423,6 +1828,7 @@ mod tests {
                 point: Some((-1200, 340)),
                 reason: "Confirm the transfer the human asked for.".into(),
                 act: Act::default(),
+                administrator: false,
             })
         );
     }

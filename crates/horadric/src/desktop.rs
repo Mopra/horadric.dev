@@ -77,8 +77,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::desktop_helper::{
-    as_administrator, elevating_body, held_text, hold_left, still_asking_text, Helper, HelperStart,
-    Setback, Starting, ANNOUNCE_PAUSE, ASK_AGAIN_WAIT, ASK_WAIT, PEEK,
+    as_administrator, asking_other_text, elevating_body, held_text, hold_left, same_program,
+    still_asking_text, switch_left, switch_text, unbindable, Helper, HelperStart, Setback,
+    Starting, ANNOUNCE_PAUSE, ASK_AGAIN_WAIT, ASK_WAIT, PEEK,
 };
 use crate::mcp::text;
 use crate::watch::{self, changes_part, changes_text, digest, verdict, Until};
@@ -2647,7 +2648,8 @@ impl Desktop {
         self.helper_for(w, app)?;
         let helper = self.helper.as_mut().expect("started just above");
         // A grant for a program does not cover the same program running as
-        // administrator: the human is asked about that one by itself.
+        // administrator: the app keeps that one apart by this mark, and
+        // the helper asks the human about it itself.
         let mut marked = |body: Value| app(as_administrator(body));
         let answer = helper.call(name, args, &mut marked, settle);
         answer.map_err(|why| {
@@ -2665,24 +2667,53 @@ impl Desktop {
         w: &Window,
         app: &mut A,
     ) -> Result<(), Unreached> {
-        if self.helper.is_some() {
+        // A helper acts in one program, named by its file when Windows is
+        // asked to start it. A window whose file Windows will not tell has
+        // nothing to bind a helper to.
+        if let Some(why) = unbindable(&w.path) {
+            return Err(Unreached::Walled(why));
+        }
+        if self.helper.as_ref().is_some_and(|h| h.serves(&w.path)) {
             return Ok(());
+        }
+        if let Some(other) = self
+            .starting
+            .as_ref()
+            .filter(|s| !same_program(&s.program, &w.path))
+        {
+            return Err(Unreached::Stop(asking_other_text(
+                &other.program,
+                &program_of(w),
+            )));
         }
         let most = if self.starting.is_some() {
             ASK_AGAIN_WAIT
         } else {
+            let since_asked = self.asked.map_or(Duration::MAX, |a| a.elapsed());
             if let Some((setback, why, at)) = &self.setback {
-                let since_asked = self.asked.map_or(Duration::MAX, |a| a.elapsed());
                 if let Some(left) = hold_left(*setback, at.elapsed(), since_asked) {
                     return Err(Unreached::Walled(held_text(*setback, why, left)));
                 }
+            }
+            // The helper there is serves another program, and gives way:
+            // dropping it ends it. Not so often that Windows asks the
+            // human at every turn between two programs.
+            if let Some(other) = self.helper.as_ref() {
+                if let Some(left) = switch_left(since_asked) {
+                    return Err(Unreached::Walled(switch_text(
+                        other.program(),
+                        &program_of(w),
+                        left,
+                    )));
+                }
+                self.helper = None;
             }
             // The human sees why Windows asks before it does; an app from
             // before this word ignores it.
             let _ = app(elevating_body(window_json(w)));
             thread::sleep(ANNOUNCE_PAUSE);
             self.asked = Some(Instant::now());
-            self.starting = Some(Starting::begin());
+            self.starting = Some(Starting::begin(&w.path));
             ASK_WAIT
         };
         let starting = self.starting.as_ref().expect("set just above");

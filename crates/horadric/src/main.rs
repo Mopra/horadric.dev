@@ -135,10 +135,17 @@ Usage:
   horadric desktop list|allow PROGRAM look|operate|deny PROGRAM|log [N]
                                The desktop programs every session may use without
                                being asked (risky actions are asked all the same),
-                               and the log of grants and answers
-  horadric desktop approve PROGRAM click|type|press NAME|KEY [--window W] ...
-                               Pre-approve one named risky action in a listed
-                               program (unapprove PROGRAM N takes it off)
+                               and the log of grants and answers. Not from inside a
+                               session: the human runs these
+  horadric desktop allow --elevated PROGRAM look|operate
+                               The same for a program that runs as administrator, on
+                               the administrators' list in %ProgramData%\\Horadric.
+                               Needs an elevated shell, as approve does
+  horadric desktop approve [--elevated] PROGRAM click|type|press NAME|KEY [--window W] ...
+                               Pre-approve one named risky action in a program on the
+                               administrators' list (allow --admin PROGRAM operate puts
+                               one there that is not elevated; unapprove PROGRAM N
+                               takes an action off)
   horadric backup now [--folder DIR]
                                Back the memory and the lore up, encrypted, into
                                DIR\\Horadric backup\\<this PC>; the folder is remembered
