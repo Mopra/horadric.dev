@@ -930,6 +930,9 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             {
                 ghost::turn_ended(&target);
             }
+            // What a session runs in a shell while it drives a desktop
+            // program is listed on the Thinking plate, subagents' too.
+            ghost::shell_heard(&target, &t.event);
             // A turn's end is when its keeper is sent the snapshot.
             if t.event.hook_event_name == "Stop" && t.event.agent_id.is_none() {
                 keeping::turn_ended(&target, &t.event.transcript_path);
