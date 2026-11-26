@@ -2,4 +2,5 @@
 
 pub mod identity;
 pub mod secret;
+pub mod split;
 pub mod web;

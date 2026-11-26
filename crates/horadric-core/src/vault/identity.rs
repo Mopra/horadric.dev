@@ -21,6 +21,13 @@ pub struct Identity {
     /// Folders whose projects are this identity's unless they pick.
     #[serde(default)]
     pub claims: Vec<String>,
+    /// The sites its projects signed in to differently, for a group made
+    /// by splitting a site off in the browser pane; None for one made by
+    /// hand, whose browser and tools are its own whole. See [`split`].
+    ///
+    /// [`split`]: super::split
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sites: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,7 +109,13 @@ pub const MACHINE_TOKENS: [&str; 5] = [
 ];
 
 /// The variables [`tool_env`] points a tool at an identity's folder with.
-pub const TOOL_VARS: [&str; 3] = ["GH_CONFIG_DIR", "NPM_CONFIG_USERCONFIG", "XDG_DATA_HOME"];
+pub const TOOL_VARS: [&str; 5] = [
+    "GH_CONFIG_DIR",
+    "NPM_CONFIG_USERCONFIG",
+    "XDG_DATA_HOME",
+    "AZURE_CONFIG_DIR",
+    "CLOUDSDK_CONFIG",
+];
 
 /// Whether `name` is a variable an identity's session is given. One left
 /// over in a process started from such a session (a `reload`, a dev
@@ -256,6 +269,9 @@ pub fn git_env(git: &Git) -> Vec<(String, String)> {
 
 /// What a session of identity `id`, its folder `dir`, sets and removes.
 pub fn env(id: &Identity, dir: &Path) -> (Vec<(String, String)>, Vec<String>) {
+    if let Some(sites) = &id.sites {
+        return super::split::env(id, sites, dir);
+    }
     let mut set = Vec::new();
     for tool in Tool::ALL.into_iter().filter(|t| id.tools.contains(t)) {
         set.extend(tool_env(tool, dir));
