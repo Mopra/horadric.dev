@@ -11,10 +11,13 @@
 //!
 //! A question about another program, such as a session's desktop action,
 //! is put aside instead ([`show_aside`]): in a corner of the screen clear
-//! of that program's windows, below whatever is always on top, without
-//! taking the focus or the mouse, and it stays until a button is pressed
-//! or its time runs out. The program and its own dialogs stay readable
-//! and clickable meanwhile, by the human and by the session's tools.
+//! of that program's windows, without taking the focus or the mouse, and
+//! it stays until a button is pressed or its time runs out. The program
+//! and its own dialogs stay readable and clickable meanwhile, by the
+//! human and by the session's tools. It is always on top while it waits:
+//! it has no taskbar button and is not in Alt+Tab, so one that the
+//! program came to cover could not be found again, and for a maximised
+//! program every corner is over the program.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -39,9 +42,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
-    GetForegroundWindow, GetMessageW, GetWindowLongPtrW, IsWindow, LoadCursorW, PostQuitMessage,
+    GetForegroundWindow, GetMessageW, GetWindowLongPtrW, IsWindow, LoadCursorW, PostMessageW,
+    PostQuitMessage,
     RegisterClassW, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    TranslateMessage, CREATESTRUCTW, GWLP_USERDATA, HWND_TOP, IDC_ARROW, MSG, SWP_NOACTIVATE,
+    TranslateMessage, CREATESTRUCTW, GWLP_USERDATA, HWND_TOPMOST, IDC_ARROW, MSG, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, WA_INACTIVE, WM_ACTIVATE,
     WM_CAPTURECHANGED, WM_CLOSE, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
     WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN, WM_TIMER,
@@ -144,6 +148,56 @@ pub fn show_aside(gpu: &Gpu, metrics: &Metrics, d: &Dialog, aside: &Aside) -> An
         None if popup.no_answer.get() => Answer::Unanswered,
         None => Answer::Dismissed,
     }
+}
+
+thread_local! {
+    /// The question on screen that [`release_aside`] may put away.
+    static RELEASABLE: Cell<Option<HWND>> = const { Cell::new(None) };
+    /// It was put away that way.
+    static RELEASED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// As [`show_aside`], for a caller that can decide the call again: None
+/// when [`release_aside`] put the question away unanswered, which is
+/// neither a yes nor a no. The caller then decides the call it asked
+/// about afresh, as if it had just come.
+// Nothing asks through it until the desktop questions do.
+#[allow(dead_code)]
+pub fn show_aside_releasable(
+    gpu: &Gpu,
+    metrics: &Metrics,
+    d: &Dialog,
+    aside: &Aside,
+) -> Option<Answer> {
+    let Ok(popup) = Popup::open(gpu, metrics, d, Some(aside))
+        .map_err(|e| eprintln!("horadric: cannot ask \"{}\": {e}", d.title))
+    else {
+        return Some(Answer::Unanswered);
+    };
+    RELEASED.set(false);
+    RELEASABLE.set(Some(popup.hwnd.get()));
+    let pressed = run(&popup, d);
+    RELEASABLE.set(None);
+    let released = RELEASED.replace(false);
+    match pressed {
+        Some(i) => Some(Answer::Pressed(i)),
+        None if released => None,
+        None if popup.no_answer.get() => Some(Answer::Unanswered),
+        None => Some(Answer::Dismissed),
+    }
+}
+
+/// Puts away the question [`show_aside_releasable`] has on screen, as
+/// neither answered nor refused: what it asked is no longer a question,
+/// since the human turned bypass on. False when no such question shows,
+/// and one put with [`show_aside`] is left alone, since its caller would
+/// read its going as a no.
+pub fn release_aside() -> bool {
+    let Some(hwnd) = RELEASABLE.get() else {
+        return false;
+    };
+    RELEASED.set(true);
+    unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) }.is_ok()
 }
 
 /// Runs the popup's loop until it is answered, and takes it down.
@@ -296,13 +350,11 @@ impl<'a> Popup<'a> {
             aside: aside.is_some(),
             no_answer: Cell::new(false),
         });
-        // Aside, it is not always on top: it must never cover the program
-        // it asks about, nor that program's dialogs.
-        let ex = if aside.is_some() {
-            WS_EX_TOOLWINDOW
-        } else {
-            WS_EX_TOOLWINDOW | WS_EX_TOPMOST
-        };
+        // Aside too it is always on top: its corner keeps it off the
+        // program it asks about where the screen allows, and one the
+        // program covered could not be brought back, having neither a
+        // taskbar button nor a place in Alt+Tab.
+        let ex = WS_EX_TOOLWINDOW | WS_EX_TOPMOST;
         let title: Vec<u16> = d.title.encode_utf16().chain([0]).collect();
         unsafe {
             // Born where it shows and at its size: a window that starts
@@ -333,13 +385,13 @@ impl<'a> Popup<'a> {
             appear::begin(hwnd, appear::DIALOG, (appear::RISE * s).round() as i32);
             match aside {
                 Some(a) => {
-                    // In front of the windows open now, but without the
-                    // focus, so keys and clicks meant for the program
-                    // still reach it.
+                    // In front of every window, but without the focus,
+                    // so keys and clicks meant for the program still
+                    // reach it.
                     let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                     let _ = SetWindowPos(
                         hwnd,
-                        Some(HWND_TOP),
+                        Some(HWND_TOPMOST),
                         0,
                         0,
                         0,
