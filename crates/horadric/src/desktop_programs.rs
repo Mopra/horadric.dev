@@ -1,4 +1,4 @@
-//! `horadric desktop allow|deny|approve|unapprove|list|log`: the two lists
+//! `horadric takeover allow|deny|approve|unapprove|list|log`: the two lists
 //! of desktop programs a session may look at or operate without the
 //! approval question, and the risky actions in them said yes to ahead of
 //! time. The running app reads a file again whenever it changes, so an
@@ -31,27 +31,27 @@ pub(crate) mod desktop_admin;
 use desktop_admin::Read;
 
 const USAGE: &str = "\
-usage: horadric desktop list                        Both lists, and where the files are
-       horadric desktop allow PROGRAM look|operate  Let every session in without asking
+usage: horadric takeover list                        Both lists, and where the files are
+       horadric takeover allow PROGRAM look|operate  Let every session in without asking
                                                     (your list: programs that do not run
                                                     as administrator)
-       horadric desktop allow --elevated PROGRAM look|operate
+       horadric takeover allow --elevated PROGRAM look|operate
                                                     The same for PROGRAM run as
                                                     administrator (administrators' list)
-       horadric desktop allow --admin PROGRAM operate
+       horadric takeover allow --admin PROGRAM operate
                                                     PROGRAM, not run as administrator, on
                                                     the administrators' list, so risky
                                                     actions in it can be pre-approved
-       horadric desktop deny [--elevated|--admin] PROGRAM
+       horadric takeover deny [--elevated|--admin] PROGRAM
                                                     Take it off that list
-       horadric desktop approve [--elevated] PROGRAM click|type NAME [--window W]
-                                [--control C] [--text T]
-       horadric desktop approve [--elevated] PROGRAM press KEY [--window W] [--text T]
+       horadric takeover approve [--elevated] PROGRAM click|type NAME [--window W]
+                                 [--control C] [--text T]
+       horadric takeover approve [--elevated] PROGRAM press KEY [--window W] [--text T]
                                                     Pre-approve one risky action, so it is
                                                     done without asking and logged
-       horadric desktop unapprove [--elevated] PROGRAM N
+       horadric takeover unapprove [--elevated] PROGRAM N
                                                     Take the Nth pre-approved action off
-       horadric desktop log [--elevated] [N]        The last N grants and answers (default
+       horadric takeover log [--elevated] [N]       The last N grants and answers (default
                                                     20); --elevated for the helper's own log
 
 PROGRAM is the exe's full path (only that install), or its exe name (any
@@ -158,7 +158,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             })?;
             match gone {
                 0 => Err(format!(
-                    "{} is not on that list; `horadric desktop list` shows both",
+                    "{} is not on that list; `horadric takeover list` shows both",
                     program.trim()
                 )),
                 n => {
@@ -185,7 +185,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             println!("Pre-approved in {on}: {said}.");
             println!(
                 "Done without asking from the next call, and logged as pre-approved. \
-                 `horadric desktop list` numbers it, for unapprove."
+                 `horadric takeover list` numbers it, for unapprove."
             );
             Ok(())
         }
@@ -360,7 +360,7 @@ fn list() -> Result<(), String> {
         }
         println!(
             "  (a pre-approved action needs its program on the administrators' list at operate \
-             first: horadric desktop allow --admin PROGRAM operate, or --elevated)"
+             first: horadric takeover allow --admin PROGRAM operate, or --elevated)"
         );
     }
     println!();

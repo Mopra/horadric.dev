@@ -4,7 +4,7 @@
 //! elevated program and drops the input it sends there. Some programs,
 //! Sysmac Studio among them, restart themselves as administrator however
 //! they are started, so the user can not simply run them without. For a
-//! window like that `horadric mcp` starts `horadric desktop-helper` as
+//! window like that `horadric mcp` starts `horadric takeover-helper` as
 //! administrator (Windows asks the user, unless its settings elevate
 //! without asking) and hands it the whole desktop call over a named pipe.
 //!
@@ -295,7 +295,7 @@ pub fn elevating_body(window: Value) -> Value {
 fn helper_exe() -> Result<std::path::PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     // A test binary sits in target\<profile>\deps, beside no
-    // `desktop-helper` command, so the by hand tests use the built one.
+    // `takeover-helper` command, so the by hand tests use the built one.
     #[cfg(test)]
     let exe = exe
         .parent()
@@ -581,7 +581,7 @@ impl Helper {
         // human under "Show more details" before the yes, and which is all
         // the helper will ever act in. No path holds a quote, so quoting
         // it is enough.
-        let params = HSTRING::from(format!("desktop-helper {name} {me} \"{}\"", program.trim()));
+        let params = HSTRING::from(format!("takeover-helper {name} {me} \"{}\"", program.trim()));
         let verb = HSTRING::from("runas");
         let mut info = SHELLEXECUTEINFOW {
             cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
@@ -736,7 +736,7 @@ impl Helper {
     }
 }
 
-/// `horadric desktop-helper <pipe> <pid> <program>`: serves desktop calls
+/// `horadric takeover-helper <pipe> <pid> <program>`: serves desktop calls
 /// from the MCP process `pid`, in the windows of `program` alone, until
 /// the session closes the pipe.
 pub fn run(args: &[String]) -> Result<(), String> {
@@ -746,7 +746,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             pid.parse::<u32>().map_err(|e| e.to_string())?,
             program.trim().to_string(),
         ),
-        _ => return Err("usage: horadric desktop-helper <pipe> <pid> <program's full path>".into()),
+        _ => return Err("usage: horadric takeover-helper <pipe> <pid> <program's full path>".into()),
     };
     if !name.starts_with(r"\\.\pipe\horadric-desktop-") {
         return Err("not a desktop helper pipe".into());
@@ -1173,7 +1173,7 @@ impl Gate {
                      nothing was done, and it is not asked again for {} s. The helper's questions \
                      are answered with the mouse at this machine. If this is safe to do without \
                      asking, an administrator can list it from an elevated shell (horadric \
-                     desktop allow --elevated, horadric desktop approve --elevated)",
+                     desktop allow --elevated, horadric takeover approve --elevated)",
                     listed::REFUSED_FOR.as_secs()
                 )),
             ),

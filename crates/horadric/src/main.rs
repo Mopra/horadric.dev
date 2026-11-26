@@ -132,16 +132,17 @@ Usage:
                                label and steps, and why any does not parse
   horadric runeword cast NAME    Cast that stone of this project's Runetome, in a session
                                of its own when it needs one
-  horadric desktop list|allow PROGRAM look|operate|deny PROGRAM|log [N]
-                               The desktop programs every session may use without
-                               being asked (risky actions are asked all the same),
+  horadric takeover list|allow PROGRAM look|operate|deny PROGRAM|log [N]
+                               The programs on your own desktop every session may take
+                               over without being asked (risky actions are asked all
+                               the same),
                                and the log of grants and answers. Not from inside a
                                session: the human runs these
-  horadric desktop allow --elevated PROGRAM look|operate
+  horadric takeover allow --elevated PROGRAM look|operate
                                The same for a program that runs as administrator, on
                                the administrators' list in %ProgramData%\\Horadric.
                                Needs an elevated shell, as approve does
-  horadric desktop approve [--elevated] PROGRAM click|type|press NAME|KEY [--window W] ...
+  horadric takeover approve [--elevated] PROGRAM click|type|press NAME|KEY [--window W] ...
                                Pre-approve one named risky action in a program on the
                                administrators' list (allow --admin PROGRAM operate puts
                                one there that is not elevated; unapprove PROGRAM N
@@ -346,10 +347,12 @@ fn main() -> ExitCode {
         Some("sky") => lore::sky(),
         #[cfg(windows)]
         Some("backup") => backup::run(&args[1..]),
+        // The names these were first shipped under stay, for the scripts
+        // and notes that have them.
         #[cfg(windows)]
-        Some("desktop-helper") => desktop_helper::run(&args[1..]),
+        Some("takeover-helper" | "desktop-helper") => desktop_helper::run(&args[1..]),
         #[cfg(windows)]
-        Some("desktop") => desktop_programs::run(&args[1..]),
+        Some("takeover" | "desktop") => desktop_programs::run(&args[1..]),
         #[cfg(not(target_os = "linux"))]
         Some("swap") => reload::swap(&args[1..]),
         Some("install") => install_command(),

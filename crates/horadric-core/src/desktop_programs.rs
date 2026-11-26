@@ -1,7 +1,7 @@
 //! The desktop programs the human allows ahead of time, so a session can
 //! look at or operate them without the approval question each new session
 //! would otherwise ask. There are two lists of the same form, both named
-//! `desktop-programs.json`, edited with `horadric desktop
+//! `desktop-programs.json`, edited with `horadric takeover
 //! allow|deny|approve|list`.
 //!
 //! The one beside the app's state (`%APPDATA%\Horadric`) is the user's. Any
@@ -307,7 +307,7 @@ impl Approval {
     /// The command that pre-approves this for `program`, as typed in an
     /// elevated shell.
     pub fn command(&self, program: &str, elevated: bool) -> String {
-        let mut said = String::from("horadric desktop approve");
+        let mut said = String::from("horadric takeover approve");
         if elevated {
             said.push_str(" --elevated");
         }
@@ -632,7 +632,7 @@ pub fn allow(
             if level != Level::Operate && !e.pre_approved.is_empty() {
                 return Err(format!(
                     "{} has pre-approved actions, which need operate; take them off first \
-                     (horadric desktop unapprove)",
+                     (horadric takeover unapprove)",
                     e.program
                 ));
             }
@@ -670,7 +670,7 @@ pub fn approve(
         .find(|e| e.elevated == elevated && same(&e.program, program))
         .ok_or_else(|| {
             format!(
-                "{} is not on the administrators' list; allow it there first: horadric desktop \
+                "{} is not on the administrators' list; allow it there first: horadric takeover \
                  allow {} \"{}\" operate",
                 program.trim(),
                 if elevated { "--elevated" } else { "--admin" },
@@ -703,7 +703,7 @@ pub fn unapprove(
         .ok_or_else(|| format!("{} is not on the list", program.trim()))?;
     if n == 0 || n > entry.pre_approved.len() {
         return Err(format!(
-            "{} has {} pre-approved action(s); `horadric desktop list` numbers them",
+            "{} has {} pre-approved action(s); `horadric takeover list` numbers them",
             entry.program,
             entry.pre_approved.len()
         ));
@@ -852,7 +852,7 @@ pub fn user_list(read: List) -> (List, Vec<Misplaced>) {
 /// The command that lists `program` on the administrators' list.
 pub fn allow_command(program: &str, level: Level, elevated: bool) -> String {
     format!(
-        "horadric desktop allow {} {} {}",
+        "horadric takeover allow {} {} {}",
         if elevated { "--elevated" } else { "--admin" },
         quoted(program),
         level.word()
@@ -1286,7 +1286,7 @@ pub fn admin_descriptor(folder: bool) -> Vec<u8> {
 pub fn unsafe_text(what: &str, why: &str) -> String {
     format!(
         "{what} is not used: {why}. Only administrators may be able to write it. From an \
-         elevated shell, delete it and list the programs again with horadric desktop allow"
+         elevated shell, delete it and list the programs again with horadric takeover allow"
     )
 }
 
@@ -1770,12 +1770,12 @@ mod tests {
         assert_eq!(
             misplaced[0].command,
             format!(
-                r#"horadric desktop approve "{SYSMAC}" click "_Delete" --window "Open Project""#
+                r#"horadric takeover approve "{SYSMAC}" click "_Delete" --window "Open Project""#
             )
         );
         assert_eq!(
             misplaced[1].command,
-            r#"horadric desktop allow --elevated "regedit.exe" look"#
+            r#"horadric takeover allow --elevated "regedit.exe" look"#
         );
         // Nothing to move, nothing told.
         let (_, none) = user_list(List {
@@ -1796,7 +1796,7 @@ mod tests {
         assert_eq!(
             l.moved,
             Some(format!(
-                r#"horadric desktop allow --elevated "{SYSMAC}" operate"#
+                r#"horadric takeover allow --elevated "{SYSMAC}" operate"#
             ))
         );
         let admin = vec![elevated(SYSMAC, Level::Look)];

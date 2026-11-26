@@ -23,7 +23,7 @@
 //! pre-approved risky action beside it.
 //!
 //! The app's word is not what guards a program that runs as
-//! administrator: `horadric desktop-helper`, which alone can act there,
+//! administrator: `horadric takeover-helper`, which alone can act there,
 //! asks the human itself. So what is risky in such a program is asked by
 //! the helper, not here as well.
 //!
@@ -296,7 +296,7 @@ pub(super) fn refusal_text(why: Refusal, action: Action, risky: bool, exe: &str)
                  {secs} s, so nothing was done, and the question is not asked again for {} s. \
                  Nobody may be at this machine: ask in the chat. If this action is safe to do \
                  without asking, an administrator can pre-approve it from an elevated shell \
-                 (horadric desktop approve)",
+                 (horadric takeover approve)",
                 listed::REFUSED_FOR.as_secs()
             )
         }
@@ -711,7 +711,7 @@ impl Desktop {
                         notices.push(Notice {
                             title: "The list of allowed desktop programs can not be read",
                             text: format!(
-                                "{why}. Horadric asks instead. `horadric desktop list` shows it."
+                                "{why}. Horadric asks instead. `horadric takeover list` shows it."
                             ),
                             unreadable: true,
                         });
@@ -771,7 +771,7 @@ impl Desktop {
 fn misplaced_text(first: &listed::Misplaced, count: usize) -> String {
     let more = match count {
         1 => String::new(),
-        n => format!(" (and {} more, `horadric desktop list` shows each)", n - 1),
+        n => format!(" (and {} more, `horadric takeover list` shows each)", n - 1),
     };
     format!(
         "{}{more}: any program can write the list in %APPDATA%, so it no longer covers programs \
@@ -1467,7 +1467,7 @@ fn dialog(q: &Question) -> OwnedDialog {
             text: format!(
                 "It wants to {}{window}.\n\nSession {}.\n\nThis is asked every time, even with \
                  {program} allowed, unless an administrator pre-approved this very action \
-                 (horadric desktop approve, from an elevated shell). Unanswered after {} s, the \
+                 (horadric takeover approve, from an elevated shell). Unanswered after {} s, the \
                  session is told nobody answered.",
                 what_or(&q.pending.what(), "act"),
                 q.ident,
@@ -1484,7 +1484,7 @@ fn dialog(q: &Question) -> OwnedDialog {
                 "First it wants to {}{window}.\n\nSession {}.\n\nLooking is screenshots and reading the \
                  window. Operating is clicking and typing in it, and in its dialogs. What you \
                  allow lasts until Horadric restarts.{} To allow it for every session ahead of \
-                 time, list it: horadric desktop allow {}\"{}\" operate (or look){}. Unanswered \
+                 time, list it: horadric takeover allow {}\"{}\" operate (or look){}. Unanswered \
                  after {} s, the session is told nobody answered.",
                 what_or(&r.what, "look at it"),
                 q.ident,
