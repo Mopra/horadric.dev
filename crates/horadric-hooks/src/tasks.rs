@@ -291,12 +291,29 @@ pub fn runewords_file() -> Option<PathBuf> {
 /// The desktop programs the human allows ahead of time, beside the app's
 /// state like [`runewords_file`].
 pub fn desktop_programs_file() -> Option<PathBuf> {
-    crate::state_dir().map(|d| d.join(horadric_core::desktop_programs::FILE))
+    use horadric_core::desktop_programs::{FILE, OLD_FILE};
+    crate::state_dir().map(|d| renamed(&d, FILE, OLD_FILE))
 }
 
 /// The log of desktop grants, beside [`desktop_programs_file`].
 pub fn desktop_log_file() -> Option<PathBuf> {
-    crate::state_dir().map(|d| d.join(horadric_core::desktop_programs::LOG_FILE))
+    use horadric_core::desktop_programs::{LOG_FILE, OLD_LOG_FILE};
+    crate::state_dir().map(|d| renamed(&d, LOG_FILE, OLD_LOG_FILE))
+}
+
+/// A file of the state folder that was renamed: `old` is moved to `new`
+/// the first time any process asks where it is, so no reader looks under
+/// the new name while the list is still under the old one. Where it can
+/// not be moved (a Horadric from before the rename holds it), the old
+/// file is still the one to use: a list that silently stopped matching
+/// would leave every question unanswered on a machine nobody sits at.
+fn renamed(dir: &Path, new: &str, old: &str) -> PathBuf {
+    let (to, from) = (dir.join(new), dir.join(old));
+    let moves = horadric_core::desktop_programs::moves(to.exists(), from.exists());
+    if moves && fs::rename(&from, &to).is_err() {
+        return from;
+    }
+    to
 }
 
 fn global_runewords() -> String {
@@ -451,6 +468,30 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn a_renamed_file_is_moved_once_and_nothing_is_written_over() {
+        let dir = scratch("renamed");
+        let (new, old) = (dir.join("new.json"), dir.join("old.json"));
+        // Neither is there: the new name, and nothing is made.
+        assert_eq!(renamed(&dir, "new.json", "old.json"), new);
+        assert!(!new.exists());
+        // Only the old one: moved, with what it held.
+        fs::write(&old, "the list").unwrap();
+        assert_eq!(renamed(&dir, "new.json", "old.json"), new);
+        assert_eq!(fs::read_to_string(&new).unwrap(), "the list");
+        assert!(!old.exists());
+        // Both, as after an older build ran once more: the new one is
+        // kept and the old one left where it is.
+        fs::write(&old, "older").unwrap();
+        assert_eq!(renamed(&dir, "new.json", "old.json"), new);
+        assert_eq!(fs::read_to_string(&new).unwrap(), "the list");
+        assert_eq!(fs::read_to_string(&old).unwrap(), "older");
+        // The old one can not be moved, here because the new name's
+        // folder is gone: it is still the one read.
+        assert_eq!(renamed(&dir, "gone/new.json", "old.json"), old);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

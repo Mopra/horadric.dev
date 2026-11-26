@@ -1,7 +1,8 @@
 //! The desktop programs the human allows ahead of time, so a session can
 //! look at or operate them without the approval question each new session
 //! would otherwise ask. There are two lists of the same form, both named
-//! `desktop-programs.json`, edited with `horadric takeover
+//! `takeover-programs.json` (`desktop-programs.json` before the tools were
+//! renamed, see [`read_first`]), edited with `horadric takeover
 //! allow|deny|approve|list`.
 //!
 //! The one beside the app's state (`%APPDATA%\Horadric`) is the user's. Any
@@ -53,7 +54,42 @@ use serde_json::{json, Value};
 /// The file's name, in `%APPDATA%\Horadric` (`Horadric-dev` for a dev
 /// instance) for the user's list, and in [`ADMIN_FOLDER`] for the
 /// administrators'.
-pub const FILE: &str = "desktop-programs.json";
+pub const FILE: &str = "takeover-programs.json";
+
+/// What [`FILE`], [`LOG_FILE`] and [`ADMIN_LOG_FILE`] were named while the
+/// tools were `desktop_`. A machine that runs unattended depends on its
+/// lists, so the old names are moved or still read, never dropped.
+pub const OLD_FILE: &str = "desktop-programs.json";
+pub const OLD_LOG_FILE: &str = "desktop.log";
+pub const OLD_ADMIN_LOG_FILE: &str = "desktop-elevated.log";
+
+/// Whether a file under its old name is moved to its new one: only when
+/// nothing has the new name, so no file is ever written over.
+pub fn moves(new_there: bool, old_there: bool) -> bool {
+    old_there && !new_there
+}
+
+/// Which of a file's two names is read, where it can not be moved first
+/// (only an elevated process can rename in the administrators' folder).
+/// `open` answers none for a name nothing has. The new name is the one
+/// read when it is there; the old one only when the new is absent, and
+/// held to the same checks, since `open` is the same. A new file that is
+/// there but refused stops the reading: it is never passed over for the
+/// old one.
+pub fn read_first<'a, T, E>(
+    new: &'a str,
+    old: &'a str,
+    mut open: impl FnMut(&str) -> Result<Option<T>, E>,
+) -> Result<Option<(&'a str, T)>, (&'a str, E)> {
+    for name in [new, old] {
+        match open(name) {
+            Ok(Some(found)) => return Ok(Some((name, found))),
+            Ok(None) => {}
+            Err(why) => return Err((name, why)),
+        }
+    }
+    Ok(None)
+}
 
 /// The folder under `%ProgramData%` that holds the administrators' list
 /// and the elevated helper's log. One folder for the installed Horadric
@@ -63,7 +99,7 @@ pub const ADMIN_FOLDER: &str = "Horadric";
 
 /// The elevated helper's own log, in [`ADMIN_FOLDER`], where the session
 /// can not rewrite it.
-pub const ADMIN_LOG_FILE: &str = "desktop-elevated.log";
+pub const ADMIN_LOG_FILE: &str = "takeover-elevated.log";
 
 /// Whether sessions may take over programs on the human's own desktop at
 /// all, chosen in the tray menu and kept with the app's settings. Off is
@@ -730,7 +766,7 @@ pub fn deny(entries: &mut Vec<Entry>, program: &str, elevated: bool) -> usize {
 /// The log of what was allowed and refused, beside the list, so the human
 /// can see afterwards which grants came from the list and which from a
 /// question.
-pub const LOG_FILE: &str = "desktop.log";
+pub const LOG_FILE: &str = "takeover.log";
 
 /// Where a decision about a call came from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2080,5 +2116,53 @@ mod tests {
         // A newer build's word must not make the whole state file unreadable.
         assert_eq!(serde_json::from_str::<Mode>("\"always\"").unwrap(), Mode::Ask);
         assert!(OFF.starts_with("Takeover is off."));
+    }
+
+    #[test]
+    fn the_new_name_is_read_and_the_old_only_when_the_new_is_absent() {
+        type Opened = Result<Option<&'static str>, &'static str>;
+        let read = |new: Opened, old: Opened| {
+            let mut asked = Vec::new();
+            let found = read_first(FILE, OLD_FILE, |name| {
+                asked.push(name.to_string());
+                if name == FILE {
+                    new
+                } else {
+                    old
+                }
+            });
+            (found, asked)
+        };
+        // Both there: the new one, and the old is not even opened.
+        let (found, asked) = read(Ok(Some("new")), Ok(Some("old")));
+        assert_eq!(found, Ok(Some((FILE, "new"))));
+        assert_eq!(asked, [FILE]);
+        // Only the old one, as on a machine set up before the rename: its
+        // list still answers.
+        let (found, asked) = read(Ok(None), Ok(Some("old")));
+        assert_eq!(found, Ok(Some((OLD_FILE, "old"))));
+        assert_eq!(asked, [FILE, OLD_FILE]);
+        assert_eq!(read(Ok(None), Ok(None)).0, Ok(None));
+        // The old one is held to the same checks.
+        assert_eq!(read(Ok(None), Err("a user's")).0, Err((OLD_FILE, "a user's")));
+        // A new one that is refused is not passed over for the old.
+        let (found, asked) = read(Err("a user's"), Ok(Some("old")));
+        assert_eq!(found, Err((FILE, "a user's")));
+        assert_eq!(asked, [FILE]);
+    }
+
+    #[test]
+    fn an_old_name_is_moved_only_where_nothing_has_the_new_one() {
+        assert!(moves(false, true));
+        assert!(!moves(true, true), "the new file would be written over");
+        assert!(!moves(true, false));
+        assert!(!moves(false, false));
+        for (new, old) in [
+            (FILE, OLD_FILE),
+            (LOG_FILE, OLD_LOG_FILE),
+            (ADMIN_LOG_FILE, OLD_ADMIN_LOG_FILE),
+        ] {
+            assert_eq!(new, old.replace("desktop", "takeover"));
+        }
     }
 }

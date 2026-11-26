@@ -12,14 +12,14 @@
 //! pre-approved that very action.
 //!
 //! Programs can be listed ahead of time, in two files named
-//! `desktop-programs.json` (see [`horadric_core::desktop_programs`]). The
+//! `takeover-programs.json` (see [`horadric_core::desktop_programs`]). The
 //! user's, beside the app's state, any program can write, so it only
 //! stands in for the approval question of a program that is not elevated.
 //! The administrators', which only an elevated shell can write and which
 //! is checked for that on every read, lists the programs that run as
 //! administrator and holds the pre-approved risky actions. Each grant
 //! from a list is shown once per session and program and written to
-//! `desktop.log`, with the answers to the questions and every
+//! `takeover.log`, with the answers to the questions and every
 //! pre-approved risky action beside it.
 //!
 //! The app's word is not what guards a program that runs as
@@ -719,7 +719,7 @@ impl Desktop {
                 }
             }
         }
-        let stamp = desktop_admin::file().as_deref().and_then(stamp_of);
+        let stamp = desktop_admin::file_read().as_deref().and_then(stamp_of);
         if stamp != self.lists.admin_stamp || self.lists.admin_refused.is_some() {
             self.lists.admin_stamp = stamp;
             let (list, refused) = match desktop_admin::read() {
@@ -870,7 +870,7 @@ unsafe fn app_id_of(h: HWND) -> Option<String> {
     id.filter(|id| !id.trim().is_empty())
 }
 
-/// Adds a line to `desktop.log`. A log that can not be written loses the
+/// Adds a line to `takeover.log`. A log that can not be written loses the
 /// line, never the call.
 pub(super) fn log(session: &str, source: Source, program: &str, what: &str) {
     let Some(file) = horadric_hooks::tasks::desktop_log_file() else {
@@ -889,6 +889,9 @@ pub(super) fn log(session: &str, source: Source, program: &str, what: &str) {
     if let Some(dir) = file.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
+    // Every grant and answer of every session lands here, for as long as
+    // Horadric is installed.
+    crate::screen_share::roll(&file);
     let _ = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

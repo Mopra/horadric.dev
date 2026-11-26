@@ -364,7 +364,7 @@ fn list() -> Result<(), String> {
         );
     }
     println!();
-    let admin_file = desktop_admin::file().ok_or("Windows would not say where %ProgramData% is")?;
+    let admin_file = desktop_admin::file_read().ok_or("Windows would not say where %ProgramData% is")?;
     println!("The administrators' list: {}", admin_file.display());
     println!("  (written only from an elevated shell; programs that run as administrator, and");
     println!("  every pre-approved risky action)");
@@ -403,7 +403,7 @@ fn list() -> Result<(), String> {
 
 fn log(elevated: bool, n: usize) -> Result<(), String> {
     let file = if elevated {
-        desktop_admin::log_file().ok_or("Windows would not say where %ProgramData% is")?
+        desktop_admin::log_file_read().ok_or("Windows would not say where %ProgramData% is")?
     } else {
         horadric_hooks::tasks::desktop_log_file().ok_or("cannot find %APPDATA%")?
     };

@@ -54,14 +54,38 @@ pub fn folder() -> Option<PathBuf> {
     }
 }
 
-/// The administrators' list.
+/// The administrators' list, as it is written.
 pub fn file() -> Option<PathBuf> {
     folder().map(|f| f.join(listed::FILE))
 }
 
-/// The elevated helper's log.
+/// The elevated helper's log, as it is written.
 pub fn log_file() -> Option<PathBuf> {
     folder().map(|f| f.join(listed::ADMIN_LOG_FILE))
+}
+
+/// Where a file of the administrators' folder is read: under the name it
+/// had before the tools were renamed while nothing has the new one yet.
+/// Only an elevated process can rename here, so until one next writes
+/// ([`write`], [`log`]) the old file is the one there is.
+fn read_at(new: &str, old: &str) -> Option<PathBuf> {
+    let (new, old) = folder().map(|f| (f.join(new), f.join(old)))?;
+    Some(if listed::moves(new.exists(), old.exists()) {
+        old
+    } else {
+        new
+    })
+}
+
+/// The administrators' list where [`read`] finds it, to show and to watch
+/// for changes.
+pub fn file_read() -> Option<PathBuf> {
+    read_at(listed::FILE, listed::OLD_FILE)
+}
+
+/// The elevated helper's log where it is to be read.
+pub fn log_file_read() -> Option<PathBuf> {
+    read_at(listed::ADMIN_LOG_FILE, listed::OLD_ADMIN_LOG_FILE)
 }
 
 /// What reading the administrators' list came to.
@@ -153,7 +177,7 @@ fn guarded(path: &Path, is_folder: bool) -> Result<Option<File>, String> {
 /// Reads the administrators' list, refusing it unless the folder and the
 /// file are both the administrators' alone.
 pub fn read() -> Read {
-    let (Some(folder), Some(file)) = (folder(), file()) else {
+    let Some(folder) = folder() else {
         return Read::Missing;
     };
     let refused = |what: &Path, why: String| {
@@ -164,10 +188,15 @@ pub fn read() -> Read {
         Ok(None) => return Read::Missing,
         Err(why) => return refused(&folder, why),
     }
-    let mut open = match guarded(&file, false) {
-        Ok(Some(open)) => open,
+    // The old name is read when the new is absent, through the same
+    // check of who could have written it.
+    let found = listed::read_first(listed::FILE, listed::OLD_FILE, |name| {
+        guarded(&folder.join(name), false)
+    });
+    let (file, mut open) = match found {
+        Ok(Some((name, open))) => (folder.join(name), open),
         Ok(None) => return Read::Missing,
-        Err(why) => return refused(&file, why),
+        Err((name, why)) => return refused(&folder.join(name), why),
     };
     let mut text = String::new();
     if let Err(e) = open.read_to_string(&mut text) {
@@ -260,7 +289,12 @@ pub fn write(list: &List) -> Result<PathBuf, String> {
     }
     std::fs::rename(&part, &file).map_err(said)?;
     match read() {
-        Read::List(_) => Ok(file),
+        Read::List(_) => {
+            // What the old file held was read into `list` by whoever
+            // changed it, and is in the new one now: this is its rename.
+            let _ = std::fs::remove_file(folder.join(listed::OLD_FILE));
+            Ok(file)
+        }
         Read::Missing => Err(format!("{} is gone again", file.display())),
         Read::Refused(why) => Err(format!("written, but {why}")),
     }
@@ -284,6 +318,10 @@ pub fn log(line: &str) {
     }
     if !matches!(guarded(&folder, true), Ok(Some(_))) {
         return;
+    }
+    let old = folder.join(listed::OLD_ADMIN_LOG_FILE);
+    if listed::moves(file.exists(), old.exists()) {
+        let _ = std::fs::rename(&old, &file);
     }
     let new = !file.exists();
     let _ = OpenOptions::new()
