@@ -269,7 +269,9 @@ need a card. A card makes it better, the lack of one makes it plainer:
   building: that one binary built with candle's CUDA feature still
   starts, and falls back to the CPU, on a PC without CUDA.
 - **Open: the other cards.** Most laptops have Intel or AMD graphics,
-  which CUDA never reaches. Reaching them means another runtime
+  which CUDA never reaches. The human's laptop is one: an Intel i7 with
+  its built in graphics and no card, so it starts in the plain column,
+  and built in graphics would gain far less than a card does. Reaching them means another runtime
   (whisper.cpp with Vulkan, or ONNX Runtime with DirectML), a new
   dependency and Whisper written a second time. Decide once the plain
   column has been tried on the human's laptop: if it is good enough
