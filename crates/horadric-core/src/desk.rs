@@ -64,6 +64,9 @@ mod tests {
     #[test]
     fn a_dev_instance_has_its_own_port_and_credential() {
         assert_ne!(port(true), port(false));
-        assert_ne!(credential_target("Horadric"), credential_target("Horadric-dev"));
+        assert_ne!(
+            credential_target("Horadric"),
+            credential_target("Horadric-dev")
+        );
     }
 }
