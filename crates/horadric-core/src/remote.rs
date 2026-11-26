@@ -1204,7 +1204,7 @@ mod tests {
         let long = "\u{1F600}".repeat(TEXT_CHUNK + 1);
         let pieces = text_events(&long).unwrap();
         assert_eq!(pieces.len(), 2);
-        assert!(pieces.iter().all(|p| batch_body(&[p.clone()]).is_ok()));
+        assert!(pieces.iter().all(|p| batch_body(std::slice::from_ref(p)).is_ok()));
         // The worst a character costs: a control character, escaped.
         let worst = text_events(&"\u{1}".repeat(TEXT_CHUNK)).unwrap();
         assert_eq!(worst.len(), 1);
