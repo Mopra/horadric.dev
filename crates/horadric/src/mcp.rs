@@ -257,9 +257,21 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
         if let Some(answer) = forge::call(name, args, &mut self.app) {
             return answer;
         }
-        let app = &mut self.app;
-        let open_in_pane = |url: &str| app(json!({ "op": "open", "url": url }));
-        if let Some(answer) = crate::remote::call(name, args, open_in_pane) {
+        if crate::remote::is_tool(name) {
+            // Refused here, before anything starts: the app is who asks
+            // the human, and only a session it started can reach it.
+            if !cfg!(windows) {
+                return Err("the remote_ tools work only on Windows".into());
+            }
+            if !self.browser {
+                return Err(
+                    "this session was not started by Horadric, which has to ask the user \
+                     before a remote desktop is watched or driven: nothing was started"
+                        .into(),
+                );
+            }
+        }
+        if let Some(answer) = crate::remote::call(name, args, &mut self.app) {
             return answer;
         }
         let s = |k: &str| args.get(k).and_then(Value::as_str);

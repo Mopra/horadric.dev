@@ -155,6 +155,10 @@ Usage:
                                whose Horadric runs with HORADRIC_SCREEN_SHARE=1, in the
                                browser pane (through a tunnel kept for the next time);
                                --dev or HORADRIC_REMOTE_DEV=1 watches its dev instance
+  horadric remote close [--dev] DEST
+                               End the tunnel kept for DEST, and have Horadric ask again
+                               before a session watches it; the tunnel to a dev instance
+                               is closed only with --dev
   horadric portal [off|phones|forget N|all|relay URL]
                                Town Portal, Horadric from your phone: turn it on and show
                                a pairing QR code that works once, for 5 minutes; turn it
