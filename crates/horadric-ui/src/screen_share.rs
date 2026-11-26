@@ -20,7 +20,9 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use horadric_core::screen_share::{self as share, Button, Input, Mode, Size, Trial, Typed};
+use horadric_core::screen_share::{
+    self as share, Button, Input, Mode, Region, Size, Trial, Typed,
+};
 use windows::core::{Error, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, E_FAIL, HANDLE, HWND, POINT};
 use windows::Win32::Graphics::Gdi::{
@@ -546,14 +548,30 @@ fn handle(stream: &TcpStream, shared: &Arc<Shared>) -> io::Result<()> {
             if let Err(why) = own_desktop() {
                 return respond(stream, "423 Locked", "text/plain", why.as_bytes());
             }
+            let region = match share::region(query) {
+                Ok(r) => r,
+                Err(why) => {
+                    return respond(stream, "400 Bad Request", "text/plain", why.as_bytes())
+                }
+            };
+            // Said here and not by the capture, whose errors are Windows'
+            // own and answer 500.
+            if let Some(r) = region {
+                let s = screen();
+                let (w, h) = (s.width.max(0) as u32, s.height.max(0) as u32);
+                if w > 0 && h > 0 && r.on(w, h).is_none() {
+                    let why = share::off_screen(w, h);
+                    return respond(stream, "400 Bad Request", "text/plain", why.as_bytes());
+                }
+            }
             let _com = Com::join();
-            match latest(&shared.frame, share::max_width(query)) {
+            match latest(&shared.frame, share::max_width(query), region) {
                 Ok(f) => respond_frame(stream, &f),
                 Err(e) => respond(
                     stream,
                     "500 Internal Server Error",
                     "text/plain",
-                    e.to_string().as_bytes(),
+                    share::capture_failed(&e.to_string()).as_bytes(),
                 ),
             }
         }
@@ -717,10 +735,18 @@ fn respond_with(
 fn respond_frame(stream: &TcpStream, f: &Frame) -> io::Result<()> {
     // The viewer reads these from its own origin, which needs no leave
     // to see a header.
-    let more = format!(
+    let mut more = format!(
         "X-Screen-Left: {}\r\nX-Screen-Top: {}\r\nX-Screen-Width: {}\r\nX-Screen-Height: {}\r\n",
         f.screen.left, f.screen.top, f.screen.width, f.screen.height,
     );
+    // Only a part says which part: a whole frame's headers stay as every
+    // viewer so far reads them.
+    if let Some(r) = f.region {
+        more.push_str(&format!(
+            "X-Region-Left: {}\r\nX-Region-Top: {}\r\nX-Region-Width: {}\r\nX-Region-Height: {}\r\n",
+            r.x, r.y, r.width, r.height,
+        ));
+    }
     respond_with(stream, "200 OK", "image/jpeg", &more, &f.jpeg)
 }
 
@@ -748,6 +774,9 @@ fn screen() -> Screen {
 
 struct Frame {
     screen: Screen,
+    /// The part of the screen the picture is of, as it was held to the
+    /// screen, when it is not all of it.
+    region: Option<Region>,
     jpeg: Vec<u8>,
 }
 
@@ -755,6 +784,9 @@ struct Frame {
 struct Cached {
     at: Instant,
     max: Option<u32>,
+    /// As it was asked for, so a part is never handed out for the whole
+    /// screen, the whole for a part, or one part for another.
+    region: Option<Region>,
     frame: Arc<Frame>,
 }
 
@@ -762,20 +794,25 @@ struct Cached {
 /// asks faster than a frame is made, cost one capture between them.
 const FRESH: Duration = Duration::from_millis(100);
 
-/// The newest frame at most `max` wide. The lock is held while one is
-/// made, so there is one capture at a time and whoever waited takes the
-/// frame the capture before it made.
-fn latest(cache: &Mutex<Option<Cached>>, max: Option<u32>) -> windows::core::Result<Arc<Frame>> {
+/// The newest frame of `region`, or of the whole screen, at most `max`
+/// wide. The lock is held while one is made, so there is one capture at
+/// a time and whoever waited takes the frame the capture before it made.
+fn latest(
+    cache: &Mutex<Option<Cached>>,
+    max: Option<u32>,
+    region: Option<Region>,
+) -> windows::core::Result<Arc<Frame>> {
     let mut cached = lock(cache);
     if let Some(c) = cached.as_ref() {
-        if c.max == max && c.at.elapsed() < FRESH {
+        if c.max == max && c.region == region && c.at.elapsed() < FRESH {
             return Ok(Arc::clone(&c.frame));
         }
     }
-    let frame = Arc::new(frame(max)?);
+    let frame = Arc::new(frame(max, region)?);
     *cached = Some(Cached {
         at: Instant::now(),
         max,
+        region,
         frame: Arc::clone(&frame),
     });
     Ok(frame)
@@ -826,14 +863,34 @@ impl Gdi {
     }
 }
 
-/// The whole virtual screen with the cursor drawn in, at most `max` wide,
-/// as JPEG.
-fn frame(max: Option<u32>) -> windows::core::Result<Frame> {
+/// The virtual screen, or the `region` of it, with the cursor drawn in,
+/// at most `max` wide, as JPEG. A region is copied pixel for pixel
+/// unless `max` is narrower than it.
+fn frame(max: Option<u32>, region: Option<Region>) -> windows::core::Result<Frame> {
     let screen = screen();
     if screen.width <= 0 || screen.height <= 0 {
         return Err(Error::from(E_FAIL));
     }
-    let (w, h) = share::scaled(screen.width as u32, screen.height as u32, max);
+    // Held to the screen as it is now, which may be another than the one
+    // the request was checked against a moment ago.
+    let region = match region {
+        Some(r) => Some(
+            r.on(screen.width as u32, screen.height as u32)
+                .ok_or_else(|| Error::from(E_FAIL))?,
+        ),
+        None => None,
+    };
+    // What is copied: its top left on the virtual desk and its size.
+    let (src_left, src_top, src_w, src_h) = match region {
+        Some(r) => (
+            screen.left + r.x,
+            screen.top + r.y,
+            r.width as i32,
+            r.height as i32,
+        ),
+        None => (screen.left, screen.top, screen.width, screen.height),
+    };
+    let (w, h) = share::scaled(src_w as u32, src_h as u32, max);
     let (w, h) = (w as i32, h as i32);
     // SAFETY: every DC and bitmap used below is made here, checked, and
     // owned by `gdi`, which outlives each use and frees them on every way
@@ -848,21 +905,21 @@ fn frame(max: Option<u32>) -> windows::core::Result<Frame> {
         if gdi.screen.is_invalid() {
             return Err(Error::from(E_FAIL));
         }
-        let (full, full_bitmap) = gdi.canvas(screen.width, screen.height)?;
+        let (full, full_bitmap) = gdi.canvas(src_w, src_h)?;
         // CAPTUREBLT takes layered windows too: menus, tooltips, toasts.
         BitBlt(
             full,
             0,
             0,
-            screen.width,
-            screen.height,
+            src_w,
+            src_h,
             Some(gdi.screen),
-            screen.left,
-            screen.top,
+            src_left,
+            src_top,
             SRCCOPY | CAPTUREBLT,
         )?;
-        draw_cursor(full, screen);
-        let bitmap = if (w, h) == (screen.width, screen.height) {
+        draw_cursor(full, src_left, src_top);
+        let bitmap = if (w, h) == (src_w, src_h) {
             full_bitmap
         } else {
             let (small, small_bitmap) = gdi.canvas(w, h)?;
@@ -879,8 +936,8 @@ fn frame(max: Option<u32>) -> windows::core::Result<Frame> {
                 Some(full),
                 0,
                 0,
-                screen.width,
-                screen.height,
+                src_w,
+                src_h,
                 SRCCOPY,
             )
             .as_bool()
@@ -894,15 +951,22 @@ fn frame(max: Option<u32>) -> windows::core::Result<Frame> {
             let _ = DeleteDC(dc);
         }
         let jpeg = encode_jpeg(bitmap)?;
-        Ok(Frame { screen, jpeg })
+        Ok(Frame {
+            screen,
+            region,
+            jpeg,
+        })
     }
 }
 
 /// The cursor where it is, so the viewer sees what the mouse points at:
 /// a screen copy leaves it out.
 ///
+/// `left` and `top` are where on the virtual desk the DC's own top left
+/// is.
+///
 /// SAFETY: `dc` must be a live DC, as `frame` hands it.
-unsafe fn draw_cursor(dc: HDC, screen: Screen) {
+unsafe fn draw_cursor(dc: HDC, left: i32, top: i32) {
     let mut info = CURSORINFO {
         cbSize: std::mem::size_of::<CURSORINFO>() as u32,
         ..Default::default()
@@ -929,8 +993,8 @@ unsafe fn draw_cursor(dc: HDC, screen: Screen) {
     };
     let _ = DrawIconEx(
         dc,
-        info.ptScreenPos.x - screen.left - hot_x,
-        info.ptScreenPos.y - screen.top - hot_y,
+        info.ptScreenPos.x - left - hot_x,
+        info.ptScreenPos.y - top - hot_y,
         icon,
         0,
         0,

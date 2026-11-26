@@ -26,6 +26,7 @@ use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant};
 
 use horadric_core::remote::{self, Identity, Response, Tunnel, Unread};
+use horadric_core::screen_share::Region;
 use horadric_hooks::{OWNER_ENV, SESSION_ENV};
 use serde_json::{json, Value};
 
@@ -157,18 +158,22 @@ pub fn open(
 /// says how large the screen is.
 pub fn screenshot(dest: &str, dev: bool, width: u32) -> Result<(Vec<u8>, String), String> {
     through(dest, dev, |link| {
-        let r = frame(link, Some(width))?;
+        let r = frame(link, Some(width), None)?;
         let line = remote::screen_line(&r, remote::jpeg_size(&r.body));
         Ok((r.body, line))
     })
 }
 
-/// One frame through `link`, at most `width` wide, or as large as the
-/// screen is with none: the answer whole, since its headers say how
-/// large the screen is.
-pub(crate) fn frame(link: &Link, width: Option<u32>) -> Result<Response, Failed> {
-    // Without `w` the server scales nothing.
-    let path = width.map_or_else(|| "/frame.jpg".to_string(), remote::frame_path);
+/// One frame through `link`, of `region` or of the whole screen with
+/// none, at most `width` wide, or unscaled with none: the answer whole,
+/// since its headers say how large the screen is and which part of it
+/// the picture shows.
+pub(crate) fn frame(
+    link: &Link,
+    width: Option<u32>,
+    region: Option<Region>,
+) -> Result<Response, Failed> {
+    let path = remote::frame_path_of(width, region);
     let r = link
         .get(&path, FRAME_WAIT, remote::FRAME_CAP)
         .map_err(Failed::Other)?;

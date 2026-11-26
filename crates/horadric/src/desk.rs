@@ -15,6 +15,7 @@
 use std::path::PathBuf;
 
 use horadric_core::remote::Response;
+use horadric_core::screen_share::Region;
 use horadric_core::{desk, remote};
 use serde_json::{json, Value};
 
@@ -150,16 +151,19 @@ pub fn tools() -> Vec<Value> {
                  plain web page prefer the browser_ tools. {OPEN} Its text line gives the \
                  screen in physical pixels and the factor to multiply a spot in the picture \
                  by for the x and y desk_click and desk_scroll take, since the picture may \
-                 be scaled down to width."
+                 be scaled down to width. With zoom the picture is only that region of the \
+                 screen, at full resolution, and the line says what to add to a spot in it \
+                 as well: look at the whole desk first, then zoom in where the text is too \
+                 small to read."
             ),
             json!({
                 "width": {
                     "type": "integer",
-                    "description": "The widest the picture may be, in pixels (default 1600)"
+                    "description": "The widest the picture may be, in pixels (default 1600; with zoom there is no default and the region comes unscaled)"
                 },
                 "zoom": {
                     "type": "object",
-                    "description": "A region in screen pixels to read small text in: the picture then comes unscaled (for now the whole desk, and the line says where the region is in it)",
+                    "description": "A region in screen pixels (not picture pixels) to read small text in: the picture is then that region only, cut to the screen's edges, at full resolution",
                     "properties": {
                         "x": { "type": "number", "description": "Screen pixels from the left" },
                         "y": { "type": "number", "description": "Screen pixels from the top" },
@@ -283,27 +287,20 @@ fn answer(at: &Desk, name: &str, args: &Value) -> Result<Vec<Value>, String> {
     match name {
         "desk_screenshot" => {
             let zoom = args.get("zoom").map(region).transpose()?;
-            // The hand cuts no region out of a frame and this crate has
-            // no image decoder to do it with, so a zoom is answered with
-            // the whole desk unscaled and where the region is in it.
+            let asked = args
+                .get("width")
+                .and_then(remote::whole)
+                .map(|w| w.clamp(64, 8192) as u32);
+            // A zoom is for reading small text, so it is scaled only when
+            // the call says how wide.
             let width = match zoom {
-                Some(_) => None,
-                None => Some(
-                    args.get("width")
-                        .and_then(remote::whole)
-                        .map_or(remote::FRAME_WIDTH, |w| w.clamp(64, 8192) as u32),
-                ),
+                Some(_) => asked,
+                None => Some(asked.unwrap_or(remote::FRAME_WIDTH)),
             };
-            let r = at.through(|link| crate::remote::frame(link, width))?;
-            let mut line = remote::screen_line_of("desk", &r, remote::jpeg_size(&r.body));
-            if let Some((x, y, w, h)) = zoom {
-                line.push_str(&format!(
-                    " The desk's hand cuts no region out, so this is the whole desk: the \
-                     region asked for is from {x},{y} to {},{} in it.",
-                    x.saturating_add(w),
-                    y.saturating_add(h)
-                ));
-            }
+            let r = at.through(|link| crate::remote::frame(link, width, zoom))?;
+            // The line is worded from what the hand says it answered, so
+            // it is right for the region as the hand cut it to the screen.
+            let line = remote::screen_line_of("desk", &r, remote::jpeg_size(&r.body));
             Ok(crate::remote::picture(&r.body, line))
         }
         "desk_apps" => {
@@ -339,7 +336,7 @@ fn said(r: &Response) -> String {
 }
 
 /// A zoom's region, in screen pixels: x, y, width, height.
-fn region(v: &Value) -> Result<(i32, i32, i32, i32), String> {
+fn region(v: &Value) -> Result<Region, String> {
     let n = |k: &str| {
         v.get(k)
             .and_then(remote::whole)
@@ -349,7 +346,12 @@ fn region(v: &Value) -> Result<(i32, i32, i32, i32), String> {
     if w < 1 || h < 1 {
         return Err("zoom's width and height are at least 1".into());
     }
-    Ok((x, y, w, h))
+    Ok(Region {
+        x,
+        y,
+        width: w as u32,
+        height: h as u32,
+    })
 }
 
 /// The body `desk_open` posts: an app by name, or a path with arguments.
@@ -510,12 +512,50 @@ mod tests {
     const OTHER: &str = "fedcba9876543210fedcba9876543210";
 
     /// A JPEG's first bytes, saying it is 1600 by 900.
-    fn jpeg() -> Vec<u8> {
+    fn jpeg(w: u16, h: u16) -> Vec<u8> {
         let mut b = vec![0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08];
-        b.extend(900u16.to_be_bytes());
-        b.extend(1600u16.to_be_bytes());
+        b.extend(h.to_be_bytes());
+        b.extend(w.to_be_bytes());
         b.extend([0x03, 0x01]);
         b
+    }
+
+    /// The fake hand's screen.
+    const SCREEN: (u32, u32) = (3200, 1800);
+
+    /// What the fake hand answers a frame asked with `query`, as the real
+    /// one is to: the status, the headers and the picture, whose size is
+    /// the one the real one would send.
+    fn fake_frame(query: &str) -> (u16, String, Vec<u8>) {
+        use horadric_core::screen_share as share;
+        let screen = format!(
+            "X-Screen-Width: {}\r\nX-Screen-Height: {}\r\n",
+            SCREEN.0, SCREEN.1
+        );
+        let max = share::max_width(query);
+        let held = match share::region(query) {
+            Ok(r) => r.map(|r| r.on(SCREEN.0, SCREEN.1)),
+            Err(why) => return (400, String::new(), why.into_bytes()),
+        };
+        match held {
+            None => {
+                let (w, h) = share::scaled(SCREEN.0, SCREEN.1, max);
+                (200, screen, jpeg(w as u16, h as u16))
+            }
+            Some(None) => (
+                400,
+                String::new(),
+                share::off_screen(SCREEN.0, SCREEN.1).into_bytes(),
+            ),
+            Some(Some(r)) => {
+                let (w, h) = share::scaled(r.width, r.height, max);
+                let region = format!(
+                    "X-Region-Left: {}\r\nX-Region-Top: {}\r\nX-Region-Width: {}\r\nX-Region-Height: {}\r\n",
+                    r.x, r.y, r.width, r.height
+                );
+                (200, screen + &region, jpeg(w as u16, h as u16))
+            }
+        }
     }
 
     /// What a fake hand was asked: each request's method and target, its
@@ -561,18 +601,19 @@ mod tests {
                     .unwrap()
                     .push((format!("{method} {target}"), body, carried));
                 let authorized = head.contains(&format!("Authorization: Bearer {token}"));
+                let (path, query) = target.split_once('?').unwrap_or((target, ""));
+                let framed;
                 let (status, extra, answer): (u16, &str, Vec<u8>) =
-                    match (method, target.split('?').next().unwrap()) {
+                    match (method, path) {
                         ("GET", "/hello") => {
                             let nonce = target.split_once("n=").unwrap().1;
                             (200, "", remote::proof(token, nonce).into_bytes())
                         }
                         _ if !authorized => (403, "", b"forbidden".to_vec()),
-                        ("GET", "/frame.jpg") => (
-                            200,
-                            "X-Screen-Width: 3200\r\nX-Screen-Height: 1800\r\n",
-                            jpeg(),
-                        ),
+                        ("GET", "/frame.jpg") => {
+                            framed = fake_frame(query);
+                            (framed.0, framed.1.as_str(), framed.2.clone())
+                        }
                         ("POST", "/input") => (204, "", Vec::new()),
                         ("GET", "/apps") => (
                             200,
@@ -753,7 +794,7 @@ mod tests {
     }
 
     #[test]
-    fn a_screenshot_says_the_desks_scale_and_a_zoom_comes_unscaled() {
+    fn a_screenshot_says_the_desks_scale_and_a_zoom_is_that_region_unscaled() {
         let (port, asked) = hand(TOKEN, (200, "{}"));
         let at = desk("frame", port, Some(TOKEN));
         let shot = answer(&at, "desk_screenshot", &json!({ "width": 1600 })).unwrap();
@@ -767,14 +808,41 @@ mod tests {
         );
         let zoom = json!({ "zoom": { "x": 100, "y": 50, "width": 400, "height": 300 } });
         let line = said_text(&answer(&at, "desk_screenshot", &zoom).unwrap());
-        assert!(line.contains("from 100,50 to 500,350"), "{line}");
+        assert_eq!(
+            line,
+            "The desk screen is 3200 x 1800 physical pixels. This image is 400 x 300 and \
+             shows only the part of that screen from 100,50 to 500,350, unscaled: to image \
+             coordinates add 100 to x and 50 to y, for the x and y the desk_ input tools \
+             take, counted from the screen's top left."
+        );
+        // Scaled only when the call says how wide, and the line is of the
+        // region as the hand cut it to the screen.
+        let edge = json!({
+            "width": 100,
+            "zoom": { "x": 3000, "y": 1700, "width": 400, "height": 300 },
+        });
+        let line = said_text(&answer(&at, "desk_screenshot", &edge).unwrap());
+        assert!(line.contains("This image is 100 x 50 and shows"), "{line}");
+        assert!(line.contains("from 3000,1700 to 3200,1800: multiply"), "{line}");
+        assert!(line.contains("by 2, then add 3000 to x and 1700 to y"), "{line}");
+        let off = json!({ "zoom": { "x": 5000, "y": 0, "width": 10, "height": 10 } });
+        let e = answer(&at, "desk_screenshot", &off).unwrap_err();
+        assert!(e.contains("not on the screen, which is 3200 x 1800"), "{e}");
         let asked = asked.lock().unwrap();
         let frames: Vec<&str> = asked
             .iter()
             .map(|(what, ..)| what.as_str())
             .filter(|what| what.contains("/frame.jpg"))
             .collect();
-        assert_eq!(frames, ["GET /frame.jpg?w=1600", "GET /frame.jpg"]);
+        assert_eq!(
+            frames,
+            [
+                "GET /frame.jpg?w=1600",
+                "GET /frame.jpg?rx=100&ry=50&rw=400&rh=300",
+                "GET /frame.jpg?w=100&rx=3000&ry=1700&rw=400&rh=300",
+                "GET /frame.jpg?rx=5000&ry=0&rw=10&rh=10",
+            ]
+        );
     }
 
     #[test]

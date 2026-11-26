@@ -12,6 +12,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::screen_share::Region;
 use crate::webpush::hmac_sha256;
 
 /// Where a remote's installed Horadric serves its screen.
@@ -154,6 +155,22 @@ pub fn view_url(port: u16, token: &str) -> String {
 /// The path of one frame, at most `width` pixels wide.
 pub fn frame_path(width: u32) -> String {
     format!("/frame.jpg?w={width}")
+}
+
+/// The path of one frame of `region`, or of the whole screen with none,
+/// at most `width` pixels wide, or unscaled with none: without `w` the
+/// server scales nothing.
+pub fn frame_path_of(width: Option<u32>, region: Option<Region>) -> String {
+    let asked: Vec<String> = width
+        .map(|w| format!("w={w}"))
+        .into_iter()
+        .chain(region.map(|r| r.query()))
+        .collect();
+    if asked.is_empty() {
+        "/frame.jpg".into()
+    } else {
+        format!("/frame.jpg?{}", asked.join("&"))
+    }
 }
 
 /// The path input events are posted to.
@@ -353,18 +370,57 @@ pub fn screen_line(r: &Response, image: Option<(u32, u32)>) -> String {
 
 /// [`screen_line`] for the screen of `whose`, which is also what its
 /// tools' names begin with: `remote`, or `desk` for the agent's desk,
-/// whose hand answers a frame the same way.
+/// whose hand answers a frame the same way. An answer that says it is
+/// of a region only is worded for that: what the answer says counts, not
+/// what was asked, since a server from before regions answers the whole
+/// screen whatever it is asked.
 pub fn screen_line_of(whose: &str, r: &Response, image: Option<(u32, u32)>) -> String {
     let n = |k: &str| r.header(k).and_then(|v| v.parse::<i64>().ok());
     let (Some(w), Some(h)) = (n("x-screen-width"), n("x-screen-height")) else {
         return format!("The {whose} did not say how large its screen is.");
     };
     let screen = format!("The {whose} screen is {w} x {h} physical pixels.");
+    let factor = |of: i64, iw: u32| {
+        let factor = format!("{:.3}", of as f64 / f64::from(iw));
+        factor
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
+    };
+    if let (Some(left), Some(top), Some(rw), Some(rh)) = (
+        n("x-region-left"),
+        n("x-region-top"),
+        n("x-region-width"),
+        n("x-region-height"),
+    ) {
+        let part = format!(
+            "only the part of that screen from {left},{top} to {},{}",
+            left + rw,
+            top + rh
+        );
+        let then = format!(
+            "add {left} to x and {top} to y, for the x and y the {whose}_ input tools take, \
+             counted from the screen's top left."
+        );
+        return match image {
+            Some((iw, ih)) if iw > 0 && i64::from(iw) == rw => format!(
+                "{screen} This image is {iw} x {ih} and shows {part}, unscaled: to image \
+                 coordinates {then}"
+            ),
+            Some((iw, ih)) if iw > 0 => format!(
+                "{screen} This image is {iw} x {ih} and shows {part}: multiply image \
+                 coordinates by {}, then {then}",
+                factor(rw, iw)
+            ),
+            _ => format!(
+                "{screen} This image shows {part}: scale image coordinates by {rw} / the \
+                 image's width, then {then}"
+            ),
+        };
+    }
     match image {
         Some((iw, ih)) if iw > 0 => {
-            let factor = w as f64 / f64::from(iw);
-            let factor = format!("{:.3}", factor);
-            let factor = factor.trim_end_matches('0').trim_end_matches('.');
+            let factor = factor(w, iw);
             format!(
                 "{screen} This image is {iw} x {ih} of that screen: multiply image \
                  coordinates by {factor} for the x and y the {whose}_ input tools take, \
@@ -941,6 +997,48 @@ mod tests {
         assert!(screen_line(&r, Some((2560, 1440))).contains("multiply image coordinates by 1 "));
         assert!(screen_line(&r, Some((1000, 563))).contains("by 2.56 "));
         assert!(screen_line(&r, None).contains("2560 / the image's width"));
+    }
+
+    #[test]
+    fn a_frame_of_a_region_says_how_to_get_back_to_the_screen() {
+        let raw = b"HTTP/1.0 200 OK\r\nX-Screen-Width: 3200\r\nX-Screen-Height: 1800\r\nX-Region-Left: 100\r\nX-Region-Top: 50\r\nX-Region-Width: 400\r\nX-Region-Height: 300\r\n\r\n\xff\xd8\xff";
+        let r = parse_response(raw).unwrap();
+        assert_eq!(
+            screen_line_of("desk", &r, Some((400, 300))),
+            "The desk screen is 3200 x 1800 physical pixels. This image is 400 x 300 and \
+             shows only the part of that screen from 100,50 to 500,350, unscaled: to image \
+             coordinates add 100 to x and 50 to y, for the x and y the desk_ input tools \
+             take, counted from the screen's top left."
+        );
+        assert_eq!(
+            screen_line_of("desk", &r, Some((200, 150))),
+            "The desk screen is 3200 x 1800 physical pixels. This image is 200 x 150 and \
+             shows only the part of that screen from 100,50 to 500,350: multiply image \
+             coordinates by 2, then add 100 to x and 50 to y, for the x and y the desk_ \
+             input tools take, counted from the screen's top left."
+        );
+        let blind = screen_line_of("desk", &r, None);
+        assert!(blind.contains("by 400 / the image's width, then add 100 to x"), "{blind}");
+    }
+
+    #[test]
+    fn a_frame_is_asked_for_whole_or_in_part_scaled_or_not() {
+        let region = Region {
+            x: 100,
+            y: 50,
+            width: 400,
+            height: 300,
+        };
+        assert_eq!(frame_path_of(None, None), "/frame.jpg");
+        assert_eq!(frame_path_of(Some(800), None), frame_path(800));
+        assert_eq!(
+            frame_path_of(None, Some(region)),
+            "/frame.jpg?rx=100&ry=50&rw=400&rh=300"
+        );
+        assert_eq!(
+            frame_path_of(Some(200), Some(region)),
+            "/frame.jpg?w=200&rx=100&ry=50&rw=400&rh=300"
+        );
     }
 
     /// A JPEG head with a start of frame `marker` of `w` by `h`, after an

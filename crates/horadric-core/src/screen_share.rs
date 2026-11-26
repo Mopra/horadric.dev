@@ -200,6 +200,86 @@ pub fn scaled(width: u32, height: u32, max: Option<u32>) -> (u32, u32) {
     }
 }
 
+/// A part of the screen, in virtual screen pixels from its top left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Region {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// The names a frame's region is asked by, in the order x, y, width,
+/// height.
+pub const REGION_PARAMS: [&str; 4] = ["rx", "ry", "rw", "rh"];
+
+/// The part of the screen a frame was asked for, None when the whole of
+/// it was, or why what was asked is no region. It is as the viewer said
+/// it: [`Region::on`] holds it to a screen.
+pub fn region(query: &str) -> Result<Option<Region>, String> {
+    let [x, y, w, h] = REGION_PARAMS.map(|name| query_param(query, name));
+    if x.is_none() && y.is_none() && w.is_none() && h.is_none() {
+        return Ok(None);
+    }
+    const ALL: &str = "a region is rx, ry, rw and rh, in screen pixels from the screen's top left";
+    let at = |v: Option<String>, name: &str| {
+        let v = v.ok_or_else(|| format!("{ALL}: {name} is missing"))?;
+        v.parse::<i32>()
+            .map_err(|_| format!("{ALL}: {name} is not a whole number"))
+    };
+    let (x, y) = (at(x, "rx")?, at(y, "ry")?);
+    let (width, height) = (at(w, "rw")?, at(h, "rh")?);
+    if width < 1 || height < 1 {
+        return Err(format!("{ALL}: rw and rh are at least 1"));
+    }
+    Ok(Some(Region {
+        x,
+        y,
+        width: width as u32,
+        height: height as u32,
+    }))
+}
+
+impl Region {
+    /// The part of this region that is on a `width` by `height` screen,
+    /// None when none of it is.
+    pub fn on(self, width: u32, height: u32) -> Option<Region> {
+        let (x, y) = (i64::from(self.x), i64::from(self.y));
+        let (left, top) = (x.max(0), y.max(0));
+        let right = (x + i64::from(self.width)).min(i64::from(width));
+        let bottom = (y + i64::from(self.height)).min(i64::from(height));
+        (right > left && bottom > top).then(|| Region {
+            x: left as i32,
+            y: top as i32,
+            width: (right - left) as u32,
+            height: (bottom - top) as u32,
+        })
+    }
+
+    /// The query that asks for this region, without a question mark.
+    pub fn query(&self) -> String {
+        let [x, y, w, h] = REGION_PARAMS;
+        format!(
+            "{x}={}&{y}={}&{w}={}&{h}={}",
+            self.x, self.y, self.width, self.height
+        )
+    }
+}
+
+/// Why a region that is nowhere on the screen is refused.
+pub fn off_screen(width: u32, height: u32) -> String {
+    format!("the region is not on the screen, which is {width} x {height} pixels")
+}
+
+/// What a frame that could not be made answers. The error alone, a code
+/// and a word or two, tells an agent nothing about what to do next, and
+/// the usual reason is a session nobody is connected to.
+pub fn capture_failed(error: &str) -> String {
+    format!(
+        "The screen could not be captured. A disconnected or locked session has no          picture to take. Windows said: {error}"
+    )
+}
+
 /// A mouse button.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -695,6 +775,76 @@ mod tests {
         assert_eq!(scaled(1920, 1080, None), (1920, 1080));
         assert_eq!(scaled(1920, 1, Some(16)), (16, 1));
         assert_eq!(scaled(0, 0, Some(16)), (0, 0));
+    }
+
+    fn reg(x: i32, y: i32, width: u32, height: u32) -> Region {
+        Region {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn a_region_is_four_whole_numbers_or_none_at_all() {
+        assert_eq!(region(""), Ok(None));
+        assert_eq!(region("w=800"), Ok(None));
+        assert_eq!(
+            region("rx=100&ry=50&rw=400&rh=300"),
+            Ok(Some(reg(100, 50, 400, 300)))
+        );
+        assert_eq!(
+            region("w=800&rh=1&rw=2&ry=-3&rx=-4"),
+            Ok(Some(reg(-4, -3, 2, 1)))
+        );
+        for bad in [
+            "rx=1",
+            "rx=1&ry=2&rw=3",
+            "rx=1&ry=2&rw=3&rh=",
+            "rx=a&ry=2&rw=3&rh=4",
+            "rx=1.5&ry=2&rw=3&rh=4",
+            "rx=1&ry=2&rw=0&rh=4",
+            "rx=1&ry=2&rw=3&rh=-4",
+            "rx=1&ry=2&rw=99999999999&rh=4",
+        ] {
+            assert!(region(bad).is_err(), "{bad}");
+        }
+        assert!(region("rx=1&ry=2&rh=4").unwrap_err().contains("rw is missing"));
+    }
+
+    #[test]
+    fn a_region_is_held_to_the_screen() {
+        assert_eq!(reg(100, 50, 400, 300).on(1920, 1080), Some(reg(100, 50, 400, 300)));
+        assert_eq!(reg(0, 0, 1920, 1080).on(1920, 1080), Some(reg(0, 0, 1920, 1080)));
+        assert_eq!(reg(1800, 1000, 400, 300).on(1920, 1080), Some(reg(1800, 1000, 120, 80)));
+        assert_eq!(reg(-50, -20, 100, 100).on(1920, 1080), Some(reg(0, 0, 50, 80)));
+        assert_eq!(
+            reg(i32::MIN, i32::MIN, u32::MAX, u32::MAX).on(1920, 1080),
+            Some(reg(0, 0, 1920, 1080))
+        );
+        assert_eq!(reg(1919, 1079, 5, 5).on(1920, 1080), Some(reg(1919, 1079, 1, 1)));
+        assert_eq!(reg(1920, 0, 10, 10).on(1920, 1080), None);
+        assert_eq!(reg(0, 1080, 10, 10).on(1920, 1080), None);
+        assert_eq!(reg(-10, 0, 10, 10).on(1920, 1080), None);
+        assert_eq!(reg(i32::MAX, i32::MAX, u32::MAX, u32::MAX).on(1920, 1080), None);
+        assert_eq!(reg(0, 0, 10, 10).on(0, 0), None);
+    }
+
+    #[test]
+    fn a_region_asks_for_itself() {
+        let r = reg(-4, 50, 400, 300);
+        assert_eq!(r.query(), "rx=-4&ry=50&rw=400&rh=300");
+        assert_eq!(region(&format!("w=640&{}", r.query())), Ok(Some(r)));
+    }
+
+    #[test]
+    fn refusals_of_a_frame_say_what_to_make_of_them() {
+        assert!(off_screen(1920, 1080).contains("1920 x 1080"));
+        let said = capture_failed("The handle is invalid. (0x80070006)");
+        assert!(said.starts_with("The screen could not be captured."));
+        assert!(said.contains("disconnected or locked"));
+        assert!(said.ends_with("Windows said: The handle is invalid. (0x80070006)"));
     }
 
     /// The one event of a body holding one.
