@@ -83,12 +83,13 @@ use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc;
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::System::Threading::{
-    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetCurrentProcess, OpenProcess, OpenProcessToken, QueryFullProcessImageNameW,
+    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetLastActivePopup, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindow,
-    IsWindowVisible,
+    GetLastActivePopup, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
+    IsWindow, IsWindowVisible,
 };
 
 /// The administrators' list on disk. One file for the app and for the
@@ -471,6 +472,12 @@ pub(super) struct Request {
     /// the standing grants and the lists answer it: never a question, and
     /// nothing shown on the overlay, since nobody acts.
     pub recheck: bool,
+    /// The call is to start the program, `takeover_open`: no window of it
+    /// exists yet. An allowed start lets the window it brings be granted
+    /// too, see [`opened_covers`].
+    pub open: bool,
+    /// The packaged app a start is for, empty otherwise.
+    pub app_id: String,
 }
 
 /// Why a re-check was answered no: the look it asked after is no longer
@@ -603,7 +610,39 @@ pub(super) fn parse(body: &Value) -> Result<Request, String> {
         },
         administrator: body.get("administrator").and_then(Value::as_bool) == Some(true),
         recheck: body.get("recheck").and_then(Value::as_bool) == Some(true),
+        open: body.get("open").and_then(Value::as_bool) == Some(true),
+        app_id: text(body.get("app_id")).trim().to_string(),
     })
+}
+
+/// How long after an allowed start the window it brought may be granted
+/// as the program started. A start shows its window within seconds.
+pub(super) const OPENED_FOR: Duration = Duration::from_secs(60);
+
+/// Whether the window a session says its start brought is the program the
+/// human allowed it to start, `exe` (or packaged app `app_id`): the same
+/// exe name, as a name entry on the list covers it, wherever it runs from,
+/// since a launcher or a Store app's own exe shows the window. A host
+/// (ApplicationFrameHost, explorer) shows many things, so only by the app
+/// it shows, never by its name.
+pub(super) fn opened_covers(
+    exe: &str,
+    app_id: &str,
+    window_exe: &str,
+    window_app_id: Option<&str>,
+) -> bool {
+    if listed::is_horadric(window_exe) {
+        return false;
+    }
+    if listed::is_host(window_exe) {
+        let id = app_id.trim();
+        return !id.is_empty() && window_app_id.is_some_and(|w| w.trim().eq_ignore_ascii_case(id));
+    }
+    let bare = |e: &str| {
+        let e = listed_name(e, "").trim().to_lowercase();
+        e.strip_suffix(".exe").map(str::to_string).unwrap_or(e)
+    };
+    !bare(exe).is_empty() && bare(exe) == bare(window_exe)
 }
 
 /// A call waiting for the human, with where its answer goes.
@@ -730,6 +769,10 @@ pub(super) struct Takeover {
     asking: Option<(String, String)>,
     /// When each session last said Windows is about to ask for a helper.
     elevating: HashMap<String, Instant>,
+    /// The program each session was last allowed to start, by exe name
+    /// and packaged app id, and when: the window the start brings is
+    /// granted as it once, see [`App::takeover_opened`].
+    opened: HashMap<String, (String, String, Instant)>,
 }
 
 /// The least time between two notices that Windows will ask, per session.
@@ -888,6 +931,35 @@ fn level_of(pid: Option<u32>) -> Option<u32> {
     }
 }
 
+/// The full path of the program that shows window `hwnd`, and the
+/// window's title, as Windows tells them.
+fn program_of_window(hwnd: isize) -> Option<(String, String)> {
+    let h = HWND(hwnd as *mut _);
+    let mut pid = 0u32;
+    unsafe {
+        if !IsWindow(Some(h)).as_bool() {
+            return None;
+        }
+        GetWindowThreadProcessId(h, Some(&mut pid));
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let read = QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        );
+        let _ = CloseHandle(process);
+        read.ok()?;
+        let path = String::from_utf16_lossy(&buf[..len as usize]);
+        let mut text = [0u16; 512];
+        let n = GetWindowTextW(h, &mut text);
+        let title = String::from_utf16_lossy(&text[..n.max(0) as usize]);
+        Some((path, title))
+    }
+}
+
 /// Looks at the window a call names. The call's own word for how the
 /// program runs is the session's, and a session can send what it likes.
 fn seen_of(hwnd: isize, exe: &str) -> Seen {
@@ -1019,6 +1091,10 @@ impl App {
             ghost::done(&self.shared, &d.what, d.ok, &d.outcome);
             return call.reply.send(json!({}));
         }
+        if op == Some("desktop.opened") {
+            let granted = self.takeover_opened(&call.session, &call.body);
+            return call.reply.send(json!({ "granted": granted }));
+        }
         if call.body.get("op").and_then(Value::as_str) == Some("desktop.elevating") {
             // Windows is asked for a helper at most every minute or two,
             // so a session that says this more often is not believed.
@@ -1038,6 +1114,12 @@ impl App {
             Ok(r) => r,
             Err(e) => return call.reply.send(json!({ "error": e })),
         };
+        // The MCP process refuses this too; the app is who decides.
+        if request.open && listed::is_horadric(listed_name(&request.exe, &request.path)) {
+            return call
+                .reply
+                .send(json!({ "error": "Horadric's own programs are not started by takeover" }));
+        }
         let seen = seen_of(request.hwnd, &request.exe);
         let pending = Pending {
             session: call.session,
@@ -1195,6 +1277,48 @@ impl App {
         working.then(|| busy_text(program, &self.name_of(other), &self.ident_of(other), false))
     }
 
+    /// A session says the start it was allowed brought window `hwnd`:
+    /// grants it to operate that window's program as it was allowed to
+    /// operate the one started. Only once per start and within
+    /// [`OPENED_FOR`], only a window that is not elevated, and the program
+    /// is read here off the window, never taken from the session's word.
+    fn takeover_opened(&mut self, session: &str, body: &Value) -> bool {
+        let Some((exe, app_id, at)) = self.takeover.opened.remove(session) else {
+            return false;
+        };
+        let hwnd = body
+            .get("window")
+            .and_then(|w| w.get("hwnd"))
+            .and_then(Value::as_i64)
+            .and_then(|h| isize::try_from(h).ok())
+            .unwrap_or(0);
+        if at.elapsed() > OPENED_FOR || hwnd == 0 {
+            return false;
+        }
+        let Some((path, title)) = program_of_window(hwnd) else {
+            return false;
+        };
+        let window_exe = listed_name("", &path).to_string();
+        let seen = seen_of(hwnd, &window_exe);
+        if seen.above != Some(false)
+            || !opened_covers(&exe, &app_id, &window_exe, seen.app_id.as_deref())
+        {
+            return false;
+        }
+        let hosted = listed::hosted(&window_exe, seen.app_id.as_deref(), &title, hwnd);
+        let key = GrantKey::new(session, &path, &window_exe, false, &hosted);
+        let grant = self.takeover.grants.entry(key).or_default();
+        *grant = (*grant).max(Grant::Operate);
+        let name = self.name_of(session);
+        log(
+            &name,
+            Source::Asked(Some(Level::Operate)),
+            &path,
+            "the window of the program it was allowed to start",
+        );
+        true
+    }
+
     /// What the human answered for this session and program.
     fn grant_of(&self, p: &Pending) -> Grant {
         self.takeover
@@ -1294,6 +1418,13 @@ impl App {
         let ident = self.ident_of(&p.session);
         let program = shown_program(program_name(&p.request.exe), p.elevated);
         let r = p.request;
+        if r.open && r.action == Action::Operate && !p.elevated {
+            let exe = listed_name(&r.exe, &r.path).to_lowercase();
+            self.takeover.opened.insert(
+                p.session.clone(),
+                (exe, r.app_id.to_lowercase(), Instant::now()),
+            );
+        }
         if r.action == Action::Operate {
             self.takeover
                 .drivers
@@ -2042,6 +2173,32 @@ mod tests {
     }
 
     #[test]
+    fn a_start_s_window_is_granted_only_as_the_program_started() {
+        // A launcher's window runs from another folder, of the same name.
+        assert!(opened_covers("slack.exe", "", "Slack.exe", None));
+        assert!(opened_covers("notepad.exe", "", "Notepad.exe", None));
+        assert!(!opened_covers("slack.exe", "", "notepad.exe", None));
+        assert!(!opened_covers("", "", "x.exe", None));
+        // A host only by the app it shows.
+        let id = "Acme.Thing_x!App";
+        assert!(opened_covers(id, id, "ApplicationFrameHost.exe", Some("acme.thing_x!app")));
+        assert!(!opened_covers(id, id, "ApplicationFrameHost.exe", Some("Other!App")));
+        assert!(!opened_covers("explorer.exe", "", "explorer.exe", None));
+        assert!(!opened_covers("horadric.exe", "", "horadric.exe", None));
+        let body = json!({
+            "op": "desktop.allow",
+            "window": { "hwnd": 0, "title": "", "exe": "slack.exe", "path": "", "pid": 0 },
+            "action": "operate",
+            "what": "start Slack",
+            "open": true,
+            "app_id": " A!B ",
+        });
+        let r = parse(&body).unwrap();
+        assert!(r.open);
+        assert_eq!(r.app_id, "A!B");
+    }
+
+    #[test]
     fn a_request_is_read_from_its_body() {
         let body = json!({
             "op": "desktop.allow",
@@ -2073,6 +2230,8 @@ mod tests {
                 act: Act::default(),
                 administrator: false,
                 recheck: false,
+                open: false,
+                app_id: String::new(),
             })
         );
     }

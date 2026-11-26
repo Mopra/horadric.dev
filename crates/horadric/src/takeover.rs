@@ -86,6 +86,9 @@ use crate::takeover_helper::{
 };
 use crate::takeover_watch::{self as watch, changes_part, changes_text, digest, verdict, Until};
 
+/// `takeover_open`, starting a program that is not open yet.
+mod open;
+
 /// The most elements one snapshot holds, so a vast window can not take
 /// minutes or fill the context.
 const MOST_ELEMENTS: usize = 2000;
@@ -2804,6 +2807,12 @@ impl Takeover {
         if verb == "windows" {
             let known = |w: &Window| self.granted.contains_key(&w.pid);
             return Ok(vec![text(windows_text(&list_windows(), reach_of, known))]);
+        }
+        // The helper is never asked to start anything: what it starts
+        // would run as administrator.
+        if verb == "open" && !self.part {
+            let reason = short(s("reason").unwrap_or_default(), 300);
+            return self.open(args, &reason, app);
         }
         if name == PEEK && self.part {
             return Ok(vec![self.peek(args, app)]);

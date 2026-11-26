@@ -486,15 +486,19 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
             // Every other takeover tool asks the app before it reads, and
             // hears there that takeover is off. Listing the windows asks
             // nothing, so it is asked here: off shows no titles either,
-            // and nor does an app that did not say.
-            n if is_takeover(n) && n.ends_with("_windows") => match (self.mode)() {
-                Some(Mode::Off) => Err(OFF.into()),
-                None => Err(MODE_UNKNOWN.into()),
-                #[cfg(windows)]
-                Some(Mode::Ask) => self.takeover.tool(n, args, &mut self.app, self.settle),
-                #[cfg(not(windows))]
-                Some(Mode::Ask) => Err(format!("there is no tool {name}")),
-            },
+            // and nor does an app that did not say. Opening a program
+            // that is already open answers with its windows unasked, so it
+            // is held to the same.
+            n if is_takeover(n) && (n.ends_with("_windows") || n.ends_with("_open")) => {
+                match (self.mode)() {
+                    Some(Mode::Off) => Err(OFF.into()),
+                    None => Err(MODE_UNKNOWN.into()),
+                    #[cfg(windows)]
+                    Some(Mode::Ask) => self.takeover.tool(n, args, &mut self.app, self.settle),
+                    #[cfg(not(windows))]
+                    Some(Mode::Ask) => Err(format!("there is no tool {name}")),
+                }
+            }
             #[cfg(windows)]
             n if is_takeover(n) => self.takeover.tool(n, args, &mut self.app, self.settle),
             _ => Err(format!("there is no tool {name}")),
@@ -1211,6 +1215,30 @@ fn takeover_tools() -> Vec<Value> {
             &[],
         ),
         tool(
+            "takeover_open",
+            "Start a program on the user's own desktop when the one you need there is not open \
+             (asked to look through Slack, and Slack is not running). Give app, a name like \
+             slack, outlook, notepad or edge, found the way the Run box and the Start menu find \
+             it, or path: a program's .exe, a shortcut to one, or shell:AppsFolder\\<id> for a \
+             Store app. One already open is not started again: the answer lists its windows. \
+             Otherwise the user is asked once whether this session may operate it, and the \
+             answer names its window, which you may then operate without that question again \
+             (risky actions are still asked). It is never started as administrator: one that \
+             only runs so is refused, so ask the user to start it.",
+            json!({
+                "app": { "type": "string", "description": "The program's name, like slack, outlook or notepad" },
+                "path": { "type": "string", "description": "Or its .exe, a shortcut (.lnk) to it, or shell:AppsFolder\\<id>" },
+                "args": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "What to start it with, like a file for it to open",
+                },
+                "risky": risky(),
+                "reason": reason(),
+            }),
+            &[],
+        ),
+        tool(
             "takeover_snapshot",
             "A window's controls as text, through UI Automation: each button, field, list, tree \
              item and label with its type, name, value, automation id, whether it is enabled, \
@@ -1465,7 +1493,7 @@ browser_close when you are done, unless the user is using it. It keeps one login
 the user's own use of it, so take care on sites where they are logged in.";
 
 /// What a Windows session is told of takeover, after the desk.
-const TAKEOVER: &str = "The takeover_ tools (not listed while the user has takeover off) operate a program on the user's own desktop and take their mouse and keyboard while they act: only for a program that is already open there or works only there (it runs as administrator, or is bound to hardware or a licence). A closed desk is never a reason to take over: say the desk is closed and ask. The user approves each program once per session and confirms each risky action, so give every takeover call but takeover_windows a reason: one short sentence, in the user's language, saying what you are about to do and why. Read with takeover_snapshot and act by its refs or by name, which are surer than points; ask takeover_changes what changed and wait with takeover_wait rather than taking snapshots again and again.";
+const TAKEOVER: &str = "The takeover_ tools (not listed while the user has takeover off) operate a program on the user's own desktop and take their mouse and keyboard while they act: only for a program that is open there or works only there (it runs as administrator, or is bound to hardware or a licence). When the program you need there is not open, takeover_open starts it, with the user's approval. A closed desk is never a reason to take over: say the desk is closed and ask. The user approves each program once per session and confirms each risky action, so give every takeover call but takeover_windows a reason: one short sentence, in the user's language, saying what you are about to do and why. Read with takeover_snapshot and act by its refs or by name, which are surer than points; ask takeover_changes what changed and wait with takeover_wait rather than taking snapshots again and again.";
 
 #[cfg(test)]
 mod tests {
@@ -1699,6 +1727,7 @@ B.";
         };
         for n in [
             "takeover_windows",
+            "takeover_open",
             "takeover_snapshot",
             "takeover_screenshot",
             "takeover_click",
@@ -1709,6 +1738,13 @@ B.";
             "takeover_wait",
         ] {
             named(n);
+        }
+        assert_eq!(named("takeover_open")["inputSchema"]["required"], json!([]));
+        for k in ["app", "path", "args", "reason"] {
+            assert!(
+                !named("takeover_open")["inputSchema"]["properties"][k].is_null(),
+                "{k}"
+            );
         }
         assert_eq!(
             named("takeover_changes")["inputSchema"]["required"],
@@ -1745,6 +1781,7 @@ B.";
             );
         }
         for n in [
+            "takeover_open",
             "takeover_snapshot",
             "takeover_screenshot",
             "takeover_click",
@@ -1772,6 +1809,7 @@ B.";
             "give every takeover call",
             "takeover_changes what changed",
             "takeover_wait",
+            "takeover_open starts it",
             // The one story: the desk first, and a closed desk is no
             // reason to take the human's own mouse.
             "The desk_ tools are the default",
@@ -1848,8 +1886,8 @@ B.";
         assert!(on.contains("\"takeover_click\"") && !off.contains("takeover_"));
         assert!(off.contains("\"desk_click\"") && off.contains("\"browser_click\""));
         assert!(on.len() - off.len() > 6000, "{}", on.len() - off.len());
-        for name in ["takeover_windows", "desktop_windows"] {
-            let a = s.handle(&call(name, json!({}))).unwrap();
+        for name in ["takeover_windows", "desktop_windows", "takeover_open"] {
+            let a = s.handle(&call(name, json!({ "app": "notepad" }))).unwrap();
             assert_eq!(a["result"]["isError"], true);
             assert_eq!(a["result"]["content"][0]["text"], OFF);
         }
