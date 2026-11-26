@@ -224,11 +224,15 @@ mod quests;
 #[cfg(windows)]
 mod recent;
 #[cfg(windows)]
+mod remote_gate;
+#[cfg(windows)]
 mod render;
 #[cfg(windows)]
 mod retinue;
 #[cfg(windows)]
 pub mod sanctuary;
+#[cfg(windows)]
+pub mod desk;
 #[cfg(windows)]
 mod screen_share;
 #[cfg(windows)]

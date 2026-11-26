@@ -59,6 +59,8 @@ const FLAME_STRIDE: usize = 2;
 
 /// What the user picked from the menu.
 pub enum Choice {
+    /// A line of the agent's desk's menu, which `desk::window` reads.
+    Desk(usize),
     /// Start a session in a folder chosen with the picker.
     New,
     /// Start a session in this recent project.
@@ -464,6 +466,7 @@ pub fn menu(m: Menu) -> Option<Choice> {
         None => Item::action(SIGN_IN, "Sign in to find your other PCs\u{2026}"),
     });
     items.push(Item::Submenu("Other PCs".into(), machines));
+    items.push(crate::desk::window::tray_item());
     items.push(Item::Separator);
 
     items.push(Item::action(SETTINGS, "Settings\u{2026}"));
@@ -479,6 +482,7 @@ pub fn menu(m: Menu) -> Option<Choice> {
         NEW => Some(Choice::New),
         QUIT => Some(Choice::Quit),
         SETTINGS => Some(Choice::Settings),
+        i if crate::desk::window::tray_owns(i) => Some(Choice::Desk(i)),
         CONTEXT => Some(Choice::Context),
         TIDY => Some(Choice::Tidy),
         NEXT => Some(Choice::NextWaiting),
