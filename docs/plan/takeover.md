@@ -118,9 +118,13 @@ and drops the input sent there. For such a window the engine starts the
 helper as administrator, which Windows asks the human about, and hands
 it the call over two named pipes.
 
-- It is bound at its start to one program, by full path. A second
-  elevated program means a second helper and a second question from
-  Windows.
+- It is bound at its start to one program, by full path. A session has
+  one helper at a time. A call for a second elevated program ends the
+  first helper and starts one for the second, which Windows asks the
+  human about again, but not within 60 seconds of Windows last asking:
+  until then the call is refused with how long is left. Going back to
+  the first program ends that helper in turn, and Windows asks a third
+  time.
 - It checks every window itself, asks in a window of its own, judges
   risk itself and keeps its own log. The next section says why.
 - For such a program the helper also does the watching.
@@ -241,8 +245,18 @@ The elevated helper trusts neither the session nor the app:
 - Its log, `takeover-elevated.log` beside the administrators' list, is
   the one record the session can not rewrite.
 
+The questions are not walls against a session either. Horadric's own
+question and its tray menu take clicks and messages from any program of
+the user, so a session could answer them itself; only Bypass, the
+plate's speed slider and the elevated helper's own window refuse input
+a program sent.
+
 What this does not promise:
 
+- An administrator's pattern lets its action through in an Open or
+  Save dialog too: the helper asks about everything while one is open,
+  but a pre-approved action is not asked, so a pattern written for such
+  a dialog lets it start what that dialog can start.
 - Operating a program that runs as administrator can not be contained
   to it. Its Open and Save dialogs can start other programs with its
   rights, so the helper asks about every action while one is open and
@@ -405,10 +419,25 @@ this has been seen working on a real program:
   When a file is moved is a tested rule; no real `desktop-programs.json`
   has been carried over.
 - The tray's "Off" and "Ask before each program", and the tools leaving
-  a session's list while it is off.
+  a session's list while it is off, told to a running session by
+  `notifications/tools/list_changed`. That it is on, asking, by default
+  on a fresh install and after an upgrade is a tested rule of the
+  saved state, not seen on a real install.
+- The switch to a second helper: the first one ended, the 60 second
+  hold, and Windows asking again on the way back.
+- Esc stopping typing between its pieces and before its Enter.
+- The watcher's re-check answered without a question or the overlay.
+- The question showing the whole text to type, widened for a long one,
+  and refused when even that does not fit.
 
 ## Left
 
+- How `ask_first` asks about a program that only hosts others, before
+  what it shows is read (review finding 7).
+- An elevated program's file dialog is asked twice, by the helper and
+  by the app (review finding 8).
+- Keeping two helpers, one per elevated program, so going back and forth
+  does not have Windows ask each time (review finding 9).
 - Try everything above against a real program, an elevated one among
   them, with the human watching.
 - Host this engine in the desk's hand, so the desk gets snapshots with
