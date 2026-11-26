@@ -745,6 +745,9 @@ pub struct FieldLook<'a> {
     /// While the field has the keyboard and the caret is lit.
     pub caret: Option<Rect>,
     pub focused: bool,
+    /// Room kept clear at the field's right end, for a key drawn there:
+    /// the text is cut off before it.
+    pub keep_right: f32,
 }
 
 impl UsageScene<'_> {
@@ -2099,8 +2102,6 @@ impl Painter<'_> {
             else {
                 continue;
             };
-            // The key covers what text runs under it.
-            self.fill_rounded(eye, 6.0, theme::well());
             let b = scene.button(SettingsHit::Part(*i, 1));
             if let (Some(fill), _) = theme::button_look(b) {
                 self.fill_rounded(eye, 6.0, fill);
@@ -2698,7 +2699,8 @@ impl Painter<'_> {
                 1.0,
             );
         }
-        let inner = layout::ask_inner(&f.rect);
+        let mut inner = layout::ask_inner(&f.rect);
+        inner.w = (inner.w - f.keep_right).max(0.0);
         self.rt.PushAxisAlignedClip(
             &rect(&Rect::new(inner.x - 2.0, inner.y, inner.w + 4.0, inner.h)),
             D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,

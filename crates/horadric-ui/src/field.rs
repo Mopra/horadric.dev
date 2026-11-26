@@ -4,7 +4,9 @@
 //! [`utf16_at`] and [`byte_at`] turn one into the other.
 
 /// One field's text, with the caret and the other end of the selection.
-#[derive(Debug, Clone, PartialEq)]
+/// Its Debug says how long the text is, never what it is: a field may
+/// hold a secret being typed.
+#[derive(Clone, PartialEq)]
 pub struct Field {
     pub text: String,
     pub caret: usize,
@@ -22,6 +24,12 @@ pub struct Field {
     history: History,
 }
 
+impl std::fmt::Debug for Field {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Field({} characters)", self.text.chars().count())
+    }
+}
+
 /// What a verbatim field was given, so [`Field::value`] can hand an
 /// unedited text back byte for byte and an edited one with its line breaks.
 #[derive(Debug, Clone, PartialEq)]
@@ -33,13 +41,13 @@ pub struct Verbatim {
 /// Each change to the text, for Ctrl+Z and Ctrl+Y. A change is kept as what
 /// it took out and put in, not a copy of the text, since a field can hold a
 /// whole file.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Clone, PartialEq, Default)]
 struct History {
     undo: Vec<Edit>,
     redo: Vec<Edit>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 struct Edit {
     at: usize,
     removed: String,

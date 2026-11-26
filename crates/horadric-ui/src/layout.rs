@@ -1086,10 +1086,17 @@ fn row_parts(m: &Metrics, rect: Rect, shape: &RowShape) -> Vec<Rect> {
 /// Where the text of a field part stands, clear of its show key.
 pub fn settings_field_inner(field: &Rect, eye: bool) -> Rect {
     let mut inner = ask_inner(field);
-    if eye {
-        inner.w = (inner.w - SETTINGS_EYE_W - 4.0).max(0.0);
-    }
+    inner.w = (inner.w - settings_key_room(eye)).max(0.0);
     inner
+}
+
+/// The room a field's show key takes from its text.
+pub fn settings_key_room(eye: bool) -> f32 {
+    if eye {
+        SETTINGS_EYE_W + 4.0
+    } else {
+        0.0
+    }
 }
 
 const SETTINGS_TITLE_H: f32 = 40.0;

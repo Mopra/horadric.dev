@@ -493,11 +493,19 @@ pub fn secrets_lines(key: &str) -> Vec<Line> {
         return Vec::new();
     }
     if afar(key) {
-        return vec![line(
+        let mut rows = vec![line(
             Row::Afar,
             "Kept on the machine it runs on".into(),
             Control::Note,
         )];
+        // A draft begun in another project still shows, here too: a live
+        // draft is never hidden.
+        UI.with(|u| {
+            if let Some(form) = &u.borrow().form {
+                secrets::form_lines(form, false, &mut rows);
+            }
+        });
+        return rows;
     }
     let now = now();
     with_view(Some(key), |v| {
@@ -522,6 +530,24 @@ pub enum After {
     Nothing,
     /// The keyboard goes to this row.
     Focus(Row),
+    /// The keyboard goes to this part of this row.
+    FocusPart(Row, usize),
+}
+
+thread_local! {
+    /// When Forget was pressed, so a second click of a double click or a
+    /// key held down never lands on what it turned into.
+    static ASKED: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
+}
+
+/// Whether a confirm press `since` after Forget's is too soon to be meant:
+/// within the double click time `double_ms`.
+fn too_soon(since: std::time::Duration, double_ms: u32) -> bool {
+    since.as_millis() < u128::from(double_ms)
+}
+
+fn double_click_ms() -> u32 {
+    unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime() }
 }
 
 /// A change to the sealed store a click asks for, made once every borrow
@@ -552,9 +578,10 @@ fn clicked(v: &View, ui: &mut Ui, row: Row, part: Option<usize>) -> (After, Opti
         .as_ref()
         .and_then(|id| v.find(id).map(|i| (id.clone(), i)));
     let nothing = (After::Nothing, None);
+    let home = secrets::Home::of(v);
     match (row, part) {
-        (Row::Adds, Some(0)) => (start(ui, Form::add_secret("")), None),
-        (Row::Adds, Some(1)) => (start(ui, Form::add_login()), None),
+        (Row::Adds, Some(0)) => (start(ui, Form::add_secret(&home, "")), None),
+        (Row::Adds, Some(1)) => (start(ui, Form::add_login(&home)), None),
         (Row::Group(g), _) => {
             ui.fold(g);
             nothing
@@ -566,7 +593,7 @@ fn clicked(v: &View, ui: &mut Ui, row: Row, part: Option<usize>) -> (After, Opti
             (After::Focus(row), None)
         }
         (Row::Missing(i), _) => match v.missing.get(i as usize) {
-            Some(name) => (start(ui, Form::add_secret(name)), None),
+            Some(name) => (start(ui, Form::add_secret(&home, name)), None),
             None => nothing,
         },
         (Row::Allowed(j), Some(0)) => {
@@ -587,31 +614,48 @@ fn clicked(v: &View, ui: &mut Ui, row: Row, part: Option<usize>) -> (After, Opti
             let Some((id, _)) = kept else {
                 return nothing;
             };
-            let login = id.kind == store::Kind::WebLogin;
+            let kind = id.kind;
+            let login = kind == store::Kind::WebLogin;
+            let keep = secrets::keep_part(kind);
             match (ui.confirm, login, j) {
-                (true, _, 0) => (After::Nothing, Some(Deed::Forget(id))),
+                (true, _, j) if j != keep => {
+                    let early = ASKED
+                        .with(Cell::get)
+                        .is_some_and(|at| too_soon(at.elapsed(), double_click_ms()));
+                    if early {
+                        return nothing;
+                    }
+                    (After::Nothing, Some(Deed::Forget(id)))
+                }
+                // Kept: the keyboard goes back to Forget, where Keep it
+                // stood.
                 (true, _, _) => {
                     ui.confirm = false;
-                    (After::Focus(Row::Actions), None)
+                    (
+                        After::FocusPart(Row::Actions, if login { 2 } else { 1 }),
+                        None,
+                    )
                 }
-                (false, false, 0) => (start(ui, Form::replace(id, Slot::Value)), None),
-                (false, true, 0) => (start(ui, Form::replace(id, Slot::Password)), None),
-                (false, true, 1) => (start(ui, Form::replace(id, Slot::Seed)), None),
+                (false, false, 0) => (start(ui, Form::replace(&home, id, Slot::Value)), None),
+                (false, true, 0) => (start(ui, Form::replace(&home, id, Slot::Password)), None),
+                (false, true, 1) => (start(ui, Form::replace(&home, id, Slot::Seed)), None),
                 (false, _, _) => {
                     ui.confirm = true;
-                    (After::Focus(Row::Actions), None)
+                    ASKED.with(|a| a.set(Some(std::time::Instant::now())));
+                    (After::FocusPart(Row::Actions, keep), None)
                 }
             }
         }
         (Row::Whose, Some(j)) => {
-            let offered = secrets::offers(v);
-            if let (Some(form), Some((w, _))) = (ui.form.as_mut(), offered.get(j)) {
-                form.whose = *w;
-                form.edited(Slot::Whose);
+            if let Some(form) = ui.form.as_mut() {
+                if let Some((w, _)) = secrets::offers(&form.home).get(j) {
+                    form.whose = *w;
+                    form.edited(Slot::Whose);
+                }
             }
             nothing
         }
-        (Row::FormButtons, Some(0)) => save(v, ui),
+        (Row::FormButtons, Some(0)) => save(ui),
         (Row::FormButtons, Some(_)) => {
             ui.form = None;
             nothing
@@ -629,12 +673,11 @@ fn clicked(v: &View, ui: &mut Ui, row: Row, part: Option<usize>) -> (After, Opti
 
 /// Save pressed, or Enter in the form: what to keep, or every problem
 /// shown and the keyboard at the first.
-fn save(v: &View, ui: &mut Ui) -> (After, Option<Deed>) {
+fn save(ui: &mut Ui) -> (After, Option<Deed>) {
     let Some(form) = ui.form.as_mut() else {
         return (After::Nothing, None);
     };
-    let offered = secrets::offers(v);
-    match secrets::decide(form, &v.key, v.slug().as_deref(), &offered) {
+    match secrets::decide(form) {
         Ok(save) => (After::Nothing, Some(Deed::Save(save))),
         Err(wrong) => {
             form.tried = true;
@@ -650,12 +693,38 @@ fn save(v: &View, ui: &mut Ui) -> (After, Option<Deed>) {
     }
 }
 
-/// Keeps what `deed` asks in the sealed store.
+/// Keeps what `deed` asks in the sealed store, or says why not in words
+/// the section shows.
 fn apply(deed: &Deed) -> Result<(), String> {
+    let gone = match deed {
+        Deed::Save(
+            Save::Value { item, .. } | Save::Password { item, .. } | Save::Seed { item, .. },
+        ) => Some(item.name.clone()),
+        _ => None,
+    };
+    match stored(deed) {
+        Ok(0) => match gone {
+            Some(name) => Err(format!("{name} is no longer kept; add it again")),
+            None => Ok(()),
+        },
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("Not kept: {e}")),
+    }
+}
+
+/// Makes the change `deed` asks, and says how many kept items it changed
+/// in place: none for a replacement means its item went meanwhile.
+fn stored(deed: &Deed) -> Result<usize, String> {
+    let mut n = 0;
+    let r = change(deed, &mut n);
+    r.map(|()| n)
+}
+
+fn change(deed: &Deed, n: &mut usize) -> Result<(), String> {
     let same =
         |name: &str, owner: &Owner, id: &secrets::ItemId| id.name == name && id.owner == *owner;
     match deed {
-        Deed::Save(save) => keep(save),
+        Deed::Save(save) => keep(save, n),
         Deed::Forget(id) => store::change(|v| match id.kind {
             store::Kind::Secret => v.secrets.retain(|s| !same(&s.name, &s.owner, id)),
             store::Kind::WebLogin => v.logins.retain(|l| !same(&l.name, &l.owner, id)),
@@ -679,7 +748,7 @@ fn apply(deed: &Deed) -> Result<(), String> {
 /// takes the place of one of the same name and owner, allowed for
 /// nothing yet, and a new value is a new secret whose Always answers are
 /// asked again.
-fn keep(save: &Save) -> Result<(), String> {
+fn keep(save: &Save, n: &mut usize) -> Result<(), String> {
     match save {
         Save::Secret { name, owner, value } => store::change(|v| {
             v.secrets
@@ -720,6 +789,7 @@ fn keep(save: &Save) -> Result<(), String> {
             {
                 s.value = value.clone();
                 s.allowed.clear();
+                *n += 1;
             }
         }),
         Save::Password { item, password } => store::change(|v| {
@@ -729,6 +799,7 @@ fn keep(save: &Save) -> Result<(), String> {
                 .filter(|l| l.name == item.name && l.owner == item.owner)
             {
                 l.password = password.clone();
+                *n += 1;
             }
         }),
         Save::Seed { item, seed } => store::change(|v| {
@@ -738,6 +809,7 @@ fn keep(save: &Save) -> Result<(), String> {
                 .filter(|l| l.name == item.name && l.owner == item.owner)
             {
                 l.totp = seed.clone();
+                *n += 1;
             }
         }),
     }
@@ -765,7 +837,7 @@ fn carry_out(deed: Deed) {
     UI.with(|u| {
         let mut u = u.borrow_mut();
         match (&result, &deed) {
-            (Err(e), _) => u.failure = Some(format!("Not kept: {e}")),
+            (Err(e), _) => u.failure = Some(e.clone()),
             (Ok(()), Deed::Save(save)) => {
                 u.form = None;
                 u.failure = None;
@@ -775,6 +847,7 @@ fn carry_out(deed: Deed) {
                 u.expanded = None;
                 u.confirm = false;
                 u.failure = None;
+                ASKED.with(|a| a.set(None));
             }
             (Ok(()), Deed::Unallow(..)) => u.failure = None,
         }
@@ -858,31 +931,51 @@ pub fn closed() {
 
 /// What the window draws of a field of the section.
 pub struct InputLook {
-    /// As drawn: dots for a secret not shown.
+    /// As drawn: dots for a secret not shown. Empty for a secret shown in
+    /// clear whose text the window already laid out at this `rev`: it is
+    /// not copied out again.
     pub text: String,
+    /// A secret shown in clear, whose layout the window keeps while it is.
+    pub clear: bool,
+    /// The form's count of changes, for that layout.
+    pub rev: u64,
+    pub empty: bool,
     /// In UTF-16 units, as DirectWrite counts.
     pub caret: u32,
     pub anchor: u32,
     pub placeholder: &'static str,
 }
 
-pub fn input_look(row: Row) -> Option<InputLook> {
+/// The field of `row` as drawn. `laid` is the change count of the clear
+/// text the window has laid out already, if any.
+pub fn input_look(row: Row, laid: Option<u64>) -> Option<InputLook> {
     UI.with(|u| {
         let u = u.borrow();
-        let (t, hidden, placeholder) = match row {
-            Row::Filter => (&u.filter, false, "Part of a name"),
+        let (t, secret, shown, rev, placeholder) = match row {
+            Row::Filter => (&u.filter, false, false, 0, "Part of a name"),
             Row::Input(slot) => {
                 let f = u.form.as_ref()?;
                 (
                     f.field(slot)?,
-                    slot.secret() && !f.shown,
+                    slot.secret(),
+                    f.shown,
+                    f.rev,
                     slot.placeholder(&f.purpose),
                 )
             }
             _ => return None,
         };
+        let clear = secret && shown;
+        let text = if clear && laid == Some(rev) {
+            String::new()
+        } else {
+            secrets::display(t, secret && !shown)
+        };
         Some(InputLook {
-            text: secrets::display(t, hidden),
+            text,
+            clear,
+            rev,
+            empty: t.text.is_empty(),
             caret: field::utf16_at(&t.text, t.caret),
             anchor: field::utf16_at(&t.text, t.anchor),
             placeholder,
@@ -945,8 +1038,9 @@ pub fn input_paste(row: Row, s: &str) {
             return None;
         }
         match ask::secret_paste(s, t.room()) {
-            Ok(s) => {
+            Ok(mut s) => {
                 t.insert(&s);
+                field::zero(&mut s);
                 None
             }
             Err(why) => Some(why),
@@ -1917,6 +2011,13 @@ mod tests {
         assert_eq!(counted(2, 1), "2 secrets and a web login");
         assert_eq!(counted(1, 0), "a secret");
         assert_eq!(counted(0, 3), "3 web logins");
+    }
+
+    #[test]
+    fn a_confirm_inside_the_double_click_time_is_not_taken() {
+        use std::time::Duration;
+        assert!(too_soon(Duration::from_millis(200), 500));
+        assert!(!too_soon(Duration::from_millis(500), 500));
     }
 
     #[test]

@@ -1138,6 +1138,18 @@ pub struct SettingsWindow {
     dragging: Cell<Option<VaultRow>>,
     /// How far each field's text is scrolled to keep its caret in view.
     scrolls: RefCell<Vec<(VaultRow, f32)>>,
+    /// A secret shown in clear, laid out once per change and kept while it
+    /// is shown, so its value is not copied out at every paint.
+    clear: RefCell<
+        Vec<(
+            VaultRow,
+            u64,
+            windows::Win32::Graphics::DirectWrite::IDWriteTextLayout,
+        )>,
+    >,
+    /// The input method is turned off while a secret field has the
+    /// keyboard: a composition window would show what is typed.
+    ime_off: Cell<bool>,
     /// The window's size in DIPs, as the user left it.
     size: Cell<(f32, f32)>,
     /// How far the rows are scrolled down, in DIPs.
@@ -1212,6 +1224,8 @@ impl SettingsWindow {
             high: Cell::new(None),
             dragging: Cell::new(None),
             scrolls: RefCell::new(Vec::new()),
+            clear: RefCell::new(Vec::new()),
+            ime_off: Cell::new(false),
             size: Cell::new(size),
             scroll: Cell::new(0.0),
             query: RefCell::new(String::new()),
@@ -1269,6 +1283,7 @@ impl SettingsWindow {
         // closed it, and a value typed must not outlive what it was typed
         // into.
         vault::closed();
+        self.clear.borrow_mut().clear();
         unsafe {
             let _ = DestroyWindow(self.hwnd);
         }
@@ -1343,6 +1358,7 @@ impl SettingsWindow {
             self.focus.set(None);
         }
         *self.layout.borrow_mut() = l;
+        self.sync_ime();
         self.refresh_hover();
         self.invalidate();
     }
@@ -1399,10 +1415,56 @@ impl SettingsWindow {
         vault::InputLook,
         layout::Rect,
     )> {
-        let look = vault::input_look(row)?;
+        let laid = self
+            .clear
+            .borrow()
+            .iter()
+            .find(|(r, _, _)| *r == row)
+            .map(|(_, rev, _)| *rev);
+        let mut look = vault::input_look(row, laid)?;
         let inner = layout::settings_field_inner(&rect, secret);
-        let text = render::field_layout(&self.shared.gpu, &look.text, &inner, false).ok()?;
+        let mut clear = self.clear.borrow_mut();
+        if !look.clear {
+            clear.retain(|(r, _, _)| *r != row);
+            let text = render::field_layout(&self.shared.gpu, &look.text, &inner, false).ok()?;
+            return Some((text, look, inner));
+        }
+        if let Some((_, _, text)) = clear
+            .iter()
+            .find(|(r, rev, _)| *r == row && *rev == look.rev)
+        {
+            return Some((text.clone(), look, inner));
+        }
+        let text = render::field_layout(&self.shared.gpu, &look.text, &inner, false).ok();
+        crate::field::zero(&mut look.text);
+        let text = text?;
+        clear.retain(|(r, _, _)| *r != row);
+        clear.push((row, look.rev, text.clone()));
         Some((text, look, inner))
+    }
+
+    /// Turns the input method off while a secret field has the keyboard,
+    /// and back on after.
+    fn sync_ime(&self) {
+        let rows = self.lines();
+        let secret = self.input().is_some_and(|r| {
+            stop_row(
+                &rows,
+                Stop {
+                    field: Field::Vault(r),
+                    part: 0,
+                },
+            )
+            .is_some_and(|i| matches!(rows[i].control, Control::Input { secret: true, .. }))
+        });
+        if self.ime_off.replace(secret) == secret {
+            return;
+        }
+        use windows::Win32::UI::Input::Ime::{ImmAssociateContextEx, HIMC, IACE_DEFAULT};
+        let flags = if secret { 0 } else { IACE_DEFAULT };
+        unsafe {
+            let _ = ImmAssociateContextEx(self.hwnd, HIMC::default(), flags);
+        }
     }
 
     fn field_scroll(&self, row: VaultRow) -> f32 {
@@ -1448,6 +1510,11 @@ impl SettingsWindow {
                 texts.push((i, row, *rect, text, look, inner));
             }
         }
+        // What is no longer drawn keeps no layout of a clear value.
+        self.clear
+            .borrow_mut()
+            .retain(|(r, _, _)| texts.iter().any(|t| t.1 == *r));
+        let rows_controls: Vec<Control> = lines.iter().map(|l| l.control).collect();
         let mut fields = Vec::new();
         for (i, row, rect, text, look, inner) in &texts {
             let caret = render::caret_at(text, look.caret);
@@ -1465,7 +1532,7 @@ impl SettingsWindow {
                 FieldLook {
                     rect: *rect,
                     text,
-                    placeholder: look.text.is_empty().then_some(look.placeholder),
+                    placeholder: look.empty.then_some(look.placeholder),
                     multiline: false,
                     scroll: (sx, 0.0),
                     selection: if focused || a != b {
@@ -1475,6 +1542,10 @@ impl SettingsWindow {
                     },
                     caret: focused.then_some(caret),
                     focused,
+                    keep_right: layout::settings_key_room(matches!(
+                        rows_controls.get(*i),
+                        Some(Control::Input { secret: true, .. })
+                    )),
                 },
             ));
         }
@@ -1592,6 +1663,8 @@ impl SettingsWindow {
     fn focus_on(&self, to: Option<Stop>) {
         self.focus.set(to);
         self.typing.set(false);
+        // Half a character typed into one field never joins the next.
+        self.high.set(None);
         if let Some(row) = self.input() {
             vault::input_edit(row, crate::field::Field::select_all);
         }
@@ -1606,6 +1679,7 @@ impl SettingsWindow {
         };
         drop(l);
         self.scroll_by(dy);
+        self.sync_ime();
         self.invalidate();
     }
 
@@ -1613,14 +1687,17 @@ impl SettingsWindow {
     /// after a click or a key in the Secrets section.
     fn after(&self, after: After) {
         self.relayout();
-        if let After::Focus(row) = after {
-            let stop = Stop {
-                field: Field::Vault(row),
-                part: 0,
-            };
-            if stop_row(&self.lines(), stop).is_some() {
-                self.focus_on(Some(stop));
-            }
+        let (row, part) = match after {
+            After::Focus(row) => (row, 0),
+            After::FocusPart(row, part) => (row, part),
+            After::Nothing => return,
+        };
+        let stop = Stop {
+            field: Field::Vault(row),
+            part,
+        };
+        if stop_row(&self.lines(), stop).is_some() {
+            self.focus_on(Some(stop));
         }
     }
 
@@ -1639,7 +1716,9 @@ impl SettingsWindow {
             u if u < 0x20 || u == 0x7F => return,
             u => String::from_utf16_lossy(&[u]),
         };
+        let mut s = s;
         vault::input_typed(row, &s);
+        crate::field::zero(&mut s);
         self.relayout();
     }
 
@@ -1687,8 +1766,10 @@ impl SettingsWindow {
                     }
                 }
                 Some('V') => {
-                    if let Some(s) = crate::clipboard::get_text() {
+                    if let Some(mut s) = crate::clipboard::get_text() {
                         vault::input_paste(row, &s);
+                        // It may be a secret: no copy of it lingers here.
+                        crate::field::zero(&mut s);
                     }
                 }
                 Some('Z') => edit(&|f| {
@@ -2037,6 +2118,7 @@ impl SettingsWindow {
             }
             WM_LBUTTONDOWN => {
                 if self.focus.take().is_some() | self.typing.replace(false) {
+                    self.sync_ime();
                     self.invalidate();
                 }
                 unsafe {
@@ -2054,6 +2136,8 @@ impl SettingsWindow {
                             field: Field::Vault(row),
                             part: 0,
                         }));
+                        self.high.set(None);
+                        self.sync_ime();
                         let (x, y) = self.point(lparam);
                         self.field_point(i, row, x, y, held().shift);
                         self.dragging.set(Some(row));

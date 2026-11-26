@@ -356,12 +356,48 @@ pub enum Whose {
     Everywhere,
 }
 
-/// The owners offered for the project of `v`: its identity only when it
+/// The project a form was started in, kept with it: a draft saves where
+/// it was begun, whatever project is picked when Save is pressed.
+#[derive(Clone, PartialEq, Eq, Default)]
+pub struct Home {
+    pub key: String,
+    /// Its identity's slug and name, when it has one.
+    pub slug: Option<String>,
+    pub identity: Option<String>,
+    /// Its name, as the form's title says it.
+    pub project: String,
+}
+
+impl Home {
+    pub fn of(v: &View) -> Home {
+        let slug = v.slug();
+        Home {
+            key: v.key.clone(),
+            identity: slug.as_ref().map(|s| v.identity_name(s)),
+            slug,
+            project: super::settings::short(&v.key).to_string(),
+        }
+    }
+
+    /// Whose `owner` is, in words: a project, an identity, or every one.
+    fn owner_words(&self, owner: &Owner) -> String {
+        match owner {
+            Owner::Project(k) => super::settings::short(k).to_string(),
+            Owner::Identity(s) if Some(s) == self.slug.as_ref() => {
+                self.identity.clone().unwrap_or_else(|| s.clone())
+            }
+            Owner::Identity(s) => s.clone(),
+            Owner::Everywhere => "every project".into(),
+        }
+    }
+}
+
+/// The owners offered for the project `home`: its identity only when it
 /// has one.
-pub fn offers(v: &View) -> Vec<(Whose, String)> {
+pub fn offers(home: &Home) -> Vec<(Whose, String)> {
     let mut out = vec![(Whose::Project, "This project".to_string())];
-    if let Some(s) = v.slug() {
-        out.push((Whose::Identity, v.identity_name(&s)));
+    if let Some(name) = &home.identity {
+        out.push((Whose::Identity, name.clone()));
     }
     out.push((Whose::Everywhere, "Everywhere".into()));
     out
@@ -377,7 +413,7 @@ fn owner_for(w: Whose, key: &str, slug: Option<&str>) -> Option<Owner> {
 }
 
 /// What a form is for.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum Purpose {
     AddSecret,
     AddLogin,
@@ -387,10 +423,15 @@ pub enum Purpose {
 
 /// A form open in the section: its fields, typed into in place, and
 /// whose the item will be. It lasts until it is saved or cancelled or the
-/// window closes, whatever is clicked meanwhile.
-#[derive(Debug)]
+/// window closes, whatever is clicked meanwhile. No Debug: its fields
+/// hold what the human types.
 pub struct Form {
     pub purpose: Purpose,
+    /// The project it was started in, which it saves for.
+    pub home: Home,
+    /// Counts every change, so a value shown in clear is laid out again
+    /// only when it changes, not copied out at every paint.
+    pub rev: u64,
     pub fields: Vec<(Slot, Text)>,
     pub whose: Whose,
     /// The secret fields show what is typed.
@@ -413,9 +454,11 @@ impl Drop for Form {
 }
 
 impl Form {
-    fn with(purpose: Purpose, slots: &[Slot]) -> Self {
+    fn with(home: &Home, purpose: Purpose, slots: &[Slot]) -> Self {
         Form {
             purpose,
+            home: home.clone(),
+            rev: 0,
             fields: slots
                 .iter()
                 .map(|s| (*s, Text::new("", false, s.max())))
@@ -429,8 +472,8 @@ impl Form {
     }
 
     /// Adding a secret, named `name` when config.json asked for it.
-    pub fn add_secret(name: &str) -> Self {
-        let mut f = Form::with(Purpose::AddSecret, &[Slot::Name, Slot::Value]);
+    pub fn add_secret(home: &Home, name: &str) -> Self {
+        let mut f = Form::with(home, Purpose::AddSecret, &[Slot::Name, Slot::Value]);
         if let Some(t) = f.field_mut(Slot::Name) {
             t.insert(name);
         }
@@ -438,8 +481,9 @@ impl Form {
         f
     }
 
-    pub fn add_login() -> Self {
+    pub fn add_login(home: &Home) -> Self {
         Form::with(
+            home,
             Purpose::AddLogin,
             &[
                 Slot::Sites,
@@ -452,8 +496,8 @@ impl Form {
     }
 
     /// A new `slot` for the kept item `item`.
-    pub fn replace(item: ItemId, slot: Slot) -> Self {
-        Form::with(Purpose::Replace(item, slot), &[slot])
+    pub fn replace(home: &Home, item: ItemId, slot: Slot) -> Self {
+        Form::with(home, Purpose::Replace(item, slot), &[slot])
     }
 
     pub fn field(&self, slot: Slot) -> Option<&Text> {
@@ -488,18 +532,29 @@ impl Form {
         }
     }
 
+    /// What it is for, naming the project it saves for, or for a
+    /// replacement whose item it is, so a draft seen from another project
+    /// says where it goes.
     fn title(&self) -> String {
+        let p = &self.home.project;
         match &self.purpose {
-            Purpose::AddSecret => "A new secret: its sessions use it, never read it".into(),
-            Purpose::AddLogin => {
-                "A new web login: its sessions sign in with it, never read it".into()
+            Purpose::AddSecret => {
+                format!("A new secret for {p}: its sessions use it, never read it")
             }
-            Purpose::Replace(id, Slot::Value) => format!(
-                "A new value for {}. Programs allowed always are asked again",
-                id.name
-            ),
-            Purpose::Replace(id, Slot::Password) => format!("A new password for {}", id.name),
-            Purpose::Replace(id, _) => format!("A new one time code seed for {}", id.name),
+            Purpose::AddLogin => format!("A new web login for {p}: its sessions never read it"),
+            Purpose::Replace(id, slot) => {
+                let what = match slot {
+                    Slot::Value => "value",
+                    Slot::Password => "password",
+                    _ => "one time code seed",
+                };
+                let whose = self.home.owner_words(&id.owner);
+                let mut t = format!("A new {what} for {}, kept for {whose}", id.name);
+                if *slot == Slot::Value {
+                    t.push_str(". Programs allowed always are asked again");
+                }
+                t
+            }
         }
     }
 
@@ -507,6 +562,7 @@ impl Form {
     /// until the name is typed itself.
     pub fn edited(&mut self, slot: Slot) {
         self.refusal = None;
+        self.rev += 1;
         match slot {
             Slot::Name => self.named = !self.text(Slot::Name).is_empty(),
             Slot::Sites if self.purpose == Purpose::AddLogin && !self.named => {
@@ -525,7 +581,7 @@ impl Form {
 }
 
 /// What a form saves, the values in it until it is dropped.
-#[derive(Debug, PartialEq)]
+#[derive(PartialEq)]
 pub enum Save {
     Secret {
         name: String,
@@ -555,6 +611,19 @@ pub enum Save {
     },
 }
 
+/// Names only: a value never reaches a log or a panic message.
+impl std::fmt::Debug for Save {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Save::Secret { name, owner, .. } => write!(f, "Secret({name}, {owner:?})"),
+            Save::Login { name, owner, .. } => write!(f, "Login({name}, {owner:?})"),
+            Save::Value { item, .. } => write!(f, "Value({})", item.name),
+            Save::Password { item, .. } => write!(f, "Password({})", item.name),
+            Save::Seed { item, seed } => write!(f, "Seed({}, kept {})", item.name, seed.is_some()),
+        }
+    }
+}
+
 impl Drop for Save {
     fn drop(&mut self) {
         let zero = |s: &mut String| field::zero(s);
@@ -577,7 +646,8 @@ impl Drop for Save {
 }
 
 /// Everything wrong with the form, by field.
-pub fn problems(form: &Form, offered: &[(Whose, String)]) -> Vec<(Slot, String)> {
+pub fn problems(form: &Form) -> Vec<(Slot, String)> {
+    let offered = offers(&form.home);
     let mut out = Vec::new();
     let replacing = matches!(form.purpose, Purpose::Replace(..));
     for (slot, t) in &form.fields {
@@ -617,59 +687,57 @@ fn seed_problem(text: &str, replacing: bool) -> Option<String> {
 
 /// The problems to show now: those of the fields typed in, and after Save
 /// was pressed every one.
-pub fn shown_problems(form: &Form, offered: &[(Whose, String)]) -> Vec<(Slot, String)> {
-    problems(form, offered)
+pub fn shown_problems(form: &Form) -> Vec<(Slot, String)> {
+    problems(form)
         .into_iter()
         .filter(|(s, _)| form.tried || !form.text(*s).trim().is_empty())
         .collect()
 }
 
-/// What Save does with the form for the project `key` with identity
-/// `slug`, or what stops it.
-pub fn decide(
-    form: &Form,
-    key: &str,
-    slug: Option<&str>,
-    offered: &[(Whose, String)],
-) -> Result<Save, Vec<(Slot, String)>> {
-    let wrong = problems(form, offered);
+/// What Save does with the form, for the project it was started in, or
+/// what stops it. Each value is copied once, trimmed, straight into the
+/// Save, which zeroes it when dropped.
+pub fn decide(form: &Form) -> Result<Save, Vec<(Slot, String)>> {
+    let wrong = problems(form);
     if !wrong.is_empty() {
         return Err(wrong);
     }
-    let text = |s: Slot| form.text(s).to_string();
+    let home = &form.home;
+    let trimmed = |s: Slot| form.text(s).trim().to_string();
     let owner = || {
-        owner_for(form.whose, key, slug)
+        owner_for(form.whose, &home.key, home.slug.as_deref())
             .ok_or_else(|| vec![(Slot::Whose, "Pick whose it is".to_string())])
     };
-    let seed = |t: String| {
-        let t = t.trim().to_string();
-        (!t.is_empty()).then_some(t)
+    let seed = |keep_none: bool| {
+        let t = form.text(Slot::Seed).trim();
+        let none = keep_none && t.eq_ignore_ascii_case("none");
+        (!t.is_empty() && !none).then(|| t.to_string())
     };
     Ok(match &form.purpose {
         Purpose::AddSecret => Save::Secret {
-            name: text(Slot::Name).trim().to_string(),
+            name: trimmed(Slot::Name),
             owner: owner()?,
-            value: text(Slot::Value).trim().to_string(),
+            value: trimmed(Slot::Value),
         },
         Purpose::AddLogin => Save::Login {
-            name: text(Slot::Name).trim().to_string(),
+            name: trimmed(Slot::Name),
             owner: owner()?,
             origins: parse_sites(form.text(Slot::Sites)).unwrap_or_default(),
-            user: text(Slot::User).trim().to_string(),
-            password: text(Slot::Password),
-            seed: seed(text(Slot::Seed)),
+            user: trimmed(Slot::User),
+            password: form.text(Slot::Password).to_string(),
+            seed: seed(false),
         },
         Purpose::Replace(item, Slot::Value) => Save::Value {
             item: item.clone(),
-            value: text(Slot::Value).trim().to_string(),
+            value: trimmed(Slot::Value),
         },
         Purpose::Replace(item, Slot::Password) => Save::Password {
             item: item.clone(),
-            password: text(Slot::Password),
+            password: form.text(Slot::Password).to_string(),
         },
         Purpose::Replace(item, _) => Save::Seed {
             item: item.clone(),
-            seed: seed(text(Slot::Seed)).filter(|s| !s.eq_ignore_ascii_case("none")),
+            seed: seed(true),
         },
     })
 }
@@ -688,7 +756,7 @@ pub fn display(t: &Text, hidden: bool) -> String {
 
 /// The section's state while the Settings window is open: which groups
 /// are folded, the filter, the item opened and the form being filled in.
-#[derive(Debug)]
+/// No Debug, for the form's sake.
 pub struct Ui {
     pub folded: Vec<Group>,
     pub filter: Text,
@@ -883,7 +951,7 @@ fn detail(v: &View, kind: Kind, k: &Kept, ui: &Ui, now: u64, out: &mut Vec<Line>
         buttons(
             Row::Actions,
             format!("Forget {}?", k.name),
-            &["Forget it", "Keep it"],
+            &confirm_parts(kind),
         )
     } else if kind == Kind::Secret {
         buttons(Row::Actions, String::new(), &["Replace value", "Forget"])
@@ -897,11 +965,29 @@ fn detail(v: &View, kind: Kind, k: &Kept, ui: &Ui, now: u64, out: &mut Vec<Line>
     out.push(nested(actions));
 }
 
+/// The buttons Forget turns into, Keep it where Forget stood: a second
+/// click or Enter on the same spot keeps, never forgets. A secret's Forget
+/// is its second button, a web login's its last, at the right.
+pub fn confirm_parts(kind: Kind) -> [&'static str; 2] {
+    match kind {
+        Kind::Secret => ["Keep it", "Forget it"],
+        Kind::WebLogin => ["Forget it", "Keep it"],
+    }
+}
+
+/// Which of [`confirm_parts`] keeps.
+pub fn keep_part(kind: Kind) -> usize {
+    confirm_parts(kind)
+        .iter()
+        .position(|p| *p == "Keep it")
+        .unwrap_or(0)
+}
+
 /// A form's rows: what it is for, its fields each with what is wrong with
 /// it under it, whose it is, and Save and Cancel.
-fn form_lines(v: &View, form: &Form, indent: bool, out: &mut Vec<Line>) {
-    let offered = offers(v);
-    let wrong = shown_problems(form, &offered);
+pub fn form_lines(form: &Form, indent: bool, out: &mut Vec<Line>) {
+    let offered = offers(&form.home);
+    let wrong = shown_problems(form);
     let mut push = |l: Line| out.push(if indent { nested(l) } else { l });
     push(note(Row::FormTitle, form.title()));
     let says = |slot: Slot| {
@@ -977,7 +1063,7 @@ pub fn lines(v: &View, ui: &Ui, now: u64) -> Vec<Line> {
     // when that item is not in this project's view: it is never hidden.
     let at_item = replacing.and_then(|id| v.find(id).map(|i| (id, i)));
     if let (Some(form), None) = (&ui.form, at_item) {
-        form_lines(v, form, false, &mut out);
+        form_lines(form, false, &mut out);
     }
     if let Some(why) = &ui.failure {
         out.push(line(Row::Failed, "", why.clone(), Control::Error));
@@ -1023,7 +1109,7 @@ pub fn lines(v: &View, ui: &Ui, now: u64) -> Vec<Line> {
                 detail(v, id.kind, k, ui, now, &mut out);
             }
             if let (true, Some(form)) = (drafting, &ui.form) {
-                form_lines(v, form, true, &mut out);
+                form_lines(form, true, &mut out);
             }
         }
     }
@@ -1240,7 +1326,9 @@ mod tests {
             .find(|x| x.field == Field::Vault(Row::Actions))
             .unwrap();
         assert_eq!(actions.value, "Forget TOKEN?");
-        assert_eq!(actions.parts, ["Forget it", "Keep it"]);
+        // Keep it stands where Forget stood, the second button.
+        assert_eq!(actions.parts, ["Keep it", "Forget it"]);
+        assert_eq!(keep_part(Kind::Secret), 0);
         // Open again closes.
         ui.open(item_at(&v, Row::Secret(0)).unwrap());
         assert!(ui.expanded.is_none() && !ui.confirm);
@@ -1263,14 +1351,19 @@ mod tests {
             actions.parts,
             ["Replace password", "Replace seed", "Forget"]
         );
+        // A login's Forget is its last button, at the right: Keep it
+        // stands there.
+        assert_eq!(confirm_parts(Kind::WebLogin), ["Forget it", "Keep it"]);
+        assert_eq!(keep_part(Kind::WebLogin), 1);
     }
 
     #[test]
     fn an_add_form_shows_every_field_at_once_and_one_draft_at_a_time() {
         let v = view();
         let mut ui = Ui::default();
-        assert!(ui.start(Form::add_login()));
-        assert!(!ui.start(Form::add_secret("")));
+        let home = Home::of(&v);
+        assert!(ui.start(Form::add_login(&home)));
+        assert!(!ui.start(Form::add_secret(&home, "")));
         let l = lines(&v, &ui, 0);
         assert_eq!(
             rows(&l)[2..10],
@@ -1308,7 +1401,7 @@ mod tests {
         let v = view();
         let mut ui = Ui::default();
         let id = item_at(&v, Row::Secret(2)).unwrap();
-        ui.start(Form::replace(id, Slot::Value));
+        ui.start(Form::replace(&Home::of(&v), id, Slot::Value));
         ui.fold(Group::Identity);
         ui.filter.insert("zed");
         let l = lines(&v, &ui, 0);
@@ -1320,8 +1413,11 @@ mod tests {
         // In a project that has no such item it stands at the top.
         let mut other = view();
         other.secrets.remove(2);
-        let r = rows(&lines(&other, &ui, 0));
+        let l = lines(&other, &ui, 0);
+        let r = rows(&l);
         assert_eq!(r[2..4], [Row::FormTitle, Row::Input(Slot::Value)]);
+        // Its title says whose the item is, seen from elsewhere.
+        assert!(l[2].value.starts_with("A new value for GH, kept for Acme"));
     }
 
     fn typed(form: &mut Form, slot: Slot, text: &str) {
@@ -1333,42 +1429,52 @@ mod tests {
 
     #[test]
     fn a_secret_is_saved_once_its_name_and_value_will_do() {
-        let v = view();
-        let offered = offers(&v);
-        let mut f = Form::add_secret("");
+        let home = Home::of(&view());
+        let mut f = Form::add_secret(&home, "");
         typed(&mut f, Slot::Name, "github token");
-        let wrong = shown_problems(&f, &offered);
+        let wrong = shown_problems(&f);
         assert_eq!(wrong.len(), 1);
         assert_eq!(wrong[0].0, Slot::Name);
-        assert!(decide(&f, KEY, Some("acme"), &offered).is_err());
+        assert!(decide(&f).is_err());
         typed(&mut f, Slot::Name, "GITHUB_TOKEN");
         typed(&mut f, Slot::Value, "  ghp_abc  ");
         f.whose = Whose::Identity;
         assert_eq!(
-            decide(&f, KEY, Some("acme"), &offered).unwrap(),
+            decide(&f).unwrap(),
             Save::Secret {
                 name: "GITHUB_TOKEN".into(),
                 owner: Owner::Identity("acme".into()),
                 value: "ghp_abc".into(),
             }
         );
-        // Without an identity it is not offered, so not saved as one.
-        let none = offers(&View::default());
-        assert!(decide(&f, KEY, None, &none).unwrap_err()[0].0 == Slot::Whose);
-        f.whose = Whose::Project;
-        assert_eq!(
-            match decide(&f, KEY, None, &none).unwrap() {
-                Save::Secret { ref owner, .. } => owner.clone(),
-                _ => unreachable!(),
-            },
-            Owner::Project(KEY.into())
-        );
+        // A Debug of what is saved names it, never says its value.
+        assert!(!format!("{:?}", decide(&f).unwrap()).contains("ghp"));
+        assert!(!format!("{:?}", f.field(Slot::Value).unwrap()).contains("ghp"));
+    }
+
+    #[test]
+    fn a_draft_saves_for_the_project_it_was_begun_in() {
+        let home = Home::of(&view());
+        assert_eq!(home.project, "app");
+        let mut f = Form::add_secret(&home, "TOKEN");
+        typed(&mut f, Slot::Value, "v");
+        assert!(f.title().starts_with("A new secret for app"));
+        // Whatever project is picked when Save is pressed, the draft knows
+        // its own.
+        let Save::Secret { owner, .. } = &decide(&f).unwrap() else {
+            panic!("not a secret");
+        };
+        assert_eq!(owner, &Owner::Project(KEY.into()));
+        // Begun where there is no identity, it cannot be the identity's.
+        let mut f = Form::add_secret(&Home::of(&View::default()), "TOKEN");
+        typed(&mut f, Slot::Value, "v");
+        f.whose = Whose::Identity;
+        assert_eq!(decide(&f).unwrap_err()[0].0, Slot::Whose);
     }
 
     #[test]
     fn a_web_login_is_named_by_its_site_until_named_by_hand() {
-        let offered = offers(&view());
-        let mut f = Form::add_login();
+        let mut f = Form::add_login(&Home::of(&view()));
         typed(&mut f, Slot::Sites, "app.example.com/login");
         assert_eq!(f.text(Slot::Name), "EXAMPLE");
         typed(&mut f, Slot::Name, "MINE");
@@ -1376,7 +1482,7 @@ mod tests {
         assert_eq!(f.text(Slot::Name), "MINE");
         typed(&mut f, Slot::Password, " pw ");
         typed(&mut f, Slot::Seed, "JBSWY3DP");
-        assert_eq!(shown_problems(&f, &offered)[0].0, Slot::Seed);
+        assert_eq!(shown_problems(&f)[0].0, Slot::Seed);
         typed(&mut f, Slot::Seed, "JBSWY3DPEHPK3PXP");
         let Save::Login {
             origins,
@@ -1384,7 +1490,7 @@ mod tests {
             seed,
             owner,
             ..
-        } = &decide(&f, KEY, None, &offered).unwrap()
+        } = &decide(&f).unwrap()
         else {
             panic!("not a login");
         };
@@ -1399,16 +1505,19 @@ mod tests {
     fn a_replaced_seed_can_be_taken_away_but_not_left_empty() {
         let v = view();
         let id = item_at(&v, Row::Login(0)).unwrap();
-        let mut f = Form::replace(id.clone(), Slot::Seed);
-        assert!(decide(&f, KEY, None, &[]).is_err());
+        let mut f = Form::replace(&Home::of(&v), id.clone(), Slot::Seed);
+        assert!(decide(&f).is_err());
         typed(&mut f, Slot::Seed, "None");
         assert_eq!(
-            decide(&f, KEY, None, &[]).unwrap(),
+            decide(&f).unwrap(),
             Save::Seed {
                 item: id,
                 seed: None
             }
         );
+        // Every change is counted, for the window's layout of a clear
+        // value.
+        assert!(f.rev > 0);
     }
 
     #[test]
