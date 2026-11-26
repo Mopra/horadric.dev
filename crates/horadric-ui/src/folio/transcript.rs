@@ -1697,7 +1697,7 @@ impl View {
                 Block::Question { .. } => cards::question(&ctx, b, st, lw),
                 Block::Plan { .. } => cards::plan(&ctx, b, st, lw),
                 Block::SignIn(_) => cards::sign_in(&ctx, i, b, st, lw),
-                Block::Mcp(card) => super::mcp::card(&ctx, card, lw),
+                Block::Mcp(card) => super::mcp::card(&ctx, i, card, lw),
                 Block::Elicitation(e) => super::mcp::elicitation(&ctx, e, st, lw),
                 Block::Footer { .. } => ctx.footer(i, b, open, &folio.blocks, st.verbose, lw),
                 Block::Aside { .. } => ctx.aside(b, lw),

@@ -1,6 +1,7 @@
-//! MCP in the Folio: the card listing servers (those in trouble as they
-//! turn up, all of them on `/mcp`) with sign in, reconnect, disable and
-//! remove, and the card an MCP server's question (an elicitation) becomes. The
+//! MCP in the Folio: the line above the composer naming a server that
+//! needs the human, the list of all of them on `/mcp` with sign in,
+//! reconnect, turn off and remove, and the card an MCP server's question
+//! (an elicitation) becomes. The
 //! status is asked for once a session is live, and again every couple of
 //! seconds while a sign-in or a starting server waits, since the CLI
 //! says nothing when a status changes.
@@ -20,7 +21,7 @@ use windows::Win32::UI::WindowsAndMessaging::{KillTimer, SetTimer, SW_SHOWNORMAL
 use super::cards::{button, field, plate, BUTTON_H, PAD};
 use super::rich::{Ctx, Scene, F};
 use super::transcript::{Act, State};
-use super::view::Hit;
+use super::view::{Gfx, Hit, Palette};
 use super::{answer_with, redraw, router, with, Chat, CHATS};
 use crate::layout::Rect;
 use crate::render;
@@ -48,6 +49,16 @@ pub(super) enum Do {
     Remove(String),
     /// Signing in only the terminal's `/mcp` can do.
     Terminal,
+    /// The list at a block: closed to a line, or opened again.
+    Close(usize),
+    /// A group of the list at a block: folded or unfolded.
+    Group(usize, Group),
+    /// A server's lesser actions in the list at a block: shown or not.
+    More(usize, String),
+    /// The list, from the line above the composer.
+    Show,
+    /// The line above the composer: waved away.
+    Dismiss,
     /// An elicitation, by request id.
     Accept(String),
     Decline(String),
@@ -358,6 +369,37 @@ pub(super) fn act(key: &str, d: Do) {
         Do::Terminal => {
             with(key, |c| super::composer::to_terminal(c, "/mcp"));
         }
+        Do::Close(i) => {
+            with(key, |c| {
+                if let Some(card) = c.folio.mcp_card(i) {
+                    card.closed = !card.closed;
+                }
+            });
+        }
+        Do::Group(i, group) => {
+            with(key, |c| {
+                if let Some(card) = c.folio.mcp_card(i) {
+                    match group {
+                        Group::Connected => card.connected_open = !card.connected_open,
+                        Group::Off => card.off_open = !card.off_open,
+                    }
+                }
+            });
+        }
+        Do::More(i, name) => {
+            with(key, |c| {
+                if let Some(card) = c.folio.mcp_card(i) {
+                    let shut = card.more.as_deref() == Some(name.as_str());
+                    card.more = (!shut).then_some(name);
+                }
+            });
+        }
+        Do::Show => {
+            with(key, show);
+        }
+        Do::Dismiss => {
+            with(key, |c| c.folio.mcp_dismiss());
+        }
         Do::Accept(id) => {
             let content = with(key, |c| {
                 let e = elicitation_of(c, &id)?;
@@ -476,152 +518,321 @@ fn status_of(cx: &Ctx, s: &McpServer) -> (String, Color) {
     }
 }
 
-/// The servers, each with what can be done for it.
-pub(super) unsafe fn card(cx: &Ctx, card: &McpCard, w: f32) -> Scene {
+/// A row of the list, and a group's heading.
+const ROW: f32 = 28.0;
+/// Where a row's name starts, after its dot.
+const INDENT: f32 = 18.0;
+
+/// A group of the list that folds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum Group {
+    Connected,
+    Off,
+}
+
+/// A small button ending at `right`: a row of the list is one line, which
+/// the cards' buttons are too tall for. Returns its left edge.
+fn small(cx: &Ctx, s: &mut Scene, right: f32, y: f32, label: &str, primary: bool, d: Do) -> f32 {
+    let w = label.chars().count() as f32 * 6.8 + 18.0;
+    let r = Rect::new(right - w, y + 3.0, w, ROW - 6.0);
+    if primary {
+        s.fill(r, 6.0, cx.pal.fg.with_alpha(0.12));
+    }
+    let ink = if primary { cx.pal.fg } else { cx.pal.dim };
+    s.line(label, F::Centre, r, ink);
+    s.hit(r, Hit::Tr(Act::Mcp(d)));
+    r.x
+}
+
+fn icon(cx: &Ctx, s: &mut Scene, right: f32, y: f32, glyph: &str, d: Do) -> f32 {
+    let r = Rect::new(right - 22.0, y + 3.0, 22.0, ROW - 6.0);
+    s.line(glyph, F::Icon, Rect::new(r.x + 3.0, r.y, 16.0, r.h), cx.pal.faint);
+    s.hit(r, Hit::Tr(Act::Mcp(d)));
+    r.x
+}
+
+/// The servers as a list: those that need the human first, each on one
+/// line with the one thing to do for it, then the connected and the off
+/// ones as a count that unfolds. It closes to a line.
+pub(super) unsafe fn card(cx: &Ctx, i: usize, card: &McpCard, w: f32) -> Scene {
     let mut s = Scene::default();
     let inner = w - 2.0 * PAD;
     let right = w - PAD;
-    let trouble = (card.servers.iter()).any(|m| horadric_core::folio::troubled(&m.status));
-    let title = match (card.all, card.servers.len()) {
-        (true, _) => "MCP servers",
-        (false, 1) if trouble => "An MCP server needs you",
-        (false, _) if trouble => "MCP servers need you",
-        (false, _) => "MCP servers",
-    };
-    s.line(title, F::Title, Rect::new(PAD, PAD, inner, 20.0), cx.pal.fg);
-    let mut y = PAD + 30.0;
-    if card.servers.is_empty() {
-        let say = if card.all {
-            "No MCP servers in this session, or none heard of yet."
-        } else {
-            "Nothing to do."
-        };
-        s.line(say, F::Line, Rect::new(PAD, y, inner, 22.0), cx.pal.dim);
-        y += 22.0;
+    let trouble = |m: &&McpServer| horadric_core::folio::troubled(&m.status);
+    let on = |m: &&McpServer| matches!(m.status.as_str(), "connected" | "pending");
+    let needs: Vec<&McpServer> = card.servers.iter().filter(trouble).collect();
+    let connected: Vec<&McpServer> = card.servers.iter().filter(on).collect();
+    let off: Vec<&McpServer> = (card.servers.iter())
+        .filter(|m| !trouble(m) && !on(m))
+        .collect();
+    if card.closed {
+        let mut parts = Vec::new();
+        if !needs.is_empty() {
+            parts.push(format!("{} need you", needs.len()));
+        }
+        parts.push(format!("{} connected", connected.len()));
+        if !off.is_empty() {
+            parts.push(format!("{} off", off.len()));
+        }
+        let h = ROW + 6.0;
+        let label = Rect::new(PAD, 3.0, 96.0, ROW);
+        s.line("MCP servers", F::Line, label, cx.pal.dim);
+        let rest = Rect::new(PAD + 100.0, 5.0, (inner - 124.0).max(0.0), ROW - 4.0);
+        s.line(parts.join(", "), F::Small, rest, cx.pal.faint);
+        let mark = Rect::new(right - 16.0, 3.0, 16.0, ROW);
+        s.line("\u{E76C}", F::Icon, mark, cx.pal.faint);
+        s.hit(Rect::new(0.0, 0.0, w, h), Hit::Tr(Act::Mcp(Do::Close(i))));
+        plate(cx, &mut s, w, h, false);
+        s.h = h;
+        return s;
     }
-    let say = |s: &mut Scene, y: &mut f32, text: &str, ink: Color| {
-        if let Some(l) = cx.layout(&cx.fonts.small_wrap, text, inner) {
-            s.unit(&l, PAD, *y, ink, text);
-            *y += render::text_size(&l).1 + 6.0;
+    let title = Rect::new(PAD, PAD - 2.0, inner - 30.0, 20.0);
+    s.line("MCP servers", F::Title, title, cx.pal.fg);
+    icon(cx, &mut s, right + 4.0, PAD - 6.0, "\u{E711}", Do::Close(i));
+    let mut y = PAD + 24.0;
+    if card.servers.is_empty() {
+        let say = "No MCP servers in this session, or none heard of yet.";
+        s.line(say, F::Line, Rect::new(PAD, y, inner, 22.0), cx.pal.dim);
+        y += ROW;
+    }
+    let heading = |s: &mut Scene, y: &mut f32, label: String, fold: Option<(Group, bool)>| {
+        let r = Rect::new(PAD, *y + 5.0, inner - 24.0, 20.0);
+        s.line(label, F::Small, r, cx.pal.faint);
+        if let Some((group, open)) = fold {
+            let glyph = if open { "\u{E70D}" } else { "\u{E76C}" };
+            let mark = Rect::new(right - 16.0, *y + 4.0, 16.0, 20.0);
+            s.line(glyph, F::Icon, mark, cx.pal.faint);
+            let all = Rect::new(0.0, *y, w, ROW);
+            s.hit(all, Hit::Tr(Act::Mcp(Do::Group(i, group))));
         }
+        *y += ROW;
     };
-    for m in &card.servers {
-        // The buttons first, from the right, so the name takes what is left.
-        let name = m.name.clone();
-        let mut x = right;
-        let mut row = |label: &str, primary: bool, d: Do, s: &mut Scene| {
-            x = button(cx, s, x, y, label, primary, Hit::Tr(Act::Mcp(d))) - 8.0;
-        };
-        let removal = m.removal();
-        let trouble = horadric_core::folio::troubled(&m.status);
-        if m.busy || m.removed {
-        } else if m.asking_remove {
-            row("Remove", true, Do::Remove(name.clone()), &mut s);
-            row("Keep it", false, Do::KeepIt(name.clone()), &mut s);
-        } else if let Some(url) = &m.sign_in {
-            row("Stop", false, Do::StopSignIn(name.clone()), &mut s);
-            if !url.is_empty() {
-                row("Open the page again", false, Do::Page(name.clone()), &mut s);
+    if !needs.is_empty() {
+        heading(&mut s, &mut y, "NEEDS YOU".into(), None);
+        for m in &needs {
+            y = row(cx, &mut s, i, card, m, y, w);
+        }
+    }
+    let folds = [
+        ("CONNECTED", Group::Connected, card.connected_open, &connected),
+        ("OFF", Group::Off, card.off_open, &off),
+    ];
+    for (label, group, open, servers) in folds {
+        if servers.is_empty() {
+            continue;
+        }
+        let label = format!("{label}  {}", servers.len());
+        heading(&mut s, &mut y, label, Some((group, open)));
+        if open {
+            for m in servers {
+                y = row(cx, &mut s, i, card, m, y, w);
             }
-        } else if m.status == "needs-auth" && m.can_sign_in() && !m.sign_in_failed {
-            row("Sign in", true, Do::SignIn(name.clone()), &mut s);
-        } else if m.status == "needs-auth" {
-            row("Sign in from the terminal", false, Do::Terminal, &mut s);
-        } else if m.status == "failed" {
-            row("Reconnect", true, Do::Reconnect(name.clone()), &mut s);
-        } else if m.status == "disabled" {
-            row("Enable", false, Do::Toggle(name.clone(), true), &mut s);
-        } else if card.all && m.status == "connected" {
-            row("Disable", false, Do::Toggle(name.clone(), false), &mut s);
         }
-        // A server in trouble can also be let go of: off here, or gone.
-        let settled = m.busy || m.removed || m.asking_remove || m.sign_in.is_some();
-        if !settled && trouble {
-            row("Disable", false, Do::Toggle(name.clone(), false), &mut s);
-        }
-        if !settled && removal.is_some() && (card.all || trouble) {
-            row("Remove", false, Do::AskRemove(name.clone()), &mut s);
-        }
-        let (word, ink) = match (m.removed, m.busy) {
-            (true, _) => ("removed".to_string(), cx.pal.faint),
-            (false, true) => ("\u{2026}".to_string(), cx.pal.dim),
-            _ => status_of(cx, m),
-        };
-        let left = (x - PAD).max(80.0);
-        s.line(
-            m.name.clone(),
-            F::Line,
-            Rect::new(PAD, y + 4.0, left * 0.62, 22.0),
-            cx.pal.fg,
-        );
-        s.line(
-            word,
-            F::Small,
-            Rect::new(PAD + left * 0.62 + 8.0, y + 6.0, left * 0.38 - 8.0, 20.0),
-            ink,
-        );
-        y += BUTTON_H + 6.0;
-        if !m.error.is_empty() {
-            say(&mut s, &mut y, &m.error, cx.pal.dim);
-        }
-        if m.asking_remove {
-            let what = match &removal {
-                Some(McpRemoval::Plugin(p)) => format!(
-                    "This turns off the {p} plugin in every session, with its skills and commands. \
-                     claude plugin enable {p} brings it back."
-                ),
-                Some(McpRemoval::ClaudeAi) => "This turns it off in every session on this \
-                     machine, in your own settings. It stays on claude.ai."
-                    .to_string(),
-                Some(McpRemoval::Scope(scope)) if scope == "project" => {
-                    "This removes it from the project's .mcp.json, which everyone working in it shares."
-                        .to_string()
-                }
-                Some(McpRemoval::Scope(scope)) => format!(
-                    "This removes it from your {scope} MCP settings, for every session that reads them."
-                ),
-                None => String::new(),
-            };
-            say(&mut s, &mut y, &what, cx.pal.fg.with_alpha(0.85));
-        }
-        if m.removed {
-            say(
-                &mut s,
-                &mut y,
-                "Removed. New sessions start without it.",
-                cx.pal.dim,
-            );
-        }
-        match &m.sign_in {
-            Some(url) if url.is_empty() => {
-                say(&mut s, &mut y, "Starting the sign-in\u{2026}", cx.pal.dim)
-            }
-            Some(_) => say(
-                &mut s,
-                &mut y,
-                "The sign-in page opened in your browser. Finish there and this follows by itself.",
-                cx.pal.fg.with_alpha(0.85),
-            ),
-            None if m.status == "needs-auth"
-                && !m.removed
-                && !m.asking_remove
-                && (m.sign_in_failed || !m.can_sign_in()) =>
-            {
-                say(
-                &mut s,
-                &mut y,
-                    "Its sign-in runs only in the terminal: the session goes on there, then type /mcp.",
-                    cx.pal.dim,
-                )
-            }
-            None => {}
-        }
-        y += 4.0;
     }
     let h = y + PAD - 6.0;
-    plate(cx, &mut s, w, h, trouble);
+    plate(cx, &mut s, w, h, false);
     s.h = h;
     s
+}
+
+/// One server: a dot for how it is, its name, and from the right the one
+/// thing to do and a mark that unfolds the rest. Returns its bottom.
+unsafe fn row(
+    cx: &Ctx,
+    s: &mut Scene,
+    i: usize,
+    card: &McpCard,
+    m: &McpServer,
+    top: f32,
+    w: f32,
+) -> f32 {
+    let right = w - PAD;
+    let name = m.name.clone();
+    let removal = m.removal();
+    let page = m.sign_in.as_ref().is_some_and(|u| !u.is_empty());
+    let settled = m.busy || m.removed;
+    let has_more = removal.is_some() || m.status != "disabled" || page;
+    let mut y = top;
+    let mut x = right;
+    if settled {
+    } else if m.asking_remove {
+        x = small(cx, s, x, y, "Remove", true, Do::Remove(name.clone())) - 6.0;
+        x = small(cx, s, x, y, "Keep it", false, Do::KeepIt(name.clone())) - 6.0;
+    } else {
+        if has_more {
+            x = icon(cx, s, x + 4.0, y, "\u{E712}", Do::More(i, name.clone())) - 2.0;
+        }
+        let needs_auth = m.status == "needs-auth";
+        let main = if m.sign_in.is_some() {
+            Some(("Stop", false, Do::StopSignIn(name.clone())))
+        } else if needs_auth && m.can_sign_in() && !m.sign_in_failed {
+            Some(("Sign in", true, Do::SignIn(name.clone())))
+        } else if needs_auth {
+            Some(("In the terminal", false, Do::Terminal))
+        } else if m.status == "failed" {
+            Some(("Reconnect", true, Do::Reconnect(name.clone())))
+        } else if m.status == "disabled" {
+            Some(("Enable", true, Do::Toggle(name.clone(), true)))
+        } else {
+            None
+        };
+        if let Some((label, primary, d)) = main {
+            x = small(cx, s, x, y, label, primary, d) - 6.0;
+        }
+    }
+    let (word, ink) = match (m.removed, m.busy) {
+        (true, _) => ("removed".to_string(), cx.pal.faint),
+        (false, true) => ("\u{2026}".to_string(), cx.pal.dim),
+        _ => status_of(cx, m),
+    };
+    let dot = match m.status.as_str() {
+        "connected" => theme::done(),
+        "failed" | "needs-auth" => theme::waiting(),
+        "pending" => cx.pal.dim,
+        _ => cx.pal.faint.with_alpha(0.5),
+    };
+    s.fill(Rect::new(PAD + 2.0, y + ROW / 2.0 - 3.5, 7.0, 7.0), 3.5, dot);
+    let from = PAD + INDENT;
+    let left = (x - from - 8.0).max(80.0);
+    let name_ink = if m.status == "disabled" || m.removed {
+        cx.pal.dim
+    } else {
+        cx.pal.fg
+    };
+    let name_r = Rect::new(from, y + 3.0, left * 0.6, 22.0);
+    s.line(m.name.clone(), F::Line, name_r, name_ink);
+    let word_r = Rect::new(from + left * 0.6 + 8.0, y + 5.0, left * 0.4 - 8.0, 20.0);
+    s.line(word, F::Small, word_r, ink);
+    y += ROW;
+
+    let inner = right - from;
+    let mut say = |s: &mut Scene, text: &str, ink: Color| {
+        if let Some(l) = cx.layout(&cx.fonts.small_wrap, text, inner) {
+            s.unit(&l, from, y, ink, text);
+            y += render::text_size(&l).1 + 6.0;
+        }
+    };
+    if !m.error.is_empty() {
+        say(s, &m.error, cx.pal.dim);
+    }
+    if m.asking_remove {
+        let what = match &removal {
+            Some(McpRemoval::Plugin(p)) => format!(
+                "This turns off the {p} plugin in every session, with its skills and commands. \
+                 claude plugin enable {p} brings it back."
+            ),
+            Some(McpRemoval::ClaudeAi) => "This turns it off in every session on this \
+                 machine, in your own settings. It stays on claude.ai."
+                .to_string(),
+            Some(McpRemoval::Scope(scope)) if scope == "project" => {
+                "This removes it from the project's .mcp.json, which everyone working in it shares."
+                    .to_string()
+            }
+            Some(McpRemoval::Scope(scope)) => format!(
+                "This removes it from your {scope} MCP settings, for every session that reads them."
+            ),
+            None => String::new(),
+        };
+        say(s, &what, cx.pal.fg.with_alpha(0.85));
+    }
+    if m.removed {
+        say(s, "Removed. New sessions start without it.", cx.pal.dim);
+    }
+    match &m.sign_in {
+        Some(url) if url.is_empty() => say(s, "Starting the sign-in\u{2026}", cx.pal.dim),
+        Some(_) => say(
+            s,
+            "The sign-in page opened in your browser. Finish there and this follows by itself.",
+            cx.pal.fg.with_alpha(0.85),
+        ),
+        None if m.status == "needs-auth"
+            && !m.removed
+            && !m.asking_remove
+            && (m.sign_in_failed || !m.can_sign_in()) =>
+        {
+            say(
+                s,
+                "Its sign-in runs only in the terminal: the session goes on there, then type /mcp.",
+                cx.pal.dim,
+            )
+        }
+        None => {}
+    }
+    let open = card.more.as_deref() == Some(m.name.as_str());
+    if open && has_more && !settled && !m.asking_remove {
+        let mut x = right;
+        if removal.is_some() {
+            x = small(cx, s, x, y, "Remove", false, Do::AskRemove(name.clone())) - 6.0;
+        }
+        if m.status != "disabled" {
+            let off = Do::Toggle(name.clone(), false);
+            x = small(cx, s, x, y, "Turn off everywhere", false, off) - 6.0;
+        }
+        if page {
+            small(cx, s, x, y, "Open the page again", false, Do::Page(name));
+        }
+        y += ROW;
+    }
+    y
+}
+
+/// The line above the composer, in the way of nothing: which server
+/// needs the human, the one thing to do for it, and a way to wave it
+/// off. A click on its words opens the list. Returns its top, `bottom`
+/// when there is nothing to say.
+pub(super) unsafe fn notice(
+    gfx: &Gfx,
+    pal: &Palette,
+    chat: &Chat,
+    cx: f32,
+    cw: f32,
+    bottom: f32,
+    hits: &mut Vec<(Rect, Hit)>,
+) -> f32 {
+    const H: f32 = 19.0;
+    let needs = chat.folio.mcp_notice();
+    let Some(first) = needs.first() else {
+        return bottom;
+    };
+    let top = bottom - 4.0 - H;
+    let (x, right) = (cx + PAD, cx + cw - PAD);
+    let name = first.name.clone();
+    let (say, main) = match needs.len() {
+        1 if first.sign_in.is_some() => {
+            (format!("{name}: finish the sign-in in your browser"), None)
+        }
+        1 if first.status == "failed" => (
+            format!("{name} failed"),
+            Some(("Reconnect", Do::Reconnect(name))),
+        ),
+        1 if first.can_sign_in() && !first.sign_in_failed => (
+            format!("{name} needs sign-in"),
+            Some(("Sign in", Do::SignIn(name))),
+        ),
+        1 => (format!("{name} needs sign-in"), Some(("Show", Do::Show))),
+        n => (format!("{n} MCP servers need you"), Some(("Show", Do::Show))),
+    };
+    gfx.fill_round(
+        &Rect::new(x + 1.0, top + H / 2.0 - 3.0, 6.0, 6.0),
+        3.0,
+        theme::waiting(),
+    );
+    let mut edge = right;
+    let mut button = |label: &str, ink: Color, d: Do| {
+        let w = label.chars().count() as f32 * 6.6 + 14.0;
+        let r = Rect::new(edge - w, top, w, H);
+        gfx.text_in(label, &gfx.small, &Rect::new(r.x + 7.0, top, w, H), ink);
+        hits.push((r, Hit::Tr(Act::Mcp(d))));
+        edge = r.x;
+    };
+    button("Dismiss", pal.faint, Do::Dismiss);
+    if let Some((label, d)) = main {
+        button(label, pal.fg, d);
+    }
+    let words = Rect::new(x + 14.0, top, (edge - x - 20.0).max(0.0), H);
+    gfx.text_in(&say, &gfx.small, &words, pal.dim);
+    hits.push((words, Hit::Tr(Act::Mcp(Do::Show))));
+    top
 }
 
 /// An MCP server's question: its message, then its fields (text and

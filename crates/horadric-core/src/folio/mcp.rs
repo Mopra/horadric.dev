@@ -58,6 +58,9 @@ pub struct McpState {
     stale: bool,
     /// Status asks since a wait began, see [`POLLS`].
     polls: u32,
+    /// Servers the line above the composer names, see
+    /// [`Folio::mcp_notice`].
+    needs: Vec<String>,
     /// Servers this process was asked to turn off, so one that will not
     /// go off is not asked at every status.
     turned_off: std::collections::HashSet<String>,
@@ -117,12 +120,20 @@ impl McpTold {
 }
 
 /// The servers as a card in the transcript shows them.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct McpCard {
     pub servers: Vec<McpServer>,
     /// `/mcp`: every server. Otherwise only those that were in trouble
     /// when it was added, kept up to date as they mend.
     pub all: bool,
+    /// Folded to one line: the human closed it, or a newer one took over.
+    pub closed: bool,
+    /// The connected servers are listed, not just counted.
+    pub connected_open: bool,
+    /// The servers turned off are listed, not just counted.
+    pub off_open: bool,
+    /// The server whose lesser actions (disable, remove) show.
+    pub more: Option<String>,
 }
 
 /// When the view should ask for the servers' status.
@@ -221,11 +232,50 @@ impl Folio {
     /// `/mcp`: a card with every server, and the line asking for their
     /// status, so it shows what is true now.
     pub fn show_mcp(&mut self) -> String {
+        // One list at a time: an older one folds, so there are not two
+        // to keep an eye on.
+        for b in &mut self.blocks {
+            if let Block::Mcp(card) = b {
+                card.closed = true;
+            }
+        }
         self.blocks.push(Block::Mcp(McpCard {
             servers: self.mcp.servers.clone(),
             all: true,
+            ..McpCard::default()
         }));
         self.mcp_status()
+    }
+
+    /// The card at `block`, for the view to fold and unfold.
+    pub fn mcp_card(&mut self, block: usize) -> Option<&mut McpCard> {
+        match self.blocks.get_mut(block) {
+            Some(Block::Mcp(card)) => Some(card),
+            _ => None,
+        }
+    }
+
+    /// The servers the line above the composer says need the human:
+    /// those a session of ours was first to hear were in trouble, while
+    /// they still are.
+    pub fn mcp_notice(&self) -> Vec<&McpServer> {
+        (self.mcp.needs.iter())
+            .filter_map(|n| self.mcp.servers.iter().find(|s| s.name == *n))
+            .filter(|s| troubled(&s.status) && !s.removed)
+            .collect()
+    }
+
+    /// The human waves the line away: it stays away, here and after a
+    /// replay, until a server breaks anew.
+    pub fn mcp_dismiss(&mut self) {
+        let gone = std::mem::take(&mut self.mcp.needs);
+        if let Some(mut t) = (self.mcp.shared.as_ref()).and_then(|(_, t)| t.lock().ok()) {
+            for name in gone {
+                // Told still, by no session: none says it again.
+                t.told.insert(name, String::new());
+                t.dirty = true;
+            }
+        }
     }
 
     /// Starts signing in to `server`: the line to write. Its answer puts
@@ -518,13 +568,23 @@ impl Folio {
             }
         }
         drop(told);
+        let before = self.mcp.needs.len();
+        let servers = &self.mcp.servers;
+        (self.mcp.needs).retain(|n| servers.iter().any(|s| s.name == *n && troubled(&s.status)));
+        changed |= self.mcp.needs.len() != before;
         if fresh.is_empty() {
             return changed;
         }
         self.mcp.warned.extend(fresh.iter().map(|s| s.name.clone()));
+        // Where sessions share what they know, trouble is a line above
+        // the composer and no card in the way of the conversation.
+        if shared.is_some() {
+            self.mcp.needs.extend(fresh.into_iter().map(|s| s.name));
+            return true;
+        }
         self.blocks.push(Block::Mcp(McpCard {
             servers: fresh,
-            all: false,
+            ..McpCard::default()
         }));
         true
     }
@@ -1405,9 +1465,8 @@ mod tests {
     }
 
     fn told_of(f: &Folio) -> Vec<&str> {
-        (cards(f).iter())
-            .flat_map(|c| c.servers.iter().map(|s| s.name.as_str()))
-            .collect()
+        assert!(cards(f).is_empty(), "a line, not a card");
+        f.mcp_notice().iter().map(|s| s.name.as_str()).collect()
     }
 
     #[test]
@@ -1427,7 +1486,7 @@ mod tests {
         // Not by the next session too.
         let mut b = session("b", true);
         hear(&mut b);
-        assert!(cards(&b).is_empty());
+        assert!(told_of(&b).is_empty());
 
         // What worked and wants a sign-in again is news, once.
         let remote = |status: &str| json!({"mcpServers": [{"name": "remote", "status": status}]});
@@ -1445,11 +1504,27 @@ mod tests {
         assert_eq!(told_of(&again), ["broken"]);
         let mut other = session("c", false);
         hear(&mut other);
-        assert!(cards(&other).is_empty());
+        assert!(told_of(&other).is_empty());
         // A session started again on its conversation does not repeat it.
         let mut resumed = session("a", true);
         hear(&mut resumed);
-        assert!(cards(&resumed).is_empty());
+        assert!(told_of(&resumed).is_empty());
+
+        // Waved away, it stays away after a replay too, and a server
+        // that mends leaves the line by itself.
+        b.mcp_dismiss();
+        assert!(told_of(&b).is_empty());
+        let mut back = session("b", false);
+        let line = back.mcp_status();
+        answer(&mut back, &line, remote("needs-auth"));
+        assert!(told_of(&back).is_empty());
+        let line = a.mcp_status();
+        answer(
+            &mut a,
+            &line,
+            json!({"mcpServers": [{"name": "broken", "status": "connected"}]}),
+        );
+        assert!(told_of(&a).is_empty());
     }
 
     #[test]
@@ -1469,7 +1544,7 @@ mod tests {
         // The next session turns it off itself, once, and says nothing.
         let mut b = session("b");
         hear(&mut b);
-        assert!(cards(&b).is_empty());
+        assert!(b.mcp_notice().is_empty());
         let lines = b.mcp_turn_offs();
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("broken") && lines[0].contains("\"enabled\":false"));
