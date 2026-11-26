@@ -36,6 +36,56 @@ it into the one site it belongs to. Tool logins are different: a tool
 reads its own login files, and the Vault only points it at the right
 ones.
 
+## Seamless: nothing to set up (decided 2026-11-26)
+
+The human did not use the Vault: making identities in Settings first was
+too much. So the identity is no longer something you make. It falls out
+of signing in, in the browser pane, where the human already is.
+
+- **A project inherits, and splits per site.** A new project's pane
+  is signed in to whatever the shared profile is signed in to, as today.
+  On any site the pane offers **Sign in differently here** (a small
+  control in the pane's bar, never a Settings trip). Taking it splits
+  that site off for this project: the project moves to a profile of its
+  own, that site's cookies are left out, and the human signs in to the
+  other account there. Every other site stays inherited.
+- **Inherited sites stay in step.** A split project's profile is not a
+  frozen copy. When its pane opens, the shared profile's cookies for
+  every site it has not split are copied in (CDP `Network.getAllCookies`
+  and `Network.setCookies`), and when it sleeps or closes, its cookies
+  for those sites are copied back. Logging in to a new site anywhere is
+  seen everywhere that has not split it. Only cookies move; a site that
+  keeps its login in `localStorage` has to be signed in to per profile,
+  said in the lore when one is met.
+- **A split already made is offered first.** When a second project splits
+  github.com, the bar offers the logins other projects split to ("as in
+  opti") beside Sign in fresh. Projects that took the same login share
+  one group, which is what an identity now is: made by Horadric, named
+  after the account or the first project, renamed in Settings if ever.
+- **The tools follow the sites.** A split site carries its command line
+  tools with it: github.com takes `gh` and git, vercel.com takes
+  `vercel`, npmjs.com takes `npm`, dash.cloudflare.com takes `wrangler`,
+  portal.azure.com takes `az`, console.cloud.google.com takes `gcloud`.
+  Those tools then use the group's own folders (as below), the rest stay
+  global. A project that splits nothing changes nothing.
+- **Command line logins go through the pane.** Every session and plain
+  terminal gets `BROWSER` set to `horadric open-url`, which opens the
+  link in that project's pane rather than the system browser. So `gh auth
+  login --web`, `vercel login`, `wrangler login`, `az login` and `gcloud
+  auth login` land in a pane already signed in as the right account,
+  usually one click on Authorize, and the token lands in the group's
+  folder because the environment already points there.
+- **MCP servers.** A local MCP server that takes a token from its
+  environment follows the project like any other program. MCP servers
+  that sign in with OAuth, and claude.ai connectors, are kept by Claude
+  Code per Claude account and stay shared: splitting them would mean a
+  `CLAUDE_CONFIG_DIR` per project, turned down in Accounts. The pane
+  still opens their OAuth pages, through `BROWSER`.
+
+The sections below are the machinery under this. Identities picked by
+hand, folder claims and the `config.json` slug keep working, they are
+just no longer the way in.
+
 ## What is kept, and where
 
 - **An identity.** A name ("Acme"), a short slug for its folder,
@@ -394,7 +444,11 @@ login or the secret is there.
 
 ## Order of work
 
-Identities first, since the daily pain is a switched account.
+Seamless first (2026-11-26), since without it nothing below gets used:
+the pane's Sign in differently here with the cookie sync, the tools
+following a split site, and `BROWSER` through the pane.
+
+Before that, identities first, since the daily pain is a switched account.
 
 1. Identities and the project pick with `gh` and git, since those are
    the walls hit most.
