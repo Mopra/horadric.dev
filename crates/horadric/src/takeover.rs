@@ -13,7 +13,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use horadric_core::takeover_programs::{Act, Kind};
+use horadric_core::remote::{parse_key, Chord, Key, FRAME_WIDTH};
+use horadric_core::screen_share::{self as share, Typed};
+use horadric_core::takeover_programs::{is_horadric, Act, Kind};
 use serde_json::{json, Value};
 use windows::core::BOOL;
 use windows::core::{Interface, BSTR, HRESULT, PCWSTR};
@@ -158,9 +160,6 @@ pub fn helper_note(why: &str) -> String {
          is started again on the next call to one.)"
     )
 }
-
-/// The widest picture, in pixels.
-const WIDEST: u32 = 1600;
 
 /// How long a UI Automation pattern may take before the answer says it is
 /// still going. A program that opens a modal dialog from a pattern holds
@@ -1034,21 +1033,6 @@ pub fn tree_text(head: &str, nodes: &[Node], more: bool, limit: usize) -> String
     out
 }
 
-/// The key a name stands for: a virtual key, or a character to be found
-/// on the keyboard layout.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Key {
-    Vk(u16),
-    Char(char),
-}
-
-/// Modifier keys held while a key is pressed.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Chord {
-    pub mods: Vec<u16>,
-    pub key: Key,
-}
-
 const VK_SHIFT: u16 = 0x10;
 const VK_CONTROL: u16 = 0x11;
 const VK_MENU: u16 = 0x12;
@@ -1059,77 +1043,6 @@ const VK_F4: u16 = 0x73;
 const VK_S: u16 = b'S' as u16;
 const VK_TAB: u16 = 0x09;
 const VK_SPACE: u16 = 0x20;
-
-/// `spec` as keys: a key's name (`Enter`, `F5`, `a`) after any modifiers
-/// joined by `+` (`Control+Shift+S`).
-pub fn parse_key(spec: &str) -> Result<Chord, String> {
-    let (mods, key) = match spec {
-        "+" => ("", "+"),
-        s if s.ends_with("++") => (&s[..s.len() - 2], "+"),
-        s => s.rsplit_once('+').unwrap_or(("", s)),
-    };
-    if key.is_empty() {
-        return Err(format!("no key in {spec:?}"));
-    }
-    let mut held = Vec::new();
-    for m in mods.split('+').filter(|m| !m.is_empty()) {
-        let vk = match m.trim().to_ascii_lowercase().as_str() {
-            "control" | "ctrl" => VK_CONTROL,
-            "shift" => VK_SHIFT,
-            "alt" => VK_MENU,
-            "win" | "meta" | "cmd" | "windows" => VK_LWIN,
-            _ => return Err(format!("{m} is not a modifier: Control, Shift, Alt or Win")),
-        };
-        if !held.contains(&vk) {
-            held.push(vk);
-        }
-    }
-    let lower = key.to_ascii_lowercase();
-    let named = match lower.as_str() {
-        "enter" | "return" => Some(VK_RETURN),
-        "tab" => Some(VK_TAB),
-        "escape" | "esc" => Some(0x1B),
-        "backspace" => Some(0x08),
-        "delete" | "del" => Some(VK_DELETE),
-        "insert" | "ins" => Some(0x2D),
-        "space" | " " => Some(0x20),
-        "up" | "arrowup" => Some(0x26),
-        "down" | "arrowdown" => Some(0x28),
-        "left" | "arrowleft" => Some(0x25),
-        "right" | "arrowright" => Some(0x27),
-        "home" => Some(0x24),
-        "end" => Some(0x23),
-        "pageup" | "pgup" => Some(0x21),
-        "pagedown" | "pgdn" => Some(0x22),
-        "menu" | "apps" | "contextmenu" => Some(0x5D),
-        "printscreen" => Some(0x2C),
-        "pause" => Some(0x13),
-        "capslock" => Some(0x14),
-        _ => None,
-    };
-    let function = lower
-        .strip_prefix('f')
-        .and_then(|n| n.parse::<u16>().ok())
-        .filter(|n| (1..=24).contains(n))
-        .map(|n| 0x70 + n - 1);
-    let key = match (named.or(function), single(key)) {
-        (Some(vk), _) => Key::Vk(vk),
-        (None, Some(c)) if c.is_ascii_alphanumeric() => Key::Vk(c.to_ascii_uppercase() as u16),
-        (None, Some(c)) => Key::Char(c),
-        (None, None) => {
-            return Err(format!(
-                "{key:?} is not a key: a character, or a name like Enter, Tab, Escape, F5 or Down"
-            ))
-        }
-    };
-    Ok(Chord { mods: held, key })
-}
-
-fn single(s: &str) -> Option<char> {
-    let mut c = s.chars();
-    let first = c.next()?;
-    c.next().is_none().then_some(first)
-}
 
 /// One key going down or up.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1158,42 +1071,23 @@ pub fn chord_strokes(mods: &[u16], key: u16) -> Vec<Stroke> {
 }
 
 /// The strokes that type `text`: line breaks and tabs as their keys, so a
-/// field sees Enter and Tab, everything else as its own characters.
+/// field sees Enter and Tab, everything else as its own characters. The
+/// split is the one every family types by ([`share::typed`]).
 pub fn text_strokes(text: &str) -> Vec<Stroke> {
     let mut out = Vec::new();
-    for c in text.chars() {
-        match c {
-            '\r' => {}
-            '\n' => out.extend(chord_strokes(&[], VK_RETURN)),
-            '\t' => out.extend(chord_strokes(&[], VK_TAB)),
-            c => {
-                let mut units = [0u16; 2];
-                for &unit in c.encode_utf16(&mut units).iter() {
-                    out.push(Stroke::Unit { unit, up: false });
-                    out.push(Stroke::Unit { unit, up: true });
-                }
-            }
+    for part in share::typed(text) {
+        match part {
+            Typed::Enter => out.extend(chord_strokes(&[], VK_RETURN)),
+            Typed::Tab => out.extend(chord_strokes(&[], VK_TAB)),
+            Typed::Units(units) => out.extend(units.into_iter().flat_map(|unit| {
+                [
+                    Stroke::Unit { unit, up: false },
+                    Stroke::Unit { unit, up: true },
+                ]
+            })),
         }
     }
     out
-}
-
-/// Whether a virtual key is one of the extended keys, which Windows tells
-/// apart from their numeric keypad twins by a flag.
-pub fn is_extended(vk: u16) -> bool {
-    matches!(
-        vk,
-        0x21..=0x28 | 0x2D | 0x2E | 0x5B | 0x5C | 0x5D | 0x6F | 0x90 | 0xA3 | 0xA5
-    )
-}
-
-/// `w` by `h` shrunk to at most `most` wide, keeping its shape.
-pub fn fit(w: u32, h: u32, most: u32) -> (u32, u32) {
-    if w <= most || w == 0 {
-        return (w, h);
-    }
-    let nh = (h as u64 * most as u64 / w as u64).max(1) as u32;
-    (most, nh)
 }
 
 /// `[x, y, w, h]` cut to what lies inside a `width` by `height` picture,
@@ -1207,16 +1101,14 @@ pub fn clip(r: [i32; 4], width: i32, height: i32) -> Option<[i32; 4]> {
 }
 
 /// A screen point as SendInput's absolute coordinates over the virtual
-/// desktop at `left`, `top`, `width` by `height`: 0 to 65535 each way.
+/// desktop at `left`, `top`, `width` by `height`: 0 to 65535 each way,
+/// aimed at the pixel's middle as [`share::absolute`] says why.
 pub fn absolute(x: i32, y: i32, desk: [i32; 4]) -> (i32, i32) {
     let [left, top, width, height] = desk;
-    let scale = |v: i32, origin: i32, size: i32| {
-        if size <= 1 {
-            return 0;
-        }
-        ((v - origin) as i64 * 65535 / (size - 1) as i64).clamp(0, 65535) as i32
-    };
-    (scale(x, left, width), scale(y, top, height))
+    (
+        share::absolute(x.saturating_sub(left), width),
+        share::absolute(y.saturating_sub(top), height),
+    )
 }
 
 /// The ref number in `e12`.
@@ -1986,7 +1878,7 @@ pub fn list_windows() -> Vec<Window> {
             r.right > r.left && r.bottom > r.top
         })
         .map(info)
-        .filter(|w| !w.title.is_empty() && !w.exe.to_lowercase().starts_with("horadric"))
+        .filter(|w| !w.title.is_empty() && !is_horadric(&w.exe))
         .collect()
 }
 
@@ -2167,7 +2059,7 @@ fn key_input(s: Stroke) -> INPUT {
         Stroke::Vk { vk, up } => {
             let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as u16;
             let mut f = KEYBD_EVENT_FLAGS(0);
-            if is_extended(vk) {
+            if share::extended_key(vk) {
                 f |= KEYEVENTF_EXTENDEDKEY;
             }
             if up {
@@ -4417,7 +4309,7 @@ unsafe fn print(h: HWND, at: RECT) -> Result<(Vec<u8>, bool), String> {
     result
 }
 
-/// `pixels` as a PNG, cut to `part` and no wider than [`WIDEST`].
+/// `pixels` as a PNG, cut to `part` and no wider than [`FRAME_WIDTH`].
 unsafe fn encode(
     pixels: &[u8],
     width: u32,
@@ -4447,7 +4339,7 @@ unsafe fn encode(
         source = clipper.cast()?;
         (w, h) = (cw as u32, ch as u32);
     }
-    let (fw, fh) = fit(w, h, WIDEST);
+    let (fw, fh) = share::scaled(w, h, Some(FRAME_WIDTH));
     if (fw, fh) != (w, h) {
         let scaler = wic.CreateBitmapScaler()?;
         scaler.Initialize(&source, fw, fh, WICBitmapInterpolationModeFant)?;
@@ -5377,47 +5269,6 @@ mod tests {
     }
 
     #[test]
-    fn keys_parse_to_virtual_keys() {
-        assert_eq!(
-            parse_key("Control+S").unwrap(),
-            Chord {
-                mods: vec![VK_CONTROL],
-                key: Key::Vk(b'S' as u16)
-            }
-        );
-        assert_eq!(
-            parse_key("Alt+F4").unwrap(),
-            Chord {
-                mods: vec![VK_MENU],
-                key: Key::Vk(0x73)
-            }
-        );
-        assert_eq!(parse_key("Enter").unwrap().key, Key::Vk(VK_RETURN));
-        assert_eq!(parse_key("F5").unwrap().key, Key::Vk(0x74));
-        assert_eq!(parse_key("f24").unwrap().key, Key::Vk(0x87));
-        assert_eq!(parse_key("Shift+Tab").unwrap().mods, vec![VK_SHIFT]);
-        assert_eq!(parse_key("a").unwrap().key, Key::Vk(b'A' as u16));
-        assert_eq!(parse_key("7").unwrap().key, Key::Vk(b'7' as u16));
-        assert_eq!(parse_key("?").unwrap().key, Key::Char('?'));
-        assert_eq!(parse_key("+").unwrap().key, Key::Char('+'));
-        assert_eq!(
-            parse_key("ctrl++").unwrap(),
-            Chord {
-                mods: vec![VK_CONTROL],
-                key: Key::Char('+')
-            }
-        );
-        assert_eq!(
-            parse_key("Control+Control+Shift+down").unwrap().mods,
-            vec![VK_CONTROL, VK_SHIFT]
-        );
-        assert!(parse_key("Hyper+a").is_err());
-        assert!(parse_key("NotAKey").is_err());
-        assert!(parse_key("F25").is_err());
-        assert!(parse_key("Control+").is_err());
-    }
-
-    #[test]
     fn the_windows_key_is_never_pressed() {
         assert!(press_refusal(&parse_key("Win+R").unwrap()).is_some());
         assert!(press_refusal(&parse_key("Control+Meta+D").unwrap()).is_some());
@@ -5582,22 +5433,6 @@ mod tests {
     }
 
     #[test]
-    fn arrows_and_editing_keys_are_extended() {
-        assert!(is_extended(0x25));
-        assert!(is_extended(0x2E));
-        assert!(!is_extended(VK_RETURN));
-        assert!(!is_extended(b'A' as u16));
-    }
-
-    #[test]
-    fn pictures_shrink_to_fit_keeping_their_shape() {
-        assert_eq!(fit(800, 600, 1600), (800, 600));
-        assert_eq!(fit(3200, 1800, 1600), (1600, 900));
-        assert_eq!(fit(4000, 1, 1600), (1600, 1));
-        assert_eq!(fit(0, 0, 1600), (0, 0));
-    }
-
-    #[test]
     fn a_crop_is_cut_to_the_picture() {
         assert_eq!(clip([10, 10, 20, 20], 100, 100), Some([10, 10, 20, 20]));
         assert_eq!(clip([-5, 90, 20, 20], 100, 100), Some([0, 90, 15, 10]));
@@ -5606,13 +5441,25 @@ mod tests {
 
     #[test]
     fn screen_points_map_onto_the_virtual_desktop() {
-        let desk = [0, 0, 1921, 1081];
-        assert_eq!(absolute(0, 0, desk), (0, 0));
-        assert_eq!(absolute(1920, 1080, desk), (65535, 65535));
-        assert_eq!(absolute(960, 540, desk), (32767, 32767));
+        // Windows turns the number back into a pixel by scaling down and
+        // dropping the fraction: each point must come back as itself,
+        // which aiming at a pixel's edge did not always do.
+        let back = |a: i32, extent: i32| (i64::from(a) * i64::from(extent) / 65536) as i32;
+        let desk = [0, 0, 1920, 1080];
+        for (x, y) in [(0, 0), (1, 1), (959, 539), (960, 540), (1919, 1079), (777, 333)] {
+            let (ax, ay) = absolute(x, y, desk);
+            assert_eq!((back(ax, 1920), back(ay, 1080)), (x, y));
+        }
         // A monitor left of the primary one starts below zero.
-        assert_eq!(absolute(-1920, 0, [-1920, 0, 3841, 1081]), (0, 0));
-        assert_eq!(absolute(5000, -10, desk), (65535, 0));
+        let wide = [-1920, 0, 3840, 1080];
+        let (ax, ay) = absolute(-1920, 0, wide);
+        assert_eq!((back(ax, 3840), back(ay, 1080)), (0, 0));
+        let (ax, _) = absolute(5, 0, wide);
+        assert_eq!(back(ax, 3840), 1925);
+        // Off the desktop it is held to the edge.
+        let (ax, ay) = absolute(5000, -10, desk);
+        assert_eq!((back(ax, 1920), back(ay, 1080)), (1919, 0));
+        assert_eq!(absolute(3, 3, [0, 0, 0, 0]), (0, 0));
     }
 
     #[test]

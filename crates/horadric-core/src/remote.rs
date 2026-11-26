@@ -562,35 +562,52 @@ pub fn text_events(text: &str) -> Result<Vec<Value>, String> {
         .collect())
 }
 
+/// The key a name stands for: a virtual key, or a character whose key
+/// depends on the keyboard layout.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Key {
+    Vk(u16),
+    Char(char),
+}
+
+/// A key with the modifiers held while it is pressed, in the order they
+/// go down.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Chord {
+    pub mods: Vec<u16>,
+    pub key: Key,
+}
+
 /// The virtual key of a modifier name, any case.
 fn modifier_vk(name: &str) -> Option<u16> {
     Some(match name.to_ascii_lowercase().as_str() {
         "ctrl" | "control" => 0x11,
         "shift" => 0x10,
         "alt" => 0x12,
-        "win" | "windows" | "meta" | "super" => 0x5b,
+        "win" | "windows" | "meta" | "super" | "cmd" => 0x5b,
         _ => return None,
     })
 }
 
-/// The virtual key of a key name, any case: a letter, a digit, F1 to F24,
-/// a named key, or one of the punctuation keys that sit in the same place
-/// on most layouts.
-fn key_vk(name: &str) -> Option<u16> {
+/// The key of a key name, any case: a letter, a digit, F1 to F24, a named
+/// key or a modifier as a virtual key, any other single character as
+/// itself.
+fn key_of(name: &str) -> Option<Key> {
     let lower = name.to_ascii_lowercase();
     let mut chars = lower.chars();
     if let (Some(c), None) = (chars.next(), chars.next()) {
-        if c.is_ascii_lowercase() {
-            return Some(c.to_ascii_uppercase() as u16);
-        }
-        if c.is_ascii_digit() {
-            return Some(c as u16);
-        }
+        return Some(match c {
+            c if c.is_ascii_lowercase() => Key::Vk(c.to_ascii_uppercase() as u16),
+            c if c.is_ascii_digit() => Key::Vk(c as u16),
+            ' ' => Key::Vk(0x20),
+            // Not lowered: a character is typed as it was written.
+            _ => Key::Char(name.chars().next()?),
+        });
     }
     if let Some(n) = lower.strip_prefix('f').and_then(|n| n.parse::<u16>().ok()) {
-        return (1..=24).contains(&n).then_some(0x6f + n);
+        return (1..=24).contains(&n).then_some(Key::Vk(0x6f + n));
     }
-    Some(match lower.as_str() {
+    Some(Key::Vk(match lower.as_str() {
         "enter" | "return" => 0x0d,
         "tab" => 0x09,
         "escape" | "esc" => 0x1b,
@@ -611,47 +628,80 @@ fn key_vk(name: &str) -> Option<u16> {
         "capslock" => 0x14,
         "numlock" => 0x90,
         "scrolllock" => 0x91,
-        "menu" | "apps" => 0x5d,
-        // Plus is named, since + is what joins a chord.
-        "=" | "plus" => 0xbb,
-        "," | "comma" => 0xbc,
-        "-" | "minus" => 0xbd,
-        "." | "period" => 0xbe,
-        "/" | "slash" => 0xbf,
+        "menu" | "apps" | "contextmenu" => 0x5d,
+        // Named, since + is what joins a chord and the others are easier
+        // said than typed.
+        "plus" => return Some(Key::Char('+')),
+        "comma" => return Some(Key::Char(',')),
+        "minus" => return Some(Key::Char('-')),
+        "period" => return Some(Key::Char('.')),
+        "slash" => return Some(Key::Char('/')),
         _ => modifier_vk(name)?,
-    })
+    }))
 }
 
-/// The virtual keys of a key or chord such as `Enter`, `Ctrl+S` or
-/// `Ctrl+Shift+Esc`, in the order they go down: the modifiers as written,
-/// then the key. A modifier alone (`Win`) is a key too.
-pub fn parse_chord(chord: &str) -> Result<Vec<u16>, String> {
-    let parts: Vec<&str> = chord.split('+').map(str::trim).collect();
-    let Some((key, mods)) = parts.split_last() else {
-        return Err("say which key".into());
+/// A key or chord such as `Enter`, `Ctrl+S`, `Ctrl+Shift+Esc` or `Ctrl++`
+/// as its modifiers, in the order written, and its key. A modifier alone
+/// (`Win`) is a key too. This is the one reading of key names for every
+/// family of tools; which keys a family then refuses, asks about or can
+/// not send is its own business.
+pub fn parse_key(spec: &str) -> Result<Chord, String> {
+    // A plus joins a chord, so as the key it is the last character.
+    let (mods, key) = match spec {
+        "+" => (None, "+"),
+        s if s.ends_with("++") => (Some(&s[..s.len() - 2]), "+"),
+        s => match s.rsplit_once('+') {
+            Some((mods, key)) => (Some(mods), key),
+            None => (None, s),
+        },
     };
-    let mut vks = Vec::with_capacity(parts.len());
-    for m in mods {
+    let mut held = Vec::new();
+    for m in mods.into_iter().flat_map(|m| m.split('+')).map(str::trim) {
         let vk = modifier_vk(m).ok_or_else(|| {
-            format!("{m:?} in {chord:?} is not Ctrl, Shift, Alt or Win, which come before the key")
+            format!("{m:?} in {spec:?} is not Ctrl, Shift, Alt or Win, which come before the key")
         })?;
-        if vks.contains(&vk) {
-            return Err(format!("{m:?} is in {chord:?} twice"));
+        if held.contains(&vk) {
+            return Err(format!("{m:?} is in {spec:?} twice"));
         }
-        vks.push(vk);
+        held.push(vk);
     }
-    let vk = key_vk(key).ok_or_else(|| {
+    // A space is a key by itself; around a name it is only spacing.
+    let name = if key == " " { key } else { key.trim() };
+    if name.is_empty() {
+        return Err(format!("no key in {spec:?}"));
+    }
+    let key = key_of(name).ok_or_else(|| {
         format!(
-            "{key:?} is not a key: a letter, a digit, F1 to F24, Enter, Tab, Escape, \
-             Backspace, Delete, Insert, Space, Up, Down, Left, Right, Home, End, PageUp, \
-             PageDown, PrintScreen, Pause, CapsLock, NumLock, ScrollLock, Menu, one of \
-             - = , . / (or Minus, Plus, Comma, Period, Slash), or a modifier"
+            "{name:?} is not a key: a character, F1 to F24, Enter, Tab, Escape, Backspace,              Delete, Insert, Space, Up, Down, Left, Right, Home, End, PageUp, PageDown,              PrintScreen, Pause, CapsLock, NumLock, ScrollLock, Menu, Minus, Plus, Comma,              Period, Slash, or a modifier"
         )
     })?;
-    if vks.contains(&vk) {
-        return Err(format!("{key:?} is in {chord:?} twice"));
+    if let Key::Vk(vk) = key {
+        if held.contains(&vk) {
+            return Err(format!("{name:?} is in {spec:?} twice"));
+        }
     }
-    vks.push(vk);
+    Ok(Chord { mods: held, key })
+}
+
+/// The virtual keys of a key or chord, in the order they go down: the
+/// modifiers, then the key. For a keyboard whose layout is not known (a
+/// remote's, the desk's), so of the characters only those that sit in the
+/// same place on most layouts are keys.
+pub fn parse_chord(chord: &str) -> Result<Vec<u16>, String> {
+    let Chord { mods: mut vks, key } = parse_key(chord)?;
+    vks.push(match key {
+        Key::Vk(vk) => vk,
+        Key::Char('=' | '+') => 0xbb,
+        Key::Char(',') => 0xbc,
+        Key::Char('-') => 0xbd,
+        Key::Char('.') => 0xbe,
+        Key::Char('/') => 0xbf,
+        Key::Char(c) => {
+            return Err(format!(
+                "{c:?} is not a key here, where the keyboard's layout is not known: of the                  punctuation only - = , . / are (or Minus, Plus, Comma, Period, Slash). Type                  it as text instead"
+            ))
+        }
+    });
     Ok(vks)
 }
 
@@ -1225,6 +1275,71 @@ mod tests {
         assert!(parse_chord("Ctrl+Ctrl+S").is_err());
         assert!(parse_chord("Ctrl+Ctrl").is_err());
         assert!(parse_chord("Ctrl+").is_err());
+        // A plus as the key, which only its name gave before.
+        assert_eq!(parse_chord("Ctrl++"), Ok(vec![0x11, 0xbb]));
+        assert_eq!(parse_chord("Cmd+ContextMenu"), Ok(vec![0x5b, 0x5d]));
+        // A character whose key depends on the layout is no key here.
+        assert!(parse_chord("?").unwrap_err().contains("layout is not known"));
+        assert!(parse_chord("Ctrl+NotAKey").unwrap_err().contains("is not a key"));
+    }
+
+    #[test]
+    fn one_parser_reads_a_key_for_every_family() {
+        let (ctrl, shift, alt) = (0x11, 0x10, 0x12);
+        let k = |s: &str| parse_key(s).unwrap();
+        assert_eq!(
+            k("Control+S"),
+            Chord {
+                mods: vec![ctrl],
+                key: Key::Vk(b'S' as u16)
+            }
+        );
+        assert_eq!(
+            k("Alt+F4"),
+            Chord {
+                mods: vec![alt],
+                key: Key::Vk(0x73)
+            }
+        );
+        assert_eq!(k("Enter").key, Key::Vk(0x0d));
+        assert_eq!(k("F5").key, Key::Vk(0x74));
+        assert_eq!(k("f24").key, Key::Vk(0x87));
+        assert_eq!(k("Shift+Tab").mods, vec![shift]);
+        assert_eq!(k("a").key, Key::Vk(b'A' as u16));
+        assert_eq!(k("7").key, Key::Vk(b'7' as u16));
+        // Any other character is itself, for whoever knows the layout,
+        // and in the case it was written.
+        assert_eq!(k("?").key, Key::Char('?'));
+        assert_eq!(k("Æ").key, Key::Char('Æ'));
+        assert_eq!(k("+").key, Key::Char('+'));
+        assert_eq!(k("Plus").key, Key::Char('+'));
+        assert_eq!(k("minus").key, Key::Char('-'));
+        assert_eq!(
+            k("ctrl++"),
+            Chord {
+                mods: vec![ctrl],
+                key: Key::Char('+')
+            }
+        );
+        assert_eq!(k(" ").key, Key::Vk(0x20));
+        assert_eq!(k("Ctrl+ "), k("Ctrl+Space"));
+        assert_eq!(k("ctrl + shift + down"), k("Ctrl+Shift+Down"));
+        assert_eq!(k("Control+Shift+down").mods, vec![ctrl, shift]);
+        // A modifier alone is a key: Alt opens the menu bar.
+        assert_eq!(
+            k("Alt"),
+            Chord {
+                mods: vec![],
+                key: Key::Vk(alt)
+            }
+        );
+        assert!(parse_key("Control+Control+S").unwrap_err().contains("twice"));
+        assert!(parse_key("Hyper+a").is_err());
+        assert!(parse_key("NotAKey").is_err());
+        assert!(parse_key("F25").is_err());
+        assert!(parse_key("Control+").is_err());
+        assert!(parse_key("+S").is_err());
+        assert!(parse_key("").is_err());
         assert!(parse_chord("").is_err());
         assert!(parse_chord("Hyper+S").is_err());
         assert!(parse_chord("Ctrl+Enterr").is_err());
