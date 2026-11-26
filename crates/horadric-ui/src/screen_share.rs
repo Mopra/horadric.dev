@@ -121,6 +121,9 @@ pub(crate) struct Serving {
     pub resizes: bool,
     /// Routes besides the screen share's own, behind the same token.
     pub more: &'static [Route],
+    /// Asked before a frame or input is answered: a refusal to give in
+    /// their place, for a server that is at times closed.
+    pub gate: Option<fn() -> Option<Answer>>,
 }
 
 /// A route a [`Serving`] adds.
@@ -147,6 +150,7 @@ fn share_serving() -> Serving {
         tells: true,
         resizes: true,
         more: &[],
+        gate: None,
     }
 }
 
@@ -540,6 +544,17 @@ fn handle(stream: &TcpStream, shared: &Arc<Shared>) -> io::Result<()> {
             return Ok(());
         }
         return respond(stream, "403 Forbidden", "text/plain", NO_RESIZE.as_bytes());
+    }
+    let gated = matches!(
+        (method.as_str(), path),
+        ("GET", "/frame.jpg") | ("POST", "/input")
+    );
+    if let Some(refusal) = shared.serving.gate.filter(|_| gated).and_then(|gate| gate()) {
+        // With any body read, or closing on it would lose the answer.
+        if method == "POST" && read_body(stream, &mut reader, content_length)?.is_none() {
+            return Ok(());
+        }
+        return respond(stream, refusal.status, refusal.kind, refusal.body.as_bytes());
     }
     match (method.as_str(), path) {
         ("GET", "/frame.jpg") => {

@@ -177,6 +177,8 @@ pub fn run() -> Result<(), String> {
         // The desk's size is its window's business.
         resizes: false,
         more: ROUTES,
+        // A closed desk shows and takes nothing, see [`closed`].
+        gate: Some(closed),
     })
 }
 
