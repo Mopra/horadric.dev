@@ -130,7 +130,8 @@ Kept:
 - In the state folder, encrypted for this Windows user (DPAPI, in the
   `windows` crate), since it holds everything that was on screen.
 - Values the vault knows are cut out before a line is written.
-- For a set time, then deleted (open: how long).
+- Seven days, then deleted; a short summary per day stays in the
+  memory store.
 
 Where it runs: in a process of its own, as session hosts do. A UI
 Automation call into a hung program can wait forever, and Whisper holds
@@ -225,18 +226,20 @@ On 2026-11-26, by the human:
   when that limit resets, or when the human unpauses it. Capture and a
   take over the human asks for go on: they are the human's own use.
 - **The name is the companion.**
+- **The trail is kept seven days** as text, then only a short summary
+  per day in the memory store.
+- **No rule for which account gets work.** The companion calls with
+  whichever account is active, as every session does. The accounts
+  differ only in their terms: the work seat is under OptiPeople's
+  agreement, the private one may be trained on unless that setting is
+  off.
 
 ## Open decisions
 
-- **Which account gets work.** With two accounts, a take over about
-  OptiPeople's work could run on the private one. The work seat for work
-  and the private one for the rest would follow the towns, if the trail
-  can tell which is which. The human's call.
 - **Telling the others.** Calls and meetings are written down as text.
-  Whether the people in them are told is the human's to decide, and
-  OptiPeople may have a rule about it.
-- **How long the trail is kept.** Proposed: seven days of the text
-  itself, then only a short summary per day in the memory store.
+  Whether the people in them are told is put off by the human
+  (2026-11-26), to be taken up before listening is switched on for
+  calls with others.
 - **The GPU** for Whisper and for the model in step 4.
 
 ## What the review changed
