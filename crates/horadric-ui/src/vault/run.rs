@@ -282,6 +282,13 @@ pub fn ask(session: &str, title: &str, text: &str, always: bool) -> Asked {
     asked
 }
 
+/// Asks the human Allow or No, for a yes that is neither once nor for
+/// good, so neither of [`ask`]'s words for it would be true. Called and
+/// waited for as [`ask`] is; Allow comes back as [`Answer::Once`].
+pub(crate) fn ask_allow(session: &str, title: &str, text: &str) -> Asked {
+    put(session, title, text, vec!["Allow".to_string(), "No".to_string()])
+}
+
 /// Lets a title say which program Always is for: "Use X for `gh`?" gives
 /// `gh`. Plain titles get a plain Always.
 fn title_program(title: &str) -> Option<&str> {
@@ -559,7 +566,7 @@ fn session_seen(id: &str) -> Option<(String, String)> {
 }
 
 /// Who asks, for the question: "session “Fix the build” of Horadric".
-fn asker(session: &str, project: Option<&str>) -> String {
+pub(crate) fn asker(session: &str, project: Option<&str>) -> String {
     if session.is_empty() {
         return "A terminal that is not a Horadric session".to_string();
     }

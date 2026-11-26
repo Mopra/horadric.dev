@@ -224,6 +224,8 @@ mod quests;
 #[cfg(windows)]
 mod recent;
 #[cfg(windows)]
+mod remote_gate;
+#[cfg(windows)]
 mod render;
 #[cfg(windows)]
 mod retinue;
