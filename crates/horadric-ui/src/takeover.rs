@@ -53,13 +53,15 @@
 //!
 //! The plate's Bypass lets a human who trusts the work and watches it skip
 //! the risky question in a program the session may already operate. It
-//! never lets a session into a program, and never counts for one that
+//! is on for the one session the plate showed when the human turned it
+//! on, never for another working beside it. It never lets a session into
+//! a program, and never counts for one that
 //! runs as administrator. It is never kept, and what it lets through
 //! unasked is still held for Esc, which stops it and turns bypass off.
 //! A risky question on screen when bypass comes on is put away and its
 //! call decided again (see [`releasable`]); any other question stays.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::time::{Instant, SystemTime};
@@ -182,36 +184,48 @@ pub(super) fn by_the_list(own: Grant, level: Option<Level>, action: Action, risk
         && decide(effective(own, level), action, risky) == Decision::Allow
 }
 
-/// What bypass makes of a decision: the risky question becomes an allowed
-/// call, true when held for the human's Esc. That question is only ever
-/// asked of a session that may operate the program already, so bypass
-/// never lets a session into a program: the approval question is asked
-/// with bypass on as with it off. Nor does it count for a program that
-/// runs as administrator. Nothing else moves: what is allowed goes as
-/// ever, and a refusal stays one.
-pub(super) fn bypassed(decision: Decision, bypass: bool, elevated: bool) -> (Decision, bool) {
+/// What bypass makes of a decision about `session`'s call: the risky
+/// question becomes an allowed call, true when held for the human's Esc.
+/// Only for a session bypass `covers`, the one the plate showed when the
+/// human turned it on: another session's risky action is asked as ever.
+/// That question is only ever asked of a session that may operate the
+/// program already, so bypass never lets a session into a program: the
+/// approval question is asked with bypass on as with it off. Nor does it
+/// count for a program that runs as administrator. Nothing else moves:
+/// what is allowed goes as ever, and a refusal stays one.
+pub(super) fn bypassed(
+    decision: Decision,
+    covers: &HashSet<String>,
+    session: &str,
+    elevated: bool,
+) -> (Decision, bool) {
     match decision {
-        Decision::AskRisky if bypass && !elevated => (Decision::Allow, true),
+        Decision::AskRisky if covers.contains(session) && !elevated => (Decision::Allow, true),
         d => (d, false),
     }
+}
+
+/// Whether `session`'s question on screen is put away when bypass comes on
+/// for `covers`, to be decided again under it: only one bypass would
+/// answer. Read off [`bypassed`], so the two can not come to disagree.
+pub(super) fn releasable(
+    covers: &HashSet<String>,
+    session: &str,
+    risky: bool,
+    elevated: bool,
+) -> bool {
+    let ask = if risky {
+        Decision::AskRisky
+    } else {
+        Decision::AskApprove
+    };
+    bypassed(ask, covers, session, elevated).1
 }
 
 /// The grant the approval question leaves, and what then becomes of the
 /// call. `pressed` is the button, None for put away. A refusal leaves the
 /// grant as it was: the next call asks again rather than being refused
 /// unseen.
-/// Whether a question on screen is put away when bypass comes on, to be
-/// decided again under it: only one bypass would answer. Read off
-/// [`bypassed`], so the two can not come to disagree.
-pub(super) fn releasable(risky: bool, elevated: bool) -> bool {
-    let ask = if risky {
-        Decision::AskRisky
-    } else {
-        Decision::AskApprove
-    };
-    bypassed(ask, true, elevated).1
-}
-
 pub(super) fn approved(
     grant: Grant,
     action: Action,
@@ -936,6 +950,9 @@ thread_local! {
     /// second dialog on top: the loop asking takes it once this is
     /// answered. Kept off the app, which may be borrowed when it is cleared.
     static ASKING: Cell<bool> = const { Cell::new(false) };
+    /// The session whose question on screen bypass may put away, while
+    /// one is up that it may.
+    static ON_SCREEN: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 impl App {
@@ -1023,7 +1040,12 @@ impl App {
             return pending.reply.send(json!({ "error": why }));
         }
         let asked = self.decision_for(&pending);
-        match bypassed(asked, ghost::bypass(), pending.elevated) {
+        match bypassed(
+            asked,
+            &ghost::bypass_covers(),
+            &pending.session,
+            pending.elevated,
+        ) {
             (Decision::Allow, held) => return self.allow(pending, held),
             (Decision::Refuse(why), _) => return self.refuse(pending, why),
             (ask, _) => {
@@ -1292,7 +1314,7 @@ impl App {
                 continue;
             }
             let asked = self.decision_for(&p);
-            match bypassed(asked, ghost::bypass(), p.elevated) {
+            match bypassed(asked, &ghost::bypass_covers(), &p.session, p.elevated) {
                 (Decision::Allow, held) => self.allow(p, held),
                 (Decision::Refuse(why), _) => self.refuse(p, why),
                 (ask, _) => {
@@ -1444,9 +1466,18 @@ pub(super) fn ask_waiting(hwnd: HWND) {
         };
         // Only a question bypass would answer goes when bypass comes on.
         // An approval, or anything in an elevated program, stays up for
-        // the human, whose answer it still needs.
-        let may_release = releasable(q.risky, q.pending.elevated);
-        let Some(answer) = ask_owned(&dialog(&q), &aside, may_release) else {
+        // the human, whose answer it still needs. Whether the bypass that
+        // comes on covers this session is asked then, see
+        // [`release_covered`].
+        let session = q.pending.session.clone();
+        let only = HashSet::from([session.clone()]);
+        let may_release = releasable(&only, &session, q.risky, q.pending.elevated);
+        if may_release {
+            ON_SCREEN.set(Some(session));
+        }
+        let answer = ask_owned(&dialog(&q), &aside, may_release);
+        ON_SCREEN.set(None);
+        let Some(answer) = answer else {
             next = with_app(|app| {
                 app.released(q);
                 app.next_question()
@@ -1464,6 +1495,18 @@ pub(super) fn ask_waiting(hwnd: HWND) {
         };
     }
     ASKING.set(false);
+}
+
+/// Bypass came on for `covers`: the question on screen is put away if
+/// bypass would answer it, which is only when it is about a session
+/// bypass covers. Another session's question stays up for the human.
+pub(super) fn release_covered(covers: &HashSet<String>) {
+    let on_screen = ON_SCREEN.take();
+    let covered = on_screen.as_deref().is_some_and(|s| covers.contains(s));
+    ON_SCREEN.set(on_screen);
+    if covered {
+        crate::dialog::release_aside();
+    }
 }
 
 /// Where the program asked about is on screen, with the dialog it shows
@@ -1640,42 +1683,61 @@ mod tests {
 
     #[test]
     fn bypass_skips_only_the_risky_question_of_a_program_already_operated() {
+        let on = HashSet::from(["a".to_string()]);
+        let off = HashSet::new();
         let risky = Decision::AskRisky;
-        assert_eq!(bypassed(risky, true, false), (Decision::Allow, true));
-        assert_eq!(bypassed(risky, false, false), (risky, false));
+        assert_eq!(bypassed(risky, &on, "a", false), (Decision::Allow, true));
+        assert_eq!(bypassed(risky, &off, "a", false), (risky, false));
         // Never for a program that runs as administrator.
-        assert_eq!(bypassed(risky, true, true), (risky, false));
+        assert_eq!(bypassed(risky, &on, "a", true), (risky, false));
         // It never lets a session into a program.
         let approve = Decision::AskApprove;
         for elevated in [true, false] {
-            assert_eq!(bypassed(approve, true, elevated), (approve, false));
+            assert_eq!(bypassed(approve, &on, "a", elevated), (approve, false));
         }
-        for bypass in [true, false] {
+        for covers in [&on, &off] {
             assert_eq!(
-                bypassed(Decision::Allow, bypass, false),
+                bypassed(Decision::Allow, covers, "a", false),
                 (Decision::Allow, false)
             );
             for why in [Refusal::Refused, Refusal::OnlyLook] {
                 let no = Decision::Refuse(why);
-                assert_eq!(bypassed(no, bypass, false), (no, false));
+                assert_eq!(bypassed(no, covers, "a", false), (no, false));
             }
         }
         // A risky click in a program never approved is asked about the
         // program first, bypass or not.
         for grant in [Grant::None, Grant::See] {
             let asked = decide(grant, Action::Operate, true);
-            assert_eq!(bypassed(asked, true, false), (Decision::AskApprove, false));
+            assert_eq!(
+                bypassed(asked, &on, "a", false),
+                (Decision::AskApprove, false)
+            );
         }
     }
 
     #[test]
+    fn bypass_is_for_the_session_it_was_turned_on_for_only() {
+        // On for "a", the session the plate showed. "b" works meanwhile
+        // in a program it may operate: its risky action is still asked.
+        let on = HashSet::from(["a".to_string()]);
+        let risky = Decision::AskRisky;
+        assert_eq!(bypassed(risky, &on, "b", false), (risky, false));
+        assert_eq!(bypassed(risky, &on, "a", false), (Decision::Allow, true));
+        // And b's question on screen stays up when bypass comes on for a.
+        assert!(!releasable(&on, "b", true, false));
+        assert!(releasable(&on, "a", true, false));
+    }
+
+    #[test]
     fn only_a_question_bypass_would_answer_goes_when_bypass_comes_on() {
-        assert!(releasable(true, false));
+        let on = HashSet::from(["a".to_string()]);
+        assert!(releasable(&on, "a", true, false));
         // The approval question lets a session into a program, which
         // bypass never does, and an elevated program is never bypassed.
-        assert!(!releasable(false, false));
-        assert!(!releasable(true, true));
-        assert!(!releasable(false, true));
+        assert!(!releasable(&on, "a", false, false));
+        assert!(!releasable(&on, "a", true, true));
+        assert!(!releasable(&on, "a", false, true));
     }
 
     #[test]

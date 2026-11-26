@@ -72,7 +72,7 @@ mod shells;
 mod tests;
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::time::{Duration, Instant};
@@ -223,14 +223,22 @@ struct Queued {
 thread_local! {
     /// How long a glide takes, from the plate's slider.
     static SPEED: Cell<Duration> = const { Cell::new(GLIDE) };
-    /// Bypass is on. Here and not on the overlay, since deciding a call
-    /// reads it too, and never saved.
-    static BYPASS: Cell<bool> = const { Cell::new(false) };
+    /// The sessions bypass is on for, none while it is off: the one the
+    /// plate showed when the human turned it on. Here and not on the
+    /// overlay, since deciding a call reads it too, and never saved.
+    static BYPASS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
 }
 
-/// Whether bypass is on.
+/// Whether bypass is on, for any session.
 pub(super) fn bypass() -> bool {
-    BYPASS.get()
+    BYPASS.with_borrow(|b| !b.is_empty())
+}
+
+/// The sessions bypass is on for. Another session's risky question is
+/// asked as ever while bypass is on, since the human vouched for the work
+/// they watched, not for whatever else runs.
+pub(super) fn bypass_covers() -> HashSet<String> {
+    BYPASS.with_borrow(Clone::clone)
 }
 
 /// The glide speed from the state file, at the app's start.
@@ -482,8 +490,12 @@ pub(super) fn allowed(shared: &Rc<Shared>, call: Allowed, reply: Reply) -> bool 
         hold_shells(&call.session);
         o.until = extend(o.until, now, true);
         o.place_plate(call.hwnd, call.point);
-        if bypass() && keeps_bypass(call.point.is_some(), call.unasked) {
-            o.holders.entry(call.session.clone()).or_default().called();
+        // Only a session bypass is on for keeps it on: another's calls
+        // are none of its work.
+        if keeps_bypass(call.point.is_some(), call.unasked) {
+            if let Some(h) = o.holders.get_mut(&call.session) {
+                h.called();
+            }
         }
         o.now = Now {
             session: call.session,
@@ -535,8 +547,8 @@ pub(super) fn allowed(shared: &Rc<Shared>, call: Allowed, reply: Reply) -> bool 
 /// see for itself.
 pub(super) fn operated(shared: &Rc<Shared>, session: &str) {
     with(shared, |o| {
-        if bypass() {
-            o.holders.entry(session.to_string()).or_default().called();
+        if let Some(h) = o.holders.get_mut(session) {
+            h.called();
         }
     });
 }
@@ -929,7 +941,7 @@ impl Overlay {
         if self.now.session.is_empty() {
             return false;
         }
-        BYPASS.set(true);
+        BYPASS.set(HashSet::from([self.now.session.clone()]));
         BYPASS_LIVE.store(true, Ordering::Release);
         take_turns_ended();
         let now = Instant::now();
@@ -979,7 +991,7 @@ impl Overlay {
     /// Ends bypass, and with it every call it let through that has not
     /// gone yet.
     fn bypass_off(&mut self, how: BypassEnd) {
-        BYPASS.set(false);
+        BYPASS.set(HashSet::new());
         BYPASS_LIVE.store(false, Ordering::Release);
         take_turns_ended();
         self.holders.clear();
@@ -2072,7 +2084,7 @@ fn took_look() {
         // The calls waiting for a question go through bypass now, the
         // one whose question is on screen too. Outside the overlay's
         // borrow: the app may hand it calls.
-        crate::dialog::release_aside();
+        super::takeover::release_covered(&bypass_covers());
         super::with_app(|app| app.takeover_bypass_on());
     }
 }

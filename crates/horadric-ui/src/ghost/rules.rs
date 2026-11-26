@@ -208,8 +208,9 @@ pub(crate) fn asks_human(phase: Option<&Phase>) -> bool {
     )
 }
 
-/// A session bypass is on for: the one driving when it was turned on, and
-/// each that operates a program while it is on.
+/// A session bypass is on for: the one the plate showed when it was turned
+/// on. Another session operating meanwhile never joins, so it can neither
+/// use bypass nor keep it on.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Holder {
     /// Seen at work since bypass was on for it.

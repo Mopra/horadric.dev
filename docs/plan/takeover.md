@@ -163,12 +163,15 @@ passes through to the program in front, and only the human's own keys
 count, never ones a session sends.
 
 The plate has one switch, Bypass, turned on by holding the mouse on it,
-for a human who trusts the work and watches it. It only skips the risky
-question for programs the session may already operate. It never grants
-a program, never applies to an elevated one, is never kept, and ends
-with the work it was turned on for (30 minutes at most). A risky
-question already on screen when it is turned on is put away and its
-call goes through Bypass; an approval question, or any question about
+for a human who trusts the work and watches it. It is on for one
+session, the one the plate showed when it was turned on: another
+session working meanwhile is asked as ever, and its calls do not keep
+Bypass on. It only skips the risky question for programs that session
+may already operate. It never grants a program, never applies to an
+elevated one, is never kept, and ends with that session's work (30
+minutes at most). A risky question of that session already on screen
+when it is turned on is put away and its call goes through Bypass; an
+approval question, another session's question, or any question about
 an elevated program, stays up.
 
 To look at the overlay without a session, start a dev instance with
