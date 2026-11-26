@@ -240,7 +240,43 @@ On 2026-11-26, by the human:
   Whether the people in them are told is put off by the human
   (2026-11-26), to be taken up before listening is switched on for
   calls with others.
-- **The GPU** for Whisper and for the model in step 4.
+- **Which runtime reaches cards that are not Nvidia's** (below).
+
+## The GPU, and every other PC
+
+Decided 2026-11-26: Whisper and the local model run on the graphics
+card wherever the PC has one that fits, and Horadric stays for
+everyone, the human's laptop included. So nothing in the companion may
+need a card. A card makes it better, the lack of one makes it plainer:
+
+| | With a fitting card | Without |
+|---|---|---|
+| Listening | The large model, written as it is said | The small model, written behind; Danish minutes behind |
+| Suggestions (step 4) | Offered on a pause | Asked for with a key |
+| The trail, asking it, take over | The same | The same |
+
+- **Picked at start, not at build.** One Horadric for every PC. It
+  looks at the card and its memory when it starts, says in Settings
+  what it chose, and the human can overrule it.
+- **Nothing more in the installer.** What a card needs (CUDA's files
+  are some hundreds of megabytes) is fetched the first time it is
+  used, the way the models are.
+- **On battery** listening and suggestions drop to the plain column or
+  pause, by a setting. A laptop that runs Whisper all day on battery is
+  empty by noon.
+- **First: Nvidia through CUDA.** candle has it, so no new dependency,
+  and the human's desktop has an RTX 4070 Ti (12 GB). To check before
+  building: that one binary built with candle's CUDA feature still
+  starts, and falls back to the CPU, on a PC without CUDA.
+- **Open: the other cards.** Most laptops have Intel or AMD graphics,
+  which CUDA never reaches. Reaching them means another runtime
+  (whisper.cpp with Vulkan, or ONNX Runtime with DirectML), a new
+  dependency and Whisper written a second time. Decide once the plain
+  column has been tried on the human's laptop: if it is good enough
+  there, the second runtime is not worth it.
+- **Each PC has its own trail.** The laptop does not know what was done
+  at the desktop, since the trail is never sent to a brother. Sharing
+  it between the human's own machines would be a decision of its own.
 
 ## What the review changed
 
