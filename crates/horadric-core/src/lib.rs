@@ -26,6 +26,7 @@ pub mod chronicle;
 pub mod context;
 pub mod desk;
 pub mod desk_apps;
+pub mod desktop_programs;
 pub mod diff;
 pub mod discord;
 pub mod escalate;

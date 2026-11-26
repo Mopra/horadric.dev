@@ -1461,6 +1461,28 @@ pub fn dialog_place(size: (i32, i32), work: [i32; 4]) -> (i32, i32) {
     (x.max(wl), y.max(wt))
 }
 
+/// Where a question about another program goes: in a corner of the work
+/// area, the one covering least of `avoid` (that program's windows), and
+/// the bottom right, by the tray, when corners tie.
+pub fn dialog_aside(size: (i32, i32), work: [i32; 4], avoid: Option<[i32; 4]>) -> (i32, i32) {
+    const GAP: i32 = 16;
+    let [wl, wt, wr, wb] = work;
+    let (right, bottom) = (wr - size.0 - GAP, wb - size.1 - GAP);
+    let (left, top) = (wl + GAP, wt + GAP);
+    let covered = |(x, y): (i32, i32)| {
+        avoid.map_or(0, |[l, t, r, b]| {
+            let w = (x + size.0).min(r) - x.max(l);
+            let h = (y + size.1).min(b) - y.max(t);
+            i64::from(w.max(0)) * i64::from(h.max(0))
+        })
+    };
+    [(right, bottom), (left, bottom), (right, top), (left, top)]
+        .into_iter()
+        .map(|(x, y)| (x.max(wl), y.max(wt)))
+        .min_by_key(|&at| covered(at))
+        .unwrap_or((wl, wt))
+}
+
 /// How tall the stage's caption is, in DIPs.
 pub const CAPTION_H: f32 = 30.0;
 const CAPTION_KEY_W: f32 = 42.0;
@@ -2511,6 +2533,26 @@ mod tests {
             dialog_place((400, 200), [1000, 100, 2000, 800]),
             (1300, 300)
         );
+    }
+
+    #[test]
+    fn a_question_about_a_program_keeps_clear_of_it() {
+        let work = [0, 0, 1920, 1040];
+        // Nothing to avoid, or a maximised program: by the tray.
+        assert_eq!(dialog_aside((400, 200), work, None), (1504, 824));
+        assert_eq!(dialog_aside((400, 200), work, Some(work)), (1504, 824));
+        // A program on the right half: the bottom left.
+        assert_eq!(
+            dialog_aside((400, 200), work, Some([960, 0, 1920, 1040])),
+            (16, 824)
+        );
+        // A program low on the left: the top right.
+        let low_left = Some([0, 500, 1600, 1040]);
+        assert_eq!(dialog_aside((400, 200), work, low_left), (1504, 16));
+        // A modal dialog in the middle is never covered.
+        let dialog = [660, 370, 1260, 670];
+        let (x, y) = dialog_aside((400, 200), work, Some(dialog));
+        assert!(x + 400 <= dialog[0] || x >= dialog[2] || y + 200 <= dialog[1] || y >= dialog[3]);
     }
 
     #[test]

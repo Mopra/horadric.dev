@@ -150,6 +150,15 @@ mod drive;
 #[path = "forge_tools.rs"]
 mod forge_tools;
 
+#[path = "desktop.rs"]
+mod desktop;
+
+#[path = "ghost.rs"]
+mod ghost;
+
+#[path = "guard.rs"]
+mod guard;
+
 #[path = "chronicler.rs"]
 mod chronicler;
 
@@ -282,6 +291,9 @@ const WM_HORADRIC_PORTAL_KEY: u32 = WM_APP + 41;
 const WM_HORADRIC_UNDONE: u32 = WM_APP + 47;
 /// A project's context was read on its thread, into `contextpanel::take`.
 const WM_HORADRIC_CONTEXT: u32 = WM_APP + 60;
+/// Ask about the desktop calls waiting in the app's `desktop`, outside the
+/// app's borrow since asking runs a loop of its own.
+const WM_HORADRIC_DESKTOP: u32 = WM_APP + 61;
 
 /// What the list of a row of the Settings window offers.
 struct SettingsList {
@@ -786,6 +798,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     let keys_live = Action::ALL.map(|a| register_key(notify, a, keys[a.index()]));
     crate::dictate::use_chord(keys[Action::Dictate.index()]);
     web::set_sizes(&saved.page_sizes);
+    ghost::set_speed_saved(saved.desktop_glide_ms);
     theme::set_accents(&saved.accents);
     web::set_docks(&saved.page_docks);
     sanctuary::set_docks(&saved.sky_docks);
@@ -910,6 +923,19 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             // Woken by the post below whether or not it lit anything.
             crate::glows::hear(&feed_registry, &target, &t.event);
             crate::forge::heard(&feed_registry, &target, &t.event);
+            // Bypass on the Thinking plate ends with the turn it was on for.
+            if t.event.agent_id.is_none()
+                && matches!(
+                    t.event.hook_event_name.as_str(),
+                    "Stop" | "StopFailure" | "SessionEnd"
+                )
+            {
+                ghost::turn_ended(&target);
+            }
+            // What a session runs in a shell while it drives a desktop
+            // program is listed on the Thinking plate, subagents' too, and
+            // its turn's end stops what never got its own.
+            ghost::shell_heard(&target, &t.event);
             // A turn's end is when its keeper is sent the snapshot.
             if t.event.hook_event_name == "Stop" && t.event.agent_id.is_none() {
                 keeping::turn_ended(&target, &t.event.transcript_path);
@@ -1148,6 +1174,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             frozen: false,
             pick_from: None,
             start_failed: None,
+            desktop: desktop::Desktop::default(),
             menu_for: None,
             stone_for: None,
             stone_menu_for: None,
@@ -1441,6 +1468,10 @@ unsafe extern "system" fn app_proc(
                     check: None,
                 });
             }
+            return LRESULT(0);
+        }
+        WM_HORADRIC_DESKTOP => {
+            desktop::ask_waiting(hwnd);
             return LRESULT(0);
         }
         WM_HORADRIC_TILE_MENU => {
@@ -2522,6 +2553,14 @@ fn offer_update(m: &Manifest) {
 pub(crate) fn ask(d: &Dialog) -> Option<usize> {
     let shared = with_app(|app| Rc::clone(&app.shared))?;
     dialog::show(&shared.gpu, &shared.metrics, d)
+}
+
+/// Asks about another program, aside from it, the same way.
+pub(crate) fn ask_aside(d: &Dialog, aside: &dialog::Aside) -> dialog::Answer {
+    match with_app(|app| Rc::clone(&app.shared)) {
+        Some(shared) => dialog::show_aside(&shared.gpu, &shared.metrics, d, aside),
+        None => dialog::Answer::Unanswered,
+    }
 }
 
 /// Asks beside the cluster of project `key`, outside the app's borrow: the
@@ -4056,6 +4095,9 @@ struct App {
     pick_from: Option<PathBuf>,
     /// Why the last session asked for did not start, until it is said.
     start_failed: Option<String>,
+    /// What each session may do in which desktop program, and the calls
+    /// waiting for the human to say.
+    desktop: desktop::Desktop,
     /// The tile whose menu is about to show.
     menu_for: Option<String>,
     /// The stone about to be cast, by project key and label.
@@ -9592,6 +9634,7 @@ impl App {
             runewords: self.tome.projects.clone(),
             stones_cast: self.tome.cast.clone(),
             cast_without_asking: !self.tome.ask,
+            desktop_glide_ms: ghost::speed_saved(),
             stones_hidden: self.tome.hidden.clone(),
             stones_order: self.tome.order.clone(),
             errands: self.tome.errands.clone(),

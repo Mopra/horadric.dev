@@ -14,6 +14,10 @@
 //! leave each other, to every session, Horadric's or not. What a lore tool
 //! showed a session of Horadric's is passed on to the app, which lights it
 //! in the project's Arcane Sanctuary.
+//!
+//! The desktop tools, for programs on the user's Windows desktop, are in
+//! `desktop`: they work here in this process and ask the app only whether
+//! the human allows them.
 
 use std::cell::OnceCell;
 use std::io::{BufRead, Write};
@@ -32,6 +36,9 @@ use serde_json::{json, Value};
 #[path = "mcp_forge.rs"]
 mod forge;
 
+#[cfg(windows)]
+use crate::desktop::Desktop;
+
 /// What this server speaks when the client does not say.
 const PROTOCOL: &str = "2025-06-18";
 
@@ -48,7 +55,7 @@ const MAY_HAVE_RUN: &str = "It may still have run in the page: look (browser_sna
 const HAS_LORE: bool = cfg!(not(target_os = "macos"));
 
 /// The most text a tool answers with, so one call can not fill the context.
-const MOST_TEXT: usize = 60_000;
+pub(crate) const MOST_TEXT: usize = 60_000;
 
 /// The tallest full page screenshot, in CSS pixels.
 const TALLEST: f64 = 12_000.0;
@@ -72,6 +79,8 @@ pub fn run() -> Result<(), String> {
         lore: crate::lore::tool,
         #[cfg(target_os = "macos")]
         lore: |_, _| None,
+        #[cfg(windows)]
+        desktop: Desktop::default(),
     };
     let mut out = std::io::stdout().lock();
     for line in std::io::stdin().lock().lines() {
@@ -161,10 +170,15 @@ fn shown(msg: &Value, answer: &Value, is_file: impl Fn(&str) -> bool) -> Vec<Str
     out
 }
 
+/// What a session Horadric started is told of its browser, and on Windows
+/// of its desktop.
+/// Why a session Horadric did not start can not use these tools.
+const NOT_STARTED: &str =
+    "this session was not started by Horadric, so it has no browser and no desktop tools";
+
 /// One call to the app, and what it answered, or why not.
 pub(crate) fn ask_app(port: u16, session: Option<&str>, body: &Value) -> Result<Value, String> {
-    let session =
-        session.ok_or("this session was not started by Horadric, so it has no browser")?;
+    let session = session.ok_or(NOT_STARTED)?;
     let headers = [(COMMAND_HEADER, "browser"), (SESSION_HEADER, session)];
     // The session's key goes with every call, so the app knows the call is
     // this session's and not another program's naming it.
@@ -206,6 +220,10 @@ struct Server<A> {
     settle: Duration,
     /// Answers a lore tool, None for any other.
     lore: fn(&str, &Value) -> Option<Result<String, String>>,
+    /// The desktop programs the agent reads and operates, its UI
+    /// Automation set up on first use.
+    #[cfg(windows)]
+    desktop: Desktop,
 }
 
 impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
@@ -353,6 +371,13 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
                 let method = s("method").ok_or("say which method")?;
                 let params = args.get("params").cloned().unwrap_or(json!({}));
                 Ok(vec![text(cap(pretty(&self.devtools(method, params)?)))])
+            }
+            // The lore is served to any session, but the desktop only to
+            // one Horadric started, which has an app to ask the human.
+            n if n.starts_with("desktop_") && !self.browser => Err(NOT_STARTED.into()),
+            #[cfg(windows)]
+            n if n.starts_with("desktop_") => {
+                self.desktop.tool(n, args, &mut self.app, self.settle)
             }
             _ => Err(format!("there is no tool {name}")),
         }
@@ -819,7 +844,7 @@ fn tools() -> Vec<Value> {
         }
         base
     };
-    vec![
+    let mut list = vec![
         tool(
             "browser_open",
             "Open this project's browser pane in Horadric, and a tab of your own in it, at url when given. It is a real browser (Edge WebView2 on Windows, WebKit on the Mac) beside the user's terminals, logged in wherever the user logged in. Open it when a task needs a web page; it stays open until closed. Use it in place of Playwright, Puppeteer, a Chrome DevTools MCP or a Chrome or headless browser of your own.",
@@ -993,6 +1018,218 @@ fn tools() -> Vec<Value> {
             }),
             &["method"],
         ),
+    ];
+    #[cfg(windows)]
+    list.extend(desktop_tools());
+    list
+}
+
+/// The tools for programs on the user's Windows desktop.
+#[cfg(windows)]
+fn desktop_tools() -> Vec<Value> {
+    let window = || {
+        json!({
+            "anyOf": [{ "type": "string" }, { "type": "number" }],
+            "description": "The window: its id from desktop_windows, or part of its title",
+        })
+    };
+    let risky = || {
+        json!({
+            "type": "boolean",
+            "description": "Set it for anything that changes the controlled machine or the \
+                project: writing a value to a running PLC, changing its mode, transferring, \
+                deleting, saving over a file. The user is then asked to confirm.",
+        })
+    };
+    let reason = || {
+        json!({
+            "type": "string",
+            "description": "One short sentence, in the user's language, saying what you are \
+                about to do and why; it is shown to the human in Horadric's thinking box.",
+        })
+    };
+    let element = |verb: &str| {
+        json!({
+            "window": window(),
+            "reason": reason(),
+            "ref": { "type": "string", "description": "A ref from desktop_snapshot of this window, like e12" },
+            "name": { "type": "string", "description": format!("Where there is no ref: the first element whose name or automation id contains this, to {verb}") },
+            "risky": risky(),
+        })
+    };
+    let with = |mut base: Value, more: Value| {
+        if let (Some(b), Value::Object(m)) = (base.as_object_mut(), more) {
+            b.extend(m);
+        }
+        base
+    };
+    vec![
+        tool(
+            "desktop_windows",
+            "The programs' windows open on the user's Windows desktop, frontmost first: an id \
+             for the other desktop tools, the title, the program's file and process id. Dialogs \
+             say whose they are.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            "desktop_snapshot",
+            "A window's controls as text, through UI Automation: each button, field, list, tree \
+             item and label with its type, name, value, automation id, whether it is enabled, \
+             where it is in the window and what it can do (invoke, toggle, select, expand, \
+             value), and a ref like e12 for desktop_click, desktop_type and \
+             desktop_screenshot. Take a new one after the window changes; refs from an old \
+             one go stale.",
+            json!({ "window": window(), "reason": reason() }),
+            &["window"],
+        ),
+        tool(
+            "desktop_screenshot",
+            "A picture of a window as it is drawn, even when other windows cover it, or of one \
+             element of it by ref. Use it to check what a snapshot can not tell, like a chart, \
+             a ladder diagram or colours.",
+            json!({
+                "window": window(),
+                "ref": { "type": "string", "description": "Only this element, a ref from desktop_snapshot" },
+                "reason": reason(),
+            }),
+            &["window"],
+        ),
+        tool(
+            "desktop_click",
+            "Click an element of a window, by ref or by name. It is a real mouse click at the \
+             element's middle: the window comes forward, an element out of view is scrolled \
+             into it first where the program can, and one covered by another window is not \
+             clicked. Only an element whose one action is expanding (a combo box, a tree node \
+             that can not be selected) is expanded or collapsed through UI Automation instead. \
+             The user's mouse pointer is put back after, and the keyboard is given back to the \
+             window the user had in front (the answer says so), so their typing does not land \
+             in the program; a dialog the click opened waits behind it, and the next call can \
+             act in it.",
+            with(
+                element("click"),
+                json!({
+                    "button": { "type": "string", "enum": ["left", "right", "middle"] },
+                    "double": { "type": "boolean", "description": "A double click" },
+                }),
+            ),
+            &["window"],
+        ),
+        tool(
+            "desktop_type",
+            "Type text into a field of a window, by ref or by name. A field that takes a value \
+             has it set, replacing what was there; otherwise the window is brought forward, the \
+             field gets the keyboard and the text is typed at its caret. submit presses Enter \
+             after. The keyboard is then given back to the window the user had in front. The \
+             answer says what the field holds afterwards, read back before Enter; when that is \
+             not what was typed, Enter is not pressed.",
+            with(
+                element("type into"),
+                json!({
+                    "text": { "type": "string" },
+                    "submit": { "type": "boolean", "description": "Press Enter after" },
+                }),
+            ),
+            &["window", "text"],
+        ),
+        tool(
+            "desktop_text",
+            "Read the text of a list, grid, output pane or editor that desktop_snapshot can not \
+             read, by ref or by name, or of what has the keyboard in the window when neither is \
+             given. It reads UI Automation's text first, then the element's value (a plain \
+             text box has one); only where neither answers it selects all (Control+A) and \
+             copies (Control+C), which counts as operating, puts the clipboard's text back \
+             after (anything else on the clipboard is lost) and gives the keyboard back to \
+             the window the user had in front. Use it for build output, logs and tables \
+             instead of reading screenshots.",
+            element("read the text of"),
+            &["window"],
+        ),
+        tool(
+            "desktop_press",
+            "Press a key in a window, with modifiers joined by +: Enter, Escape, Tab, F5, \
+             Down, Control+S, Shift+Tab, Alt+F4, a. The window is brought forward for the key, \
+             which goes to whatever in it has the keyboard, and the keyboard is then given \
+             back to the window the user had in front (the answer says so).",
+            json!({
+                "window": window(),
+                "key": { "type": "string" },
+                "risky": risky(),
+                "reason": reason(),
+            }),
+            &["window", "key"],
+        ),
+        tool(
+            "desktop_changes",
+            "What changed in the desktop programs this session works with since your last \
+             desktop_changes: windows and dialogs shown and closed, a window coming to the \
+             front, menus, and fields, labels, boxes and items whose value, name or state \
+             changed, one short line each, newest last. Horadric watches a program from the \
+             first time this session looks at it or operates it. Far cheaper than a snapshot \
+             or a picture: ask this first to learn what happened after you or the user acted, \
+             or while a program works, and take a desktop_snapshot only when you need refs to \
+             act.",
+            json!({
+                "window": {
+                    "anyOf": [{ "type": "string" }, { "type": "number" }],
+                    "description": "Only this program's changes: its window's id from \
+                        desktop_windows, or part of its title. Without it, every program \
+                        watched",
+                },
+                "since": {
+                    "type": "integer",
+                    "description": "The changes after this number (each answer says where it \
+                        ended), instead of after your last desktop_changes. Programs that run \
+                        as administrator are counted apart and always go on from your last \
+                        desktop_changes",
+                },
+                "reason": reason(),
+            }),
+            &[],
+        ),
+        tool(
+            "desktop_wait",
+            "Wait until something happens in a desktop program, instead of taking snapshots or \
+             screenshots in a loop, then say what held and every change seen meanwhile. Give \
+             one or more of appears, gone, text and quiet_ms: it returns as soon as any of them \
+             holds, or after timeout_ms. quiet_ms waits until a program has finished loading, \
+             building or transferring: nothing in it changed for that long.",
+            json!({
+                "window": {
+                    "anyOf": [{ "type": "string" }, { "type": "number" }],
+                    "description": "The window to watch: its id from desktop_windows, or part \
+                        of its title. Without it, every program this session watches already",
+                },
+                "appears": {
+                    "type": "string",
+                    "description": "A window whose title contains this is open (a dialog, \
+                        a program starting), in the named window's program, or anywhere \
+                        without one",
+                },
+                "gone": {
+                    "type": "string",
+                    "description": "No window whose title contains this is open any more, \
+                        in the named window's program, or anywhere without one",
+                },
+                "text": {
+                    "type": "string",
+                    "description": "A field, label or item came to have a name or value \
+                        containing this, or a window such a title",
+                },
+                "quiet_ms": {
+                    "type": "integer",
+                    "description": "Nothing changed in the window for this many milliseconds",
+                },
+                "timeout_ms": {
+                    "type": "integer",
+                    "description": "How long to wait at most: 10000 when not given (or what \
+                        HORADRIC_DESKTOP_WAIT_MS says), 60000 at most. A wait that times out \
+                        is an error: look at the window before waiting again",
+                },
+                "reason": reason(),
+            }),
+            &[],
+        ),
     ]
 }
 
@@ -1074,7 +1311,7 @@ pub(crate) const LORE: &str = "Horadric keeps notes shared by every session of t
 /// the agent's desk, which exists only there.
 pub(crate) fn instructions() -> String {
     if cfg!(windows) {
-        format!("{INSTRUCTIONS} {DESK}")
+        format!("{INSTRUCTIONS} {DESK} {DESKTOP}")
     } else {
         INSTRUCTIONS.to_string()
     }
@@ -1086,6 +1323,21 @@ const INSTRUCTIONS: &str = "Horadric gives this session a browser, and it is the
 with browser_screenshot. Refs from browser_snapshot are surer than guessed selectors. Close your tab with \
 browser_close when you are done, unless the user is using it. It keeps one login profile with \
 the user's own use of it, so take care on sites where they are logged in.";
+
+/// What a Windows session is told of the desktop tools, after the browser.
+pub(crate) const DESKTOP: &str = "The desktop_ tools \
+do the same for programs on the user's Windows desktop (an engineering tool like Sysmac Studio, \
+its watch window, its dialogs): list them with desktop_windows, read one with desktop_snapshot, \
+look with desktop_screenshot, read lists and output panes with desktop_text, act with \
+desktop_click, desktop_type and desktop_press, and know \
+that the user approves each program once per session and confirms each risky action. Refs from \
+desktop_snapshot are surer than points on the screen, so act by ref or name. Horadric watches \
+each program you have looked at or operated: ask desktop_changes what changed since you last \
+looked, and wait for a dialog, a text, a window to close or the program to go quiet with \
+desktop_wait, rather than taking snapshots or screenshots again and again; take a new \
+desktop_snapshot only when you need refs. The user watches \
+the control happen, so give every desktop call but desktop_windows a reason: one short sentence, \
+in the user's language, saying what you are about to do and why.";
 
 #[cfg(test)]
 mod tests {
@@ -1112,6 +1364,8 @@ mod tests {
             app,
             settle: Duration::ZERO,
             lore: |name, _| (name == "lore_recall").then(|| Ok("#1 a note".into())),
+            #[cfg(windows)]
+            desktop: Desktop::default(),
         };
         (s, calls)
     }
@@ -1236,6 +1490,10 @@ B.";
         assert_eq!(names, want);
         let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" });
         assert_eq!(s.handle(&init).unwrap()["result"]["instructions"], said);
+        // The lore needs no Horadric, the desktop does.
+        let a = s.handle(&call("desktop_windows", json!({}))).unwrap();
+        assert_eq!(a["result"]["isError"], true);
+        assert_eq!(a["result"]["content"][0]["text"], NOT_STARTED);
     }
 
     #[test]
@@ -1267,7 +1525,7 @@ B.";
         {
             let name = t["name"].as_str().unwrap();
             assert!(
-                ["browser_", "forge_", "remote_", "desk_", "lore_"]
+                ["browser_", "desktop_", "forge_", "remote_", "desk_", "lore_"]
                     .iter()
                     .any(|p| name.starts_with(p)),
                 "{t}"
@@ -1283,6 +1541,125 @@ B.";
                 );
             }
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_desktop_tools_are_offered_with_the_browser() {
+        let (mut s, _) = server(|_| Ok(json!({})));
+        let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
+        let tools = s.handle(&list).unwrap()["result"]["tools"].clone();
+        let named = |n: &str| {
+            tools
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == n)
+                .cloned()
+                .unwrap_or_else(|| panic!("no {n}"))
+        };
+        for n in [
+            "desktop_windows",
+            "desktop_snapshot",
+            "desktop_screenshot",
+            "desktop_click",
+            "desktop_type",
+            "desktop_press",
+            "desktop_text",
+            "desktop_changes",
+            "desktop_wait",
+        ] {
+            named(n);
+        }
+        assert_eq!(
+            named("desktop_changes")["inputSchema"]["required"],
+            json!([])
+        );
+        assert_eq!(named("desktop_wait")["inputSchema"]["required"], json!([]));
+        for k in [
+            "appears",
+            "gone",
+            "text",
+            "quiet_ms",
+            "timeout_ms",
+            "window",
+        ] {
+            assert!(
+                !named("desktop_wait")["inputSchema"]["properties"][k].is_null(),
+                "{k}"
+            );
+        }
+        assert!(named("desktop_changes")["description"]
+            .as_str()
+            .unwrap()
+            .contains("only when you need refs"));
+        assert_eq!(
+            named("desktop_type")["inputSchema"]["required"],
+            json!(["window", "text"])
+        );
+        for n in ["desktop_click", "desktop_type", "desktop_press"] {
+            let risky = &named(n)["inputSchema"]["properties"]["risky"];
+            assert_eq!(risky["type"], "boolean", "{n}");
+            assert!(
+                risky["description"].as_str().unwrap().contains("PLC"),
+                "{n}"
+            );
+        }
+        for n in [
+            "desktop_snapshot",
+            "desktop_screenshot",
+            "desktop_click",
+            "desktop_type",
+            "desktop_press",
+            "desktop_changes",
+            "desktop_wait",
+        ] {
+            let reason = &named(n)["inputSchema"]["properties"]["reason"];
+            assert_eq!(reason["type"], "string", "{n}");
+            assert!(
+                reason["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("thinking box"),
+                "{n}"
+            );
+        }
+        assert!(named("desktop_windows")["inputSchema"]["properties"]["reason"].is_null());
+        let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" });
+        let said = s.handle(&init).unwrap()["result"]["instructions"].clone();
+        assert!(said.as_str().unwrap().contains("desktop_snapshot"));
+        assert!(said.as_str().unwrap().contains("give every desktop call"));
+        assert!(said
+            .as_str()
+            .unwrap()
+            .contains("desktop_changes what changed"));
+        assert!(said.as_str().unwrap().contains("desktop_wait"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_desktop_wait_for_nothing_asks_nothing() {
+        let (mut s, calls) = server(|_| Ok(json!({ "allowed": true })));
+        let a = s.handle(&call("desktop_wait", json!({}))).unwrap();
+        assert_eq!(a["result"]["isError"], true);
+        assert!(a["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("say what to wait for"));
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_desktop_call_without_a_window_asks_nothing() {
+        let (mut s, calls) = server(|_| Ok(json!({ "allowed": true })));
+        let a = s.handle(&call("desktop_snapshot", json!({}))).unwrap();
+        assert_eq!(a["result"]["isError"], true);
+        assert!(a["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("say which window"));
+        assert!(calls.borrow().is_empty());
     }
 
     #[test]

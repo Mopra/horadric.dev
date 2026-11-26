@@ -559,6 +559,7 @@ fn adopt(app: &mut App, record: &Record, arrived: Arrived, from: &str) -> Result
         loot: Default::default(),
         runeword: None,
         chat: false,
+        created: None,
     };
     if let Ok(mut r) = app.registry.lock() {
         r.add(saved.to_session(SystemTime::now()));

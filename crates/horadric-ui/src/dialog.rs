@@ -8,9 +8,17 @@
 //! one, the arrows and Tab move the ring, and Esc or a click anywhere else
 //! answers nothing. Like the menus it runs a modal loop until answered, so
 //! the caller must not hold anything the message handlers need.
+//!
+//! A question about another program, such as a session's desktop action,
+//! is put aside instead ([`show_aside`]): in a corner of the screen clear
+//! of that program's windows, below whatever is always on top, without
+//! taking the focus or the mouse, and it stays until a button is pressed
+//! or its time runs out. The program and its own dialogs stay readable
+//! and clickable meanwhile, by the human and by the session's tools.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
+use std::time::Duration;
 
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
@@ -32,8 +40,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
     GetForegroundWindow, GetMessageW, GetWindowLongPtrW, IsWindow, LoadCursorW, PostQuitMessage,
-    RegisterClassW, SetForegroundWindow, SetWindowLongPtrW, ShowWindow, TranslateMessage,
-    CREATESTRUCTW, GWLP_USERDATA, IDC_ARROW, MSG, SW_HIDE, SW_SHOW, WA_INACTIVE, WM_ACTIVATE,
+    RegisterClassW, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    TranslateMessage, CREATESTRUCTW, GWLP_USERDATA, HWND_TOP, IDC_ARROW, MSG, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, WA_INACTIVE, WM_ACTIVATE,
     WM_CAPTURECHANGED, WM_CLOSE, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
     WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN, WM_TIMER,
     WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
@@ -46,6 +55,28 @@ use crate::render::{self, DialogScene, Gpu, Target};
 use crate::theme::{self, Color};
 
 pub(crate) const CLASS: PCWSTR = w!("HoradricDialog");
+
+/// The timer that ends a question put aside when nobody answers.
+const NO_ANSWER_TIMER: usize = 0x4e41;
+
+/// How a question about another program is put.
+pub struct Aside {
+    /// That program's windows, as left, top, right, bottom in screen
+    /// pixels, which the question keeps clear of when the screen allows.
+    pub avoid: Option<[i32; 4]>,
+    /// How long it waits for an answer.
+    pub within: Duration,
+}
+
+/// What became of a question put aside.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Answer {
+    Pressed(usize),
+    /// Put away by the human: Esc, or its window closed.
+    Dismissed,
+    /// Nobody answered in time.
+    Unanswered,
+}
 
 /// What kind of question, for the lamp by its title.
 #[derive(Clone, Copy)]
@@ -95,9 +126,28 @@ pub fn register_class() -> Result<()> {
 
 /// Asks, and returns the button pressed. None when dismissed.
 pub fn show(gpu: &Gpu, metrics: &Metrics, d: &Dialog) -> Option<usize> {
-    let popup = Popup::open(gpu, metrics, d)
+    let popup = Popup::open(gpu, metrics, d, None)
         .map_err(|e| eprintln!("horadric: cannot ask \"{}\": {e}", d.title))
         .ok()?;
+    run(&popup, d)
+}
+
+/// Asks about another program, aside: see the module's notes.
+pub fn show_aside(gpu: &Gpu, metrics: &Metrics, d: &Dialog, aside: &Aside) -> Answer {
+    let Ok(popup) = Popup::open(gpu, metrics, d, Some(aside))
+        .map_err(|e| eprintln!("horadric: cannot ask \"{}\": {e}", d.title))
+    else {
+        return Answer::Unanswered;
+    };
+    match run(&popup, d) {
+        Some(i) => Answer::Pressed(i),
+        None if popup.no_answer.get() => Answer::Unanswered,
+        None => Answer::Dismissed,
+    }
+}
+
+/// Runs the popup's loop until it is answered, and takes it down.
+fn run(popup: &Popup, d: &Dialog) -> Option<usize> {
     let mut msg = MSG::default();
     while popup.outcome.get().is_none() {
         let got = unsafe { GetMessageW(&mut msg, None, 0, 0) };
@@ -170,13 +220,29 @@ struct Popup<'a> {
     before: HWND,
     /// Some once closed, holding the button pressed if one was.
     outcome: Cell<Option<Option<usize>>>,
+    /// Put aside: it neither takes the focus nor goes when it loses it.
+    aside: bool,
+    /// Its time ran out with nobody answering.
+    no_answer: Cell<bool>,
 }
 
 impl<'a> Popup<'a> {
-    fn open(gpu: &'a Gpu, metrics: &'a Metrics, d: &Dialog) -> Result<Box<Self>> {
+    fn open(
+        gpu: &'a Gpu,
+        metrics: &'a Metrics,
+        d: &Dialog,
+        aside: Option<&Aside>,
+    ) -> Result<Box<Self>> {
         let mut cursor = POINT::default();
         unsafe {
             let _ = GetCursorPos(&mut cursor);
+        }
+        // Aside, it goes on the screen of the program it is about.
+        if let Some([l, t, r, b]) = aside.and_then(|a| a.avoid) {
+            cursor = POINT {
+                x: l + (r - l) / 2,
+                y: t + (b - t) / 2,
+            };
         }
         let monitor = unsafe { MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST) };
         let (mut dx, mut dy) = (96u32, 96u32);
@@ -204,7 +270,10 @@ impl<'a> Popup<'a> {
             (layout.size.0 * s).round() as i32,
             (layout.size.1 * s).round() as i32,
         );
-        let (x, y) = layout::dialog_place(size, work_area(cursor));
+        let (x, y) = match aside {
+            Some(a) => layout::dialog_aside(size, work_area(cursor), a.avoid),
+            None => layout::dialog_place(size, work_area(cursor)),
+        };
 
         let popup = Box::new(Popup {
             hwnd: Cell::new(HWND::default()),
@@ -224,13 +293,22 @@ impl<'a> Popup<'a> {
             pressed: Cell::new(None),
             before: unsafe { GetForegroundWindow() },
             outcome: Cell::new(None),
+            aside: aside.is_some(),
+            no_answer: Cell::new(false),
         });
+        // Aside, it is not always on top: it must never cover the program
+        // it asks about, nor that program's dialogs.
+        let ex = if aside.is_some() {
+            WS_EX_TOOLWINDOW
+        } else {
+            WS_EX_TOOLWINDOW | WS_EX_TOPMOST
+        };
         let title: Vec<u16> = d.title.encode_utf16().chain([0]).collect();
         unsafe {
             // Born where it shows and at its size: a window that starts
             // elsewhere and moves has been seen not to paint.
             let hwnd = CreateWindowExW(
-                WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+                ex,
                 CLASS,
                 PCWSTR(title.as_ptr()),
                 WS_POPUP,
@@ -253,9 +331,30 @@ impl<'a> Popup<'a> {
             );
             backdrop::border(hwnd, None);
             appear::begin(hwnd, appear::DIALOG, (appear::RISE * s).round() as i32);
-            let _ = ShowWindow(hwnd, SW_SHOW);
-            let _ = SetForegroundWindow(hwnd);
-            SetCapture(hwnd);
+            match aside {
+                Some(a) => {
+                    // In front of the windows open now, but without the
+                    // focus, so keys and clicks meant for the program
+                    // still reach it.
+                    let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                    let _ = SetWindowPos(
+                        hwnd,
+                        Some(HWND_TOP),
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                    );
+                    let ms = u32::try_from(a.within.as_millis()).unwrap_or(u32::MAX);
+                    SetTimer(Some(hwnd), NO_ANSWER_TIMER, ms.max(1), None);
+                }
+                None => {
+                    let _ = ShowWindow(hwnd, SW_SHOW);
+                    let _ = SetForegroundWindow(hwnd);
+                    SetCapture(hwnd);
+                }
+            }
         }
         Ok(popup)
     }
@@ -348,8 +447,8 @@ impl<'a> Popup<'a> {
                 let _ = ReleaseCapture();
             }
             // Before hiding: hiding the active window hands the focus to
-            // whatever Windows picks.
-            if !self.before.is_invalid() && IsWindow(Some(self.before)).as_bool() {
+            // whatever Windows picks. One put aside never took it.
+            if !self.aside && !self.before.is_invalid() && IsWindow(Some(self.before)).as_bool() {
                 let _ = SetForegroundWindow(self.before);
             }
             let _ = ShowWindow(hwnd, SW_HIDE);
@@ -422,6 +521,11 @@ impl<'a> Popup<'a> {
                 self.close(None);
                 Some(LRESULT(0))
             }
+            // Aside, losing the focus or the mouse is not an answer: the
+            // session's own clicks in the program would otherwise refuse
+            // its question for it.
+            WM_ACTIVATE if self.aside => None,
+            WM_CAPTURECHANGED if self.aside => None,
             WM_ACTIVATE => {
                 if (wparam.0 & 0xffff) as u32 == WA_INACTIVE {
                     self.close(None);
@@ -435,6 +539,11 @@ impl<'a> Popup<'a> {
                     self.close(None);
                 }
                 None
+            }
+            WM_TIMER if wparam.0 == NO_ANSWER_TIMER => {
+                self.no_answer.set(true);
+                self.close(None);
+                Some(LRESULT(0))
             }
             _ => None,
         }

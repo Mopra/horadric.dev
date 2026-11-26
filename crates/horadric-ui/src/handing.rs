@@ -967,6 +967,7 @@ impl App {
             // A chat goes on as one, its next prompt told it moved like a
             // terminal's: its hooks are Claude Code's.
             chat: record.chat,
+            created: None,
         };
         // No one may be at this PC to answer Claude Code's trust prompt
         // for a folder it has never seen.
