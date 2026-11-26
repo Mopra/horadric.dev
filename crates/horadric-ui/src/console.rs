@@ -800,6 +800,11 @@ impl Console {
         Some(records.summary().map(|r| (r.phase(), r.line())))
     }
 
+    /// What the program says it runs beside its turn (OSC 7501).
+    pub fn background(&self) -> Option<String> {
+        self.program.lock().ok()?.background()
+    }
+
     /// What the program last said with OSC 9;4, while it runs.
     pub fn progress(&self) -> Option<Progress> {
         if self.exit_code().is_some() {

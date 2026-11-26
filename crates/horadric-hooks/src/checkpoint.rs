@@ -83,7 +83,9 @@ pub fn hear(session: &str, event: &HookEvent) {
     }
     let main_loop = !event.is_subagent();
     match event.hook_event_name.as_str() {
-        "PreToolUse" | "PostToolUse" | "PostToolUseFailure" => {
+        // A write auto mode refused ends as a failed one does: nothing
+        // was written, and no PostToolUse comes to say so.
+        "PreToolUse" | "PostToolUse" | "PostToolUseFailure" | "PermissionDenied" => {
             let Some((path, key)) = written(event) else {
                 return;
             };

@@ -11,7 +11,7 @@ use crate::event::{HookEvent, ModAgent};
 use crate::rarity::{self, Loot, Rarity};
 use crate::runeword::Runeword;
 use crate::title::Title;
-use crate::usage::Status;
+use crate::usage::{pretty_id, Status};
 use crate::worktree::Worktree;
 
 /// Why a session is waiting on the human.
@@ -81,6 +81,71 @@ impl Phase {
 /// The `StopFailure` error Claude Code gives when a usage limit refuses a
 /// turn.
 pub const RATE_LIMIT: &str = "rate_limit";
+
+/// A `StopFailure` kind in words a tile can say, where the kind tells the
+/// human what to do or what to wait for. None for a kind that says no
+/// more than "it failed".
+pub fn failure_words(kind: &str) -> Option<&'static str> {
+    Some(match kind {
+        RATE_LIMIT => "rate limit",
+        "authentication_failed" => "sign in again",
+        "oauth_org_not_allowed" => "organisation not allowed",
+        "account_on_hold" => "account on hold",
+        "billing_error" => "billing problem",
+        "server_error" => "server error",
+        "cloud_credential_error" => "cloud credentials refused",
+        "model_not_found" => "model not found",
+        "max_output_tokens" => "reply too long",
+        _ => return None,
+    })
+}
+
+/// The session's task list, as `TaskCreated` and `TaskCompleted` told of
+/// it: enough to say how far it has got.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Tasks {
+    open: Vec<String>,
+    done: Vec<String>,
+}
+
+impl Tasks {
+    fn hear(&mut self, event: &HookEvent) {
+        let Some(id) = event.task_id.as_deref().filter(|id| !id.is_empty()) else {
+            return;
+        };
+        match event.hook_event_name.as_str() {
+            "TaskCreated" => {
+                // A new list may count from one again.
+                self.done.retain(|t| t != id);
+                if !self.open.iter().any(|t| t == id) {
+                    self.open.push(id.to_string());
+                }
+            }
+            "TaskCompleted" => {
+                self.open.retain(|t| t != id);
+                if !self.done.iter().any(|t| t == id) {
+                    self.done.push(id.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Tasks made and not yet completed.
+    pub fn open(&self) -> usize {
+        self.open.len()
+    }
+
+    pub fn done(&self) -> usize {
+        self.done.len()
+    }
+
+    /// "2 of 5 tasks", or None without a list.
+    pub fn line(&self) -> Option<String> {
+        let all = self.open.len() + self.done.len();
+        (all > 0).then(|| format!("{} of {all} tasks", self.done.len()))
+    }
+}
 
 /// One running (or finished) agent session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -223,6 +288,18 @@ pub struct Session {
     /// and never served on: the brother itself serves it.
     #[serde(skip)]
     pub brother: Option<crate::afar::OnBrother>,
+    /// How far its task list has got. Gone with the process.
+    #[serde(skip)]
+    pub tasks: Tasks,
+    /// The id of the model a switch last left it on, from
+    /// `PostModelSwitch`. None until one is heard: the status line names
+    /// the model before that.
+    #[serde(skip)]
+    pub model: Option<String>,
+    /// Set while Claude Code rewrites its context, which can take a minute
+    /// in which no other hook speaks. See [`Session::is_compacting`].
+    #[serde(skip)]
+    pub compacting: bool,
 }
 
 /// What a program says about itself in its terminal (OSC 7501), as a tile
@@ -232,6 +309,9 @@ pub struct Heard {
     pub phase: Phase,
     pub line: Option<String>,
     pub since: SystemTime,
+    /// What it says it runs beside its turn, for the tile of a session
+    /// at rest (`program_status::Records::background`).
+    pub background: Option<String>,
 }
 
 /// How long the program must say a hooked session's turn is over, with no
@@ -294,7 +374,18 @@ impl Session {
             hooked: None,
             program: None,
             brother: None,
+            tasks: Tasks::default(),
+            model: None,
+            compacting: false,
         }
+    }
+
+    /// Claude Code is rewriting the session's context. It moves no phase
+    /// and no line: a compaction that is interrupted says nothing more, so
+    /// anything it changed would stay changed. A working tile says it
+    /// instead of its tool.
+    pub fn is_compacting(&self) -> bool {
+        self.compacting
     }
 
     /// Whether a command can be typed into the agent now without landing in
@@ -444,6 +535,13 @@ impl Session {
         if event.is_subagent() {
             return false;
         }
+        // The status line says the effort only when it next runs, a hook
+        // inside the turn says it now.
+        if let (Some(status), Some(level)) = (&mut self.status, event.effort_level()) {
+            if status.effort.as_deref() != Some(level) {
+                status.effort = Some(level.to_string());
+            }
+        }
 
         let next = match event.hook_event_name.as_str() {
             HookEvent::REGISTER => Some(Phase::Idle),
@@ -471,9 +569,15 @@ impl Session {
                     self.last_line = first_line(p);
                 }
                 self.last_prompt = event.user_prompt.clone();
+                // A list all done is history once the next thing is asked.
+                if self.tasks.open() == 0 {
+                    self.tasks = Tasks::default();
+                }
                 Some(Phase::Working)
             }
-            "PreToolUse" | "PostToolUse" | "PostToolUseFailure" => {
+            // A tool auto mode refused: no PostToolUse follows, and the
+            // turn goes on.
+            "PreToolUse" | "PostToolUse" | "PostToolUseFailure" | "PermissionDenied" => {
                 if let Some(t) = &event.tool_name {
                     self.last_line = t.clone();
                 }
@@ -507,11 +611,32 @@ impl Session {
                 }
             }
             "StopFailure" => {
-                let kind = event.error_type.clone().unwrap_or_else(|| "unknown".into());
-                if let Some(m) = &event.error_message {
-                    self.last_line = first_line(m);
+                let (kind, said) = event.failure();
+                // Claude Code puts the API's own error here on a failure.
+                let said = said
+                    .or(event.last_assistant_message.as_deref())
+                    .map(first_line)
+                    .filter(|s| !s.is_empty());
+                match (failure_words(&kind), said) {
+                    (Some(why), Some(said)) => self.last_line = format!("{why}: {said}"),
+                    (Some(why), None) => self.last_line = why.to_string(),
+                    (None, Some(said)) => self.last_line = said,
+                    (None, None) => {}
                 }
                 Some(Phase::Waiting(WaitReason::Error(kind)))
+            }
+            "PreCompact" => {
+                self.compacting = true;
+                None
+            }
+            "PostModelSwitch" => {
+                if let Some(to) = event.to_model.as_deref().filter(|m| !m.is_empty()) {
+                    self.model = Some(to.to_string());
+                    if let Some(status) = &mut self.status {
+                        status.model = Some(pretty_id(to));
+                    }
+                }
+                None
             }
             "SessionEnd" => match event.reason.as_deref() {
                 // `/clear` and `/resume` end one conversation and start the
@@ -538,6 +663,17 @@ impl Session {
             self.title = Some(t.clone());
         }
 
+        // Whatever sets a phase says the compaction is over, and so does an
+        // interrupt, which sets none: an interrupted or failed `/compact`
+        // sends no PostCompact.
+        if next.is_some()
+            || matches!(
+                event.hook_event_name.as_str(),
+                "PostCompact" | "SessionStart" | "Interrupt" | "StopCancelled"
+            )
+        {
+            self.compacting = false;
+        }
         let changed = match next {
             Some(phase) if phase != self.phase => {
                 self.unseen = phase == Phase::Done;
@@ -587,7 +723,13 @@ impl Session {
                 Some(h) if h.phase == phase => h.since,
                 _ => now,
             };
-            self.program = Some(Heard { phase, line, since });
+            let background = self.program.take().and_then(|h| h.background);
+            self.program = Some(Heard {
+                phase,
+                line,
+                since,
+                background,
+            });
         }
         self.weigh_program(now)
     }
@@ -627,6 +769,7 @@ impl Session {
         }
         if !phase.mid_turn() {
             self.tool = None;
+            self.compacting = false;
         }
         self.unseen = phase == Phase::Done;
         self.phase = phase;
@@ -676,6 +819,8 @@ impl Session {
     fn note(&mut self, event: &HookEvent, now: SystemTime) {
         self.heard_at = Some(now);
         self.band.hear(event, now);
+        // A teammate's tasks are on the session's one list.
+        self.tasks.hear(event);
         match event.hook_event_name.as_str() {
             // A hireling's tool is its own, in the band; the tile's is the
             // main loop's.
@@ -700,6 +845,13 @@ impl Session {
                 self.agent_types.clear();
                 self.roster = None;
                 self.stream_agents = None;
+                self.compacting = false;
+                // A `SessionStart` after a compaction is the same
+                // conversation going on, its list and its model with it.
+                if event.source.as_deref() != Some("compact") {
+                    self.tasks = Tasks::default();
+                    self.model = None;
+                }
             }
             HookEvent::AGENTS => self.roster = event.agents.clone(),
             _ => {}
@@ -890,6 +1042,13 @@ impl Session {
             },
             "elicitation_dialog" | "elicitation_url_dialog" => Phase::Waiting(WaitReason::Dialog),
             "elicitation_complete" | "elicitation_response" => Phase::Working,
+            // The usage limit that stopped it has passed, and Claude Code
+            // went on with the turn by itself.
+            // Only a limit passes by itself: a sign in that failed is still
+            // the human's to mend.
+            "quota_auto_resume_fired" if self.limited() => Phase::Working,
+            // `agent_completed` among them: a background agent that
+            // finished is news, not a question.
             _ => return None,
         };
         // Claude Code's `PermissionRequest` named the tool before this; other
@@ -1056,6 +1215,276 @@ mod tests {
     }
 
     #[test]
+    fn a_failure_says_why_in_claude_codes_own_fields() {
+        let mut s = Session::new("g1", "x", "");
+        s.apply(&ev("UserPromptSubmit"), now());
+        s.apply(&hook(r#"{"session_id":"c1","hook_event_name":"StopFailure","error":"rate_limit","error_details":"429 Too Many Requests","last_assistant_message":"API Error: Rate limit reached"}"#), now());
+        assert!(s.limited());
+        assert_eq!(s.last_line, "rate limit: 429 Too Many Requests");
+
+        s.apply(&hook(r#"{"session_id":"c1","hook_event_name":"StopFailure","error":"authentication_failed"}"#), now());
+        assert_eq!(
+            s.phase,
+            Phase::Waiting(WaitReason::Error("authentication_failed".into()))
+        );
+        assert_eq!(s.last_line, "sign in again");
+
+        // A kind with no words of its own leaves the API's.
+        s.apply(&hook(r#"{"session_id":"c1","hook_event_name":"StopFailure","error":"invalid_request","last_assistant_message":"API Error: bad\nmore"}"#), now());
+        assert_eq!(s.last_line, "API Error: bad");
+        assert_eq!(failure_words("unknown"), None);
+    }
+
+    #[test]
+    fn a_limit_that_passed_by_itself_is_work_again_and_a_finished_agent_is_no_question() {
+        let mut s = Session::new("g1", "x", "");
+        s.apply(&ev("UserPromptSubmit"), now());
+        let mut f = ev("StopFailure");
+        f.error_type = Some(RATE_LIMIT.into());
+        s.apply(&f, now());
+        let mut n = ev("Notification");
+        n.notification_type = Some("quota_auto_resume_stale".into());
+        assert!(!s.apply(&n, now()));
+        assert!(s.limited());
+        n.notification_type = Some("quota_auto_resume_fired".into());
+        n.message = Some("Resuming after the limit reset".into());
+        assert!(s.apply(&n, now()));
+        assert_eq!(s.phase, Phase::Working);
+        assert_eq!(s.last_line, "Resuming after the limit reset");
+
+        s.apply(&ev("Stop"), now());
+        // Not after a turn that just ended well.
+        assert!(!s.apply(&n, now()));
+        let mut done = ev("Notification");
+        done.notification_type = Some("agent_completed".into());
+        done.message = Some("Agent finished".into());
+        assert!(!s.apply(&done, now()));
+        assert_eq!(s.phase, Phase::Done);
+        assert!(s.ask.is_none());
+    }
+
+    #[test]
+    fn a_compaction_at_rest_leaves_the_tile_as_it_was() {
+        let t0 = now();
+        let later = |s: u64| t0 + Duration::from_secs(s);
+        let mut s = Session::new("g1", "x", "");
+        s.apply(&ev("UserPromptSubmit"), t0);
+        let mut stop = ev("Stop");
+        stop.last_assistant_message = Some("all green".into());
+        s.apply(&stop, later(1));
+        s.identify();
+        assert!(!s.apply(&ev("PreCompact"), later(60)));
+        assert!(s.is_compacting());
+        assert_eq!(s.phase, Phase::Done);
+        assert!(!s.apply(&ev("PostCompact"), later(90)));
+        assert!(!s.is_compacting());
+        assert_eq!(s.phase, Phase::Done);
+        assert_eq!(s.last_line, "all green");
+        // Read before, so not a new thing to look at, and no younger.
+        assert!(!s.unread());
+        assert_eq!(s.since, later(1));
+    }
+
+    #[test]
+    fn a_compaction_cut_short_leaves_nothing_stuck() {
+        // Whatever ends or interrupts work ends it, no PostCompact needed.
+        let mut reset = ev("SessionStart");
+        reset.source = Some("compact".into());
+        let mut failed = ev("StopFailure");
+        failed.error_type = Some(RATE_LIMIT.into());
+        for end in [
+            ev("Stop"),
+            failed,
+            ev("SessionEnd"),
+            ev("Interrupt"),
+            ev("StopCancelled"),
+            ev("UserPromptSubmit"),
+            ev("SessionStart"),
+            reset,
+        ] {
+            for mid_turn in [true, false] {
+                let mut s = Session::new("g1", "x", "");
+                s.apply(&ev("UserPromptSubmit"), now());
+                if !mid_turn {
+                    s.apply(&ev("Stop"), now());
+                }
+                let before = s.phase.clone();
+                s.apply(&ev("PreCompact"), now());
+                assert_eq!(s.phase, before);
+                s.apply(&end, now());
+                assert!(!s.is_compacting(), "{}", end.hook_event_name);
+            }
+        }
+
+        // At rest and interrupted, the tile never left Done.
+        let mut s = Session::new("g1", "x", "");
+        s.apply(&ev("UserPromptSubmit"), now());
+        s.apply(&ev("Stop"), now());
+        s.apply(&ev("PreCompact"), now());
+        s.apply(&ev("Interrupt"), now());
+        assert_eq!(s.phase, Phase::Done);
+    }
+
+    #[test]
+    fn a_compaction_mid_turn_stays_work_and_ends_with_whatever_comes_next() {
+        let mut s = Session::new("g1", "x", "");
+        s.apply(&ev("UserPromptSubmit"), now());
+        assert!(!s.apply(&ev("PreCompact"), now()));
+        assert!(s.is_compacting());
+        assert!(!s.apply(&ev("PostCompact"), now()));
+        assert_eq!(s.phase, Phase::Working);
+        assert!(!s.is_compacting());
+
+        // Its PostCompact lost, the next tool says it is over, and a late
+        // PostCompact then moves nothing.
+        s.apply(&ev("PreCompact"), now());
+        s.apply(&ev("PreToolUse"), now());
+        assert!(!s.is_compacting());
+        s.apply(&ev("Stop"), now());
+        assert!(!s.apply(&ev("PostCompact"), now()));
+        assert_eq!(s.phase, Phase::Done);
+
+        // A subagent compacts its own context, not the session's.
+        let mut sub = ev("PreCompact");
+        sub.agent_id = Some("a1".into());
+        assert!(!s.apply(&sub, now()));
+        assert!(!s.is_compacting());
+    }
+
+    #[test]
+    fn a_compaction_during_a_permission_wait_keeps_the_wait_and_its_line() {
+        let mut s = Session::new("g1", "x", "");
+        s.apply(&ev("UserPromptSubmit"), now());
+        let mut ask = ev("PermissionRequest");
+        ask.tool_name = Some("Bash".into());
+        s.apply(&ask, now());
+        let line = s.last_line.clone();
+        assert_eq!(line, waiting_on("Bash"));
+        for name in ["PreCompact", "PostCompact"] {
+            assert!(!s.apply(&ev(name), now()));
+            assert_eq!(s.phase, Phase::Waiting(WaitReason::Permission));
+            assert_eq!(s.last_line, line);
+            assert_eq!(s.waits_on.as_deref(), Some("Bash"));
+            assert!(s.ask.is_some());
+        }
+    }
+
+    #[test]
+    fn only_a_limit_passes_by_itself() {
+        let mut s = Session::new("g1", "x", "");
+        s.apply(&ev("UserPromptSubmit"), now());
+        let mut f = ev("StopFailure");
+        f.error_type = Some("authentication_failed".into());
+        s.apply(&f, now());
+        let mut n = ev("Notification");
+        n.notification_type = Some("quota_auto_resume_fired".into());
+        assert!(!s.apply(&n, now()));
+        assert!(s.phase.is_waiting());
+    }
+
+    #[test]
+    fn a_new_session_starts_its_task_list_over() {
+        let task = |id: &str| HookEvent {
+            task_id: Some(id.into()),
+            ..ev("TaskCreated")
+        };
+        let from = |source: &str| HookEvent {
+            source: Some(source.into()),
+            ..ev("SessionStart")
+        };
+        let ended = |reason: &str| HookEvent {
+            reason: Some(reason.into()),
+            ..ev("SessionEnd")
+        };
+        // Never completed, so nothing else would end the list.
+        for new in [from("startup"), from("clear"), from("resume"), ended("clear"), ended("other")] {
+            let mut s = Session::new("g1", "x", "");
+            s.apply(&ev("UserPromptSubmit"), now());
+            s.apply(&task("1"), now());
+            assert_eq!(s.tasks.open(), 1);
+            s.apply(&new, now());
+            assert_eq!(s.tasks.line(), None, "{:?} {:?}", new.source, new.reason);
+        }
+        // Compacted mid turn, the conversation and its list go on.
+        let mut s = Session::new("g1", "x", "");
+        s.apply(&ev("UserPromptSubmit"), now());
+        s.apply(&task("1"), now());
+        s.apply(&from("compact"), now());
+        assert_eq!(s.tasks.open(), 1);
+    }
+
+    #[test]
+    fn tasks_are_counted_as_they_are_made_and_done() {
+        let task = |name: &str, id: &str| HookEvent {
+            task_id: Some(id.into()),
+            ..ev(name)
+        };
+        let mut s = Session::new("g1", "x", "");
+        assert_eq!(s.tasks.line(), None);
+        s.apply(&ev("UserPromptSubmit"), now());
+        s.apply(&task("TaskCreated", "1"), now());
+        s.apply(&task("TaskCreated", "2"), now());
+        s.apply(&task("TaskCreated", "2"), now());
+        // A teammate's count too, and move no phase.
+        let mut theirs = task("TaskCreated", "3");
+        theirs.agent_id = Some("a1".into());
+        s.apply(&theirs, now());
+        assert!(!s.apply(&task("TaskCompleted", "1"), now()));
+        s.apply(&task("TaskCompleted", "1"), now());
+        assert_eq!((s.tasks.open(), s.tasks.done()), (2, 1));
+        assert_eq!(s.tasks.line().as_deref(), Some("1 of 3 tasks"));
+
+        // An unfinished list lasts into the next turn, a finished one not.
+        s.apply(&ev("Stop"), now());
+        s.apply(&ev("UserPromptSubmit"), now());
+        assert_eq!(s.tasks.open(), 2);
+        s.apply(&task("TaskCompleted", "2"), now());
+        s.apply(&task("TaskCompleted", "3"), now());
+        assert_eq!(s.tasks.line().as_deref(), Some("3 of 3 tasks"));
+        s.apply(&ev("UserPromptSubmit"), now());
+        assert_eq!(s.tasks.line(), None);
+    }
+
+    #[test]
+    fn a_model_switch_and_a_hooks_effort_correct_what_the_status_line_said() {
+        let mut s = Session::new("g1", "x", "");
+        let mut status = ev(HookEvent::STATUS);
+        status.session_id.clear();
+        status.status = Some(Status {
+            model: Some("Sonnet 5".into()),
+            effort: Some("high".into()),
+            ..Status::default()
+        });
+        s.apply(&status, now());
+        s.apply(&hook(r#"{"session_id":"c1","hook_event_name":"PostModelSwitch","from_model":"claude-sonnet-5","to_model":"claude-opus-5-5","source":"command"}"#), now());
+        assert_eq!(s.model.as_deref(), Some("claude-opus-5-5"));
+        let said = s.status.as_ref().unwrap();
+        assert_eq!(said.model.as_deref(), Some("Opus 5.5"));
+        // The same words as wherever else a model is named.
+        assert_eq!(pretty_id("claude-haiku-4-5-20251001"), "Haiku 4.5");
+        assert_eq!(s.phase, Phase::Idle);
+
+        s.apply(&hook(r#"{"session_id":"c1","hook_event_name":"PreToolUse","tool_name":"Bash","effort":{"level":"low"}}"#), now());
+        assert_eq!(s.status.as_ref().unwrap().effort.as_deref(), Some("low"));
+        // A subagent may run at an effort of its own.
+        s.apply(&hook(r#"{"session_id":"c1","hook_event_name":"PreToolUse","agent_id":"a1","effort":{"level":"max"}}"#), now());
+        assert_eq!(s.status.as_ref().unwrap().effort.as_deref(), Some("low"));
+
+    }
+
+    #[test]
+    fn a_tool_auto_mode_refused_is_still_the_turn_at_work() {
+        let mut s = Session::new("g1", "x", "");
+        s.apply(&ev("UserPromptSubmit"), now());
+        let mut denied = ev("PermissionDenied");
+        denied.tool_name = Some("Bash".into());
+        denied.reason = Some("too risky".into());
+        assert!(!s.apply(&denied, now()));
+        assert_eq!(s.phase, Phase::Working);
+        assert_eq!(s.last_line, "Bash");
+    }
+
+    #[test]
     fn subagent_types_are_grouped_for_the_tile() {
         let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(subagent_line(&v(&[])), "");
@@ -1120,6 +1549,10 @@ mod tests {
             cwd: "C:/repo".into(),
             ..HookEvent::synthetic(name)
         }
+    }
+
+    fn hook(payload: &str) -> HookEvent {
+        HookEvent::from_json(payload.as_bytes()).unwrap()
     }
 
     fn now() -> SystemTime {

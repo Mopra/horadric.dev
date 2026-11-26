@@ -667,7 +667,9 @@ pub fn phase_verb(phase: &Phase) -> &'static str {
         Phase::Waiting(WaitReason::Permission) => "needs permission",
         Phase::Waiting(WaitReason::Input) => "asked you",
         Phase::Waiting(WaitReason::Dialog) => "dialog open",
-        Phase::Waiting(WaitReason::Error(_)) => "failed",
+        Phase::Waiting(WaitReason::Error(kind)) => {
+            horadric_core::session::failure_words(kind).unwrap_or("failed")
+        }
         Phase::Done => "done",
         Phase::Ended => "ended",
         Phase::Paused => "paused",

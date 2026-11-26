@@ -249,7 +249,7 @@ impl Band {
                         h.lot = Lot::Working;
                     }
                 }
-                "PostToolUse" | "PostToolUseFailure" => {
+                "PostToolUse" | "PostToolUseFailure" | "PermissionDenied" => {
                     h.tool = None;
                     if h.lot == Lot::Waiting {
                         h.lot = Lot::Working;
@@ -309,8 +309,10 @@ impl Band {
                     );
                 }
             }
-            "PostToolUse" | "PostToolUseFailure" => {
-                let failed = name == "PostToolUseFailure";
+            // A tool auto mode refused gets no PostToolUse, and would sit
+            // on the war table as running until the turn ends.
+            "PostToolUse" | "PostToolUseFailure" | "PermissionDenied" => {
+                let failed = name != "PostToolUse";
                 if let Some(m) = self
                     .main
                     .iter_mut()
@@ -718,6 +720,27 @@ mod tests {
         assert_eq!(h.tool.as_deref(), Some("Grep"));
         assert_eq!(b.main.len(), 1);
         assert_eq!(b.main[0].tool, "Read");
+    }
+
+    #[test]
+    fn a_refused_tool_is_over_for_the_main_loop_and_a_hireling() {
+        let mut b = Band::default();
+        b.hear(&ev("UserPromptSubmit"), t(0));
+        let mut e = ev("PreToolUse");
+        e.tool_name = Some("Bash".into());
+        b.hear(&e, t(1));
+        e.hook_event_name = "PermissionDenied".into();
+        b.hear(&e, t(2));
+        assert_eq!(b.main[0].end, Some(t(2)));
+        assert!(b.main[0].failed);
+
+        let mut e = sub("PreToolUse", "a1");
+        e.tool_name = Some("Write".into());
+        b.hear(&e, t(3));
+        assert!(b.hirelings[0].tool.is_some());
+        e.hook_event_name = "PermissionDenied".into();
+        b.hear(&e, t(4));
+        assert_eq!(b.hirelings[0].tool, None);
     }
 
     #[test]

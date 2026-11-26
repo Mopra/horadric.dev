@@ -282,6 +282,11 @@ pub struct Status {
     /// reads as what the work would have cost on the API. `/clear` starts
     /// it over.
     pub cost: Option<f64>,
+    /// The reasoning effort the session runs at, "high". None on a model
+    /// that takes no effort.
+    pub effort: Option<String>,
+    /// Whether fast mode is on for the session.
+    pub fast: bool,
 }
 
 impl Status {
@@ -310,15 +315,35 @@ impl Status {
                 .pointer("/cost/total_cost_usd")
                 .and_then(Value::as_f64)
                 .filter(|c| c.is_finite() && *c >= 0.0),
+            effort: v
+                .pointer("/effort/level")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            fast: v.get("fast_mode").and_then(Value::as_bool).unwrap_or(false),
         })
     }
 
-    /// What the status line prints in the terminal: the model, the context
-    /// and the five hour limit, which is the one that runs out first.
+    /// The model with what it runs at, "Opus 5.5 (high, fast)", for
+    /// wherever the model is named. None until the model is known.
+    pub fn model_label(&self) -> Option<String> {
+        let model = self.model.as_deref()?;
+        let how: Vec<&str> = (self.effort.as_deref().into_iter())
+            .chain(self.fast.then_some("fast"))
+            .collect();
+        Some(if how.is_empty() {
+            model.to_string()
+        } else {
+            format!("{model} ({})", how.join(", "))
+        })
+    }
+
+    /// What the status line prints in the terminal: the model with its
+    /// effort, the context and the five hour limit, which is the one that
+    /// runs out first.
     pub fn line(&self) -> String {
         let mut parts = Vec::new();
-        if let Some(m) = &self.model {
-            parts.push(m.clone());
+        if let Some(m) = self.model_label() {
+            parts.push(m);
         }
         if let Some(c) = self.context {
             parts.push(format!("context {}%", c.round()));
@@ -449,8 +474,10 @@ pub enum Setting {
 pub const WORKFLOW_MODEL_ENV: &str = "CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL";
 
 /// The models offered until a session has told us Claude Code's own list.
+/// An older model picked before, such as Fable 5.1, still runs: it only
+/// reads as "Custom" here until that list comes.
 const BUILT_IN_MODELS: &[(&str, &str)] = &[
-    ("claude-fable-5-1", "Fable 5.1"),
+    ("claude-fable-5-2", "Fable 5.2"),
     ("claude-opus-5-5", "Opus 5.5"),
     ("claude-opus-5-5[1m]", "Opus 5.5 1M"),
     ("claude-sonnet-5-5", "Sonnet 5.5"),
@@ -779,6 +806,54 @@ mod tests {
         assert!(s.limits.is_empty());
         assert_eq!(s.line(), "Haiku");
         assert_eq!(Status::from_json(b"not json"), None);
+    }
+
+    #[test]
+    fn reads_effort_and_fast_mode_when_they_are_there() {
+        let s = Status::from_json(
+            br#"{"model": {"display_name": "Opus 5.5"},
+            "fast_mode": true,
+            "effort": {"level": "xhigh"},
+            "thinking": {"enabled": true},
+            "workspace": {"git_worktree": "feature-xyz"},
+            "rate_limits": {"seven_day": {"used_percentage": 62.8, "resets_at": 1740787200}}}"#,
+        )
+        .unwrap();
+        assert_eq!(s.effort.as_deref(), Some("xhigh"));
+        assert!(s.fast);
+        assert_eq!(s.limits.five_hour, None);
+        assert_eq!(s.limits.seven_day.map(|l| l.used), Some(62.8));
+        assert_eq!(s.line(), "Opus 5.5 (xhigh, fast)");
+
+        // An API key on a model without effort sends none of them.
+        let bare = Status::from_json(FULL).unwrap();
+        assert_eq!(bare.effort, None);
+        assert!(!bare.fast);
+        let odd = Status::from_json(
+            br#"{"model": {"display_name": "Haiku 5.5"}, "fast_mode": null, "effort": "high"}"#,
+        )
+        .unwrap();
+        assert_eq!((odd.effort, odd.fast), (None, false));
+        assert_eq!(
+            Status::from_json(br#"{"effort": {"level": "low"}}"#).unwrap().model_label(),
+            None
+        );
+    }
+
+    #[test]
+    fn the_models_offered_first_are_the_current_ones() {
+        let ids: Vec<&str> = BUILT_IN_MODELS.iter().map(|(id, _)| *id).collect();
+        for id in ["claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"] {
+            assert!(ids.contains(&id), "{id}");
+        }
+        assert!(!ids.contains(&"claude-fable-5-1"));
+        for (id, name) in BUILT_IN_MODELS.iter().filter(|(id, _)| !id.contains('[')) {
+            assert_eq!(pretty_id(id), *name);
+        }
+        // An old transcript's model still gets its name.
+        assert_eq!(pretty_id("claude-fable-5-1"), "Fable 5.1");
+        let efforts: Vec<&str> = Setting::Effort.choices().iter().map(|c| c.0).collect();
+        assert_eq!(efforts, ["low", "medium", "high", "xhigh", "max"]);
     }
 
     #[test]
