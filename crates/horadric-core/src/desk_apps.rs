@@ -209,6 +209,23 @@ pub fn known_process(process: &str) -> bool {
     APPS.iter().any(|a| a.processes.contains(&name.as_str()))
 }
 
+/// Why what was asked for is not started on the desk when it is one of
+/// Horadric's own programs, by name or by path in any form: a Horadric
+/// on the desk asks its questions there, where the agent's hand is, so
+/// a session could be driven to answer its own. None for anything else.
+/// Takeover's lists leave out the same programs for the same reason.
+pub fn own_refusal(asked: &str) -> Option<String> {
+    let name = process_name(&clean(asked));
+    // Whatever follows the first dot is an ending Windows may add back.
+    let stem = name.split('.').next().unwrap_or(&name).trim();
+    let own = stem == "horadric" || stem == "horadricw" || stem.starts_with("horadric-");
+    own.then(|| {
+        "Horadric itself is not started on the agent's desk: a Horadric there could be driven \
+         to answer its own questions"
+            .to_string()
+    })
+}
+
 /// One thing to try starting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Choice {
@@ -229,6 +246,9 @@ pub struct Choice {
 /// has the processes `human` running: the choices in order, of which the
 /// first installed one is started. An error is a refusal in plain words.
 pub fn plan(asked: &str, args: &[String], human: &[String]) -> Result<Vec<Choice>, String> {
+    if let Some(why) = own_refusal(asked) {
+        return Err(why);
+    }
     let name = plain(asked);
     let simple = |c: char| c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | '+' | ' ');
     if name.is_empty() || !name.chars().all(simple) {
@@ -774,6 +794,36 @@ mod tests {
             if app.twice == Twice::Fine {
                 assert!(!app.ways.is_empty(), "{}", app.label);
             }
+        }
+    }
+
+    #[test]
+    fn horadric_itself_is_never_started_on_the_desk() {
+        for own in [
+            "horadric",
+            "Horadric.exe",
+            "horadricw",
+            "HORADRICW.EXE",
+            "horadric-host-0.42.2.exe",
+            r"C:\Users\a\AppData\Local\Horadric\horadric.exe",
+            r#""C:\Program Files\Horadric\horadricw.exe""#,
+            "C:/x/horadric.exe.",
+            r"..\target\debug\horadric",
+            "horadric.com",
+        ] {
+            let why = own_refusal(own).unwrap_or_else(|| panic!("{own} was let through"));
+            assert!(why.contains("answer its own questions"), "{why}");
+            assert_eq!(plan(own, &[], &[]), Err(why), "{own}");
+        }
+        // A folder of that name, or a name that only begins alike, is
+        // another program.
+        for other in [
+            r"C:\horadric\notepad.exe",
+            "horadrically.exe",
+            "msedge",
+            "",
+        ] {
+            assert_eq!(own_refusal(other), None, "{other}");
         }
     }
 

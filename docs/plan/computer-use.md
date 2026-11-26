@@ -128,7 +128,9 @@ Horadric's helper inside the desk. It has no window.
   id), and a page (a web or `file:` address, an `.html`, a `.pdf`)
   always opens in Edge, never in the default browser. An app that
   shares something else with the human's session comes with a note:
-  Notepad opens with their unsaved tabs.
+  Notepad opens with their unsaved tabs. Horadric itself is refused, by
+  name or by path (`desk_apps::own_refusal`): a Horadric on the desk
+  could be driven to answer its own questions.
 - While the window is closed `/apps` and `/launch` answer that the desk
   is closed and do nothing.
 - At start it stops the autostart programs that came up in its session

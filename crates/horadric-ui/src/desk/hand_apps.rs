@@ -293,6 +293,11 @@ fn by_path(
     if path.is_empty() {
         return Err("the path is empty".into());
     }
+    // Here and not only in `launch`, so what a shortcut starts is held
+    // to it too.
+    if let Some(why) = desk_apps::own_refusal(path) {
+        return Err(why);
+    }
     let kind = desk_apps::kind(path);
     match kind {
         Kind::Page => return page(path, args, human),
