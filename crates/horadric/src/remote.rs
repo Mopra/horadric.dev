@@ -33,7 +33,7 @@ use serde_json::{json, Value};
 const TUNNEL_WAIT: Duration = Duration::from_secs(10);
 
 /// How long the proof or an input request may take, all of it.
-const SHORT_WAIT: Duration = Duration::from_secs(20);
+pub(crate) const SHORT_WAIT: Duration = Duration::from_secs(20);
 
 /// How long a frame may take, all of it: a large screen over a slow link.
 const FRAME_WAIT: Duration = Duration::from_secs(30);
@@ -157,19 +157,41 @@ pub fn open(
 /// says how large the screen is.
 pub fn screenshot(dest: &str, dev: bool, width: u32) -> Result<(Vec<u8>, String), String> {
     through(dest, dev, |link| {
-        let r = link
-            .get(&remote::frame_path(width), FRAME_WAIT, remote::FRAME_CAP)
-            .map_err(Failed::Other)?;
-        refused(&r)?;
-        if r.status != 200 {
-            return Err(Failed::Other(remote::status_refusal(r.status, &said(&r))));
-        }
-        if r.body.is_empty() {
-            return Err(Failed::Other("the remote sent an empty picture".into()));
-        }
+        let r = frame(link, Some(width))?;
         let line = remote::screen_line(&r, remote::jpeg_size(&r.body));
         Ok((r.body, line))
     })
+}
+
+/// One frame through `link`, at most `width` wide, or as large as the
+/// screen is with none: the answer whole, since its headers say how
+/// large the screen is.
+pub(crate) fn frame(link: &Link, width: Option<u32>) -> Result<Response, Failed> {
+    // Without `w` the server scales nothing.
+    let path = width.map_or_else(|| "/frame.jpg".to_string(), remote::frame_path);
+    let r = link
+        .get(&path, FRAME_WAIT, remote::FRAME_CAP)
+        .map_err(Failed::Other)?;
+    refused(&r)?;
+    if r.status != 200 {
+        return Err(Failed::Other(remote::status_refusal(r.status, &said(&r))));
+    }
+    if r.body.is_empty() {
+        return Err(Failed::Other("the remote sent an empty picture".into()));
+    }
+    Ok(r)
+}
+
+/// A frame and the line said beside it, as a tool answers them.
+pub(crate) fn picture(jpeg: &[u8], line: String) -> Vec<Value> {
+    vec![
+        json!({
+            "type": "image",
+            "data": horadric_core::release::base64_encode(jpeg),
+            "mimeType": "image/jpeg",
+        }),
+        crate::mcp::text(line),
+    ]
 }
 
 /// Posts `bodies` to `dest`'s screen, each a sequence the remote runs
@@ -179,28 +201,33 @@ pub fn screenshot(dest: &str, dev: bool, width: u32) -> Result<(Vec<u8>, String)
 /// midway, but not for an answer that never arrived.
 pub fn send_input(dest: &str, dev: bool, bodies: &[String]) -> Result<(), String> {
     let mut sent = 0;
-    through(dest, dev, |link| {
-        while sent < bodies.len() {
-            let failed = match link.post(remote::INPUT_PATH, &bodies[sent], SHORT_WAIT) {
-                Ok(r) if r.status == 204 => {
-                    sent += 1;
-                    continue;
-                }
-                // Nothing ran, and the token is not the remote's: there
-                // is nothing to let go of and nothing to ask it with.
-                Ok(r) if r.status == 403 => return Err(Failed::Refused),
-                Ok(r) => remote::input_refusal(r.status, &said(&r)),
-                Err(e) => e,
-            };
-            release(link);
-            return Err(Failed::Other(if sent > 0 {
-                format!("{failed} (after {sent} of {} pieces went)", bodies.len())
-            } else {
-                failed
-            }));
-        }
-        Ok(())
-    })
+    through(dest, dev, |link| post_input(link, bodies, &mut sent))
+}
+
+/// [`send_input`] through one `link`. `sent` counts the bodies taken, and
+/// is the caller's, so a second try with a fresh token goes on where the
+/// first stopped and nothing is typed twice.
+pub(crate) fn post_input(link: &Link, bodies: &[String], sent: &mut usize) -> Result<(), Failed> {
+    while *sent < bodies.len() {
+        let failed = match link.post(remote::INPUT_PATH, &bodies[*sent], SHORT_WAIT) {
+            Ok(r) if r.status == 204 => {
+                *sent += 1;
+                continue;
+            }
+            // Nothing ran, and the token is not the remote's: there
+            // is nothing to let go of and nothing to ask it with.
+            Ok(r) if r.status == 403 => return Err(Failed::Refused),
+            Ok(r) => remote::input_refusal(r.status, &said(&r)),
+            Err(e) => e,
+        };
+        release(link);
+        return Err(Failed::Other(if *sent > 0 {
+            format!("{failed} (after {sent} of {} pieces went)", bodies.len())
+        } else {
+            failed
+        }));
+    }
+    Ok(())
 }
 
 /// Asks the remote to let go of everything it holds down, best effort.
@@ -213,24 +240,26 @@ fn release(link: &Link) {
 }
 
 /// What the remote said in an answer's body, as text.
-fn said(r: &Response) -> String {
+pub(crate) fn said(r: &Response) -> String {
     String::from_utf8_lossy(&r.body).into_owned()
 }
 
 /// A way through to a remote's screen: the local port of a live tunnel
 /// and the token, which the far end of that tunnel has proven it holds.
-struct Link {
-    port: u16,
-    token: String,
+/// The agent's desk is reached the same way, its hand's own port in the
+/// tunnel's place.
+pub(crate) struct Link {
+    pub(crate) port: u16,
+    pub(crate) token: String,
 }
 
 impl Link {
-    fn get(&self, path: &str, wait: Duration, cap: usize) -> Result<Response, String> {
+    pub(crate) fn get(&self, path: &str, wait: Duration, cap: usize) -> Result<Response, String> {
         let head = remote::request_head("GET", self.port, path, Some(&self.token), None);
         request(self.port, head.into_bytes(), wait, cap)
     }
 
-    fn post(&self, path: &str, body: &str, wait: Duration) -> Result<Response, String> {
+    pub(crate) fn post(&self, path: &str, body: &str, wait: Duration) -> Result<Response, String> {
         let head =
             remote::request_head("POST", self.port, path, Some(&self.token), Some(body.len()));
         let mut bytes = head.into_bytes();
@@ -240,7 +269,7 @@ impl Link {
 }
 
 /// Why something asked through a [`Link`] did not come back.
-enum Failed {
+pub(crate) enum Failed {
     /// A 403: the token is not the remote's any more, since it makes a
     /// fresh one at each of its starts.
     Refused,
@@ -248,7 +277,7 @@ enum Failed {
 }
 
 /// A 403 as the failure it is.
-fn refused(r: &Response) -> Result<(), Failed> {
+pub(crate) fn refused(r: &Response) -> Result<(), Failed> {
     if r.status == 403 {
         Err(Failed::Refused)
     } else {
@@ -651,13 +680,13 @@ fn free_port() -> Result<u16, String> {
 /// only once it has logged in, so this is a quick first look; that it is
 /// the tunnel, with the real server at its far end, is what the proof
 /// says.
-fn answers(port: u16) -> bool {
+pub(crate) fn answers(port: u16) -> bool {
     let at = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     TcpStream::connect_timeout(&at, Duration::from_millis(300)).is_ok()
 }
 
 /// What the far end of a port said when asked to prove it holds the token.
-enum Hello {
+pub(crate) enum Hello {
     /// It holds the token: the remote's Horadric, through our tunnel.
     Proven,
     /// It answered HTTP, but not the proof: something else, a Horadric
@@ -670,7 +699,7 @@ enum Hello {
 /// Asks whatever answers on `port` to prove it holds `token`, with a
 /// nonce nobody has seen before, so an answer overheard earlier is worth
 /// nothing. The token itself is not sent.
-fn hello(port: u16, token: &str) -> Hello {
+pub(crate) fn hello(port: u16, token: &str) -> Hello {
     let nonce = match nonce() {
         Ok(n) => n,
         Err(e) => return Hello::Silent(e),
@@ -1214,31 +1243,26 @@ fn answer(
         .get("width")
         .and_then(remote::whole)
         .map_or(remote::FRAME_WIDTH, |w| w.clamp(64, 8192) as u32);
-    screenshot(&dest, dev, width).map(|(jpeg, line)| {
-        vec![
-            json!({
-                "type": "image",
-                "data": horadric_core::release::base64_encode(&jpeg),
-                "mimeType": "image/jpeg",
-            }),
-            crate::mcp::text(line),
-        ]
-    })
+    screenshot(&dest, dev, width).map(|(jpeg, line)| picture(&jpeg, line))
 }
 
 /// The bodies an input tool posts, each one sequence for the remote to
 /// run whole, and the line it answers with once they are taken; None for
 /// a tool that posts none. Everything is checked here, before the human
-/// is asked and before a tunnel is started for it.
-fn input_events(name: &str, args: &Value) -> Option<Result<(Vec<String>, String), String>> {
+/// is asked and before a tunnel is started for it. The `desk_` tools act
+/// the same, so a tool is known by what follows its prefix.
+pub(crate) fn input_events(
+    name: &str,
+    args: &Value,
+) -> Option<Result<(Vec<String>, String), String>> {
     let int = |k: &str| -> Result<i32, String> {
         args.get(k)
             .and_then(remote::whole)
             .ok_or_else(|| format!("say {k}, a number"))
     };
     let s = |k: &str| args.get(k).and_then(Value::as_str);
-    Some(match name {
-        "remote_click" => (|| {
+    Some(match name.split_once('_')?.1 {
+        "click" => (|| {
             let (x, y) = (int("x")?, int("y")?);
             let double = args.get("double").and_then(Value::as_bool).unwrap_or(false);
             let events = remote::click_events(x, y, s("button"), double)?;
@@ -1252,7 +1276,7 @@ fn input_events(name: &str, args: &Value) -> Option<Result<(Vec<String>, String)
                 format!("{what} at {x},{y}{button}"),
             ))
         })(),
-        "remote_type" => s("text")
+        "type" => s("text")
             .ok_or_else(|| "say what to type: text".to_string())
             .and_then(|text| {
                 let bodies = remote::text_events(text)?
@@ -1261,7 +1285,7 @@ fn input_events(name: &str, args: &Value) -> Option<Result<(Vec<String>, String)
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok((bodies, format!("typed {} characters", text.chars().count())))
             }),
-        "remote_press" => s("key")
+        "press" => s("key")
             .ok_or_else(|| "say which key: key, e.g. Enter or Ctrl+S".to_string())
             .and_then(|key| {
                 let vks = remote::parse_chord(key)?;
@@ -1270,7 +1294,7 @@ fn input_events(name: &str, args: &Value) -> Option<Result<(Vec<String>, String)
                     format!("pressed {}", key.trim()),
                 ))
             }),
-        "remote_scroll" => (|| {
+        "scroll" => (|| {
             let (x, y, delta) = (int("x")?, int("y")?, int("delta")?);
             let (event, sent) = remote::wheel_event(x, y, delta)?;
             let way = if sent > 0 { "up" } else { "down" };
