@@ -808,7 +808,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         }
     });
 
-    crate::screen_share::start(Arc::clone(&registry));
+    crate::screen_share::start();
 
     // A title the model made goes on the tiles holding its conversation
     // at once, not at their next hook. A /rename stays.
@@ -4381,6 +4381,7 @@ impl App {
             }
             WM_TIMER => {
                 self.tick();
+                if let Some((title, text)) = crate::screen_share::told() { self.toasts.show(Kind::Info, title, text) }
                 // Activity heard while a count was due too soon.
                 self.recount();
                 if self.swept_at.is_empty() {

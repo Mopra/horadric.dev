@@ -14,13 +14,12 @@
   #state { min-width: 90px; color: #9a9aa2; }
   #state.live { color: #7fc77f; }
   #state.lost { color: #e07a6a; }
+  #state.wait { color: #e0a86a; }
   #notice { color: #e0a86a; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
   button { font: inherit; color: #d8d8dc; background: #26272e; border: 1px solid #3a3b44;
     border-radius: 4px; padding: 2px 10px; cursor: pointer; }
   button.on { background: #7a3a2a; border-color: #c0603e; color: #fff; }
-  #sessions { display: flex; gap: 6px; overflow: hidden; flex: 1; }
-  .s { padding: 1px 8px; border-radius: 10px; background: #22232a; color: #a8a8b0; }
-  .s.waiting { background: #6a4a12; color: #ffd98a; }
+  #keep:not([hidden]) { display: flex; gap: 6px; align-items: center; color: #e0a86a; }
   #zoom { display: flex; gap: 2px; align-items: center; }
   #zoom button { padding: 2px 7px; }
   #level { min-width: 38px; text-align: center; color: #9a9aa2; }
@@ -38,6 +37,9 @@
   #stage.pan { cursor: grab; }
   #stage.panning { cursor: grabbing; }
   #stage.control #screen { cursor: crosshair; outline: 2px solid #c0603e; }
+  #halt:not([hidden]) { position: fixed; top: 31px; left: 0; right: 0; bottom: 0; z-index: 3;
+    display: flex; align-items: center; justify-content: center; padding: 24px;
+    text-align: center; font-size: 15px; color: #e07a6a; background: rgba(16, 17, 20, 0.9); }
 </style>
 </head>
 <body>
@@ -51,36 +53,48 @@
     <button id="one" title="Switch between fitting the tab and one remote pixel per screen pixel">1:1</button>
   </span>
   <select id="res" hidden title="The remote machine's own screen resolution"></select>
+  <span id="keep" hidden>
+    <span id="keepText"></span>
+    <button id="keepYes">Keep</button>
+    <button id="keepNo">Revert</button>
+  </span>
   <span id="notice"></span>
-  <div id="sessions"></div>
 </div>
 <div id="stage"><div id="pad"><img id="screen" alt=""></div></div>
+<div id="halt" hidden></div>
 <script>
 "use strict";
-// The token leaves the address at once: the tab's URL is shown to
-// whoever reads the pane, the agent included. This tab keeps it for its
-// own requests, and a reload finds it again.
+// The token arrives in the fragment, which no server is ever sent, and
+// leaves the address before anything else runs: it then does not stay in
+// the address, in history or in a saved tab. That is all the move does.
+// Whatever can run script in this page can still read it.
 const TOKEN_KEY = "horadric-screen-token";
-let token = new URLSearchParams(location.search).get("t");
+let token = new URLSearchParams(location.hash.slice(1)).get("t") || "";
+if (location.hash || location.search) history.replaceState(null, "", location.pathname);
+const TOKEN_SHAPE = /^[0-9a-f]{32}$/i;
 try {
-  if (token) sessionStorage.setItem(TOKEN_KEY, token);
-  else token = sessionStorage.getItem(TOKEN_KEY);
+  if (TOKEN_SHAPE.test(token)) sessionStorage.setItem(TOKEN_KEY, token);
+  else token = sessionStorage.getItem(TOKEN_KEY) || "";
 } catch (e) { /* storage refused: the token still lives in this page */ }
-token = token || "";
-if (location.search) history.replaceState(null, "", location.pathname + location.hash);
-const q = "t=" + encodeURIComponent(token);
+if (!TOKEN_SHAPE.test(token)) token = "";
+
 const img = document.getElementById("screen");
 const stage = document.getElementById("stage");
 const stateEl = document.getElementById("state");
 const button = document.getElementById("control");
-const list = document.getElementById("sessions");
 const noticeEl = document.getElementById("notice");
+const haltEl = document.getElementById("halt");
 const levelEl = document.getElementById("level");
 const oneButton = document.getElementById("one");
 const resEl = document.getElementById("res");
+const keepEl = document.getElementById("keep");
+const keepText = document.getElementById("keepText");
+const keepYes = document.getElementById("keepYes");
+const keepNo = document.getElementById("keepNo");
 
-// The virtual screen the last frame showed, in its physical pixels.
-let screen = { left: 0, top: 0, width: 0, height: 0 };
+// The remote's virtual screen as the last frame showed it, in its
+// physical pixels.
+let desk = { left: 0, top: 0, width: 0, height: 0 };
 let control = false;
 let shown = null;
 
@@ -89,37 +103,175 @@ function setState(text, cls) {
   stateEl.className = cls || "";
 }
 
+const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+const hex = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+
+// The link to the remote. The token goes only to a far end that has just
+// proved it knows the token already: the port is a tunnel on this machine,
+// and when the tunnel is gone anything may be listening there instead.
+let proven = false;   // the far end proved itself and no request failed since
+let proving = null;   // the one proof under way, shared by all who wait
+let dead = false;     // stopped for good: nothing more is sent
+
+// "yes" the far end knows the token, "no" something else answers, "down"
+// nothing answers for now. Carries no token.
+async function hello() {
+  const nonce = hex(crypto.getRandomValues(new Uint8Array(16)));
+  let r, body;
+  try {
+    r = await fetch("/hello?n=" + nonce, { cache: "no-store" });
+    body = await r.text();
+  } catch (e) { return "down"; }
+  // A server that is full or failing says nothing about who it is.
+  if (r.status >= 500) return "down";
+  if (r.status !== 200) return "no";
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw", enc.encode(token), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const want = hex(new Uint8Array(await crypto.subtle.sign("HMAC", key, enc.encode(nonce))));
+  return body.trim() === want ? "yes" : "no";
+}
+
+async function proveLoop() {
+  let wait = 1000;
+  for (;;) {
+    if (dead) throw new Error("stopped");
+    const answer = await hello();
+    if (dead) throw new Error("stopped");
+    if (answer === "yes") { proven = true; return; }
+    if (answer === "no") {
+      stop("The remote's Horadric restarted, or something else answers on this port. Open the remote again.");
+      throw new Error("stopped");
+    }
+    setState("Lost, retrying", "lost");
+    await sleep(wait);
+    wait = Math.min(wait * 2, 15000);
+  }
+}
+
+// Resolves once the far end is proved, however long the link stays down.
+function prove() {
+  if (dead) return Promise.reject(new Error("stopped"));
+  if (proven) return Promise.resolve();
+  if (!proving) proving = proveLoop().finally(() => { proving = null; });
+  return proving;
+}
+
+function auth() { return { Authorization: "Bearer " + token }; }
+
+// One request with the token. The real server never redirects, so a
+// redirect counts as a failure instead of being followed with the token.
+async function send(path, init) {
+  if (dead || !proven) throw new Error("no proved link");
+  let r;
+  try {
+    r = await fetch(path, { cache: "no-store", redirect: "error", ...init, headers: auth() });
+  } catch (e) {
+    linkLost();
+    throw e;
+  }
+  if (r.status === 403) {
+    stale();
+    throw new Error("stopped");
+  }
+  return r;
+}
+
+async function api(path, init) {
+  await prove();
+  return send(path, init);
+}
+
+// A request failed without an answer. Whatever answers next has to prove
+// itself again, and input made for the screen as it was is not played
+// into whatever is there once the link is back.
+function linkLost() {
+  proven = false;
+  keepLettingGo();
+}
+
+// The remote's Horadric makes a new token at every start.
+function stale() {
+  try { sessionStorage.removeItem(TOKEN_KEY); } catch (e) { /* nothing was kept */ }
+  stop("The remote's Horadric restarted. Open the remote again.");
+}
+
+function stop(text) {
+  if (dead) return;
+  dead = true;
+  proven = false;
+  outbox.length = 0;
+  held.clear();
+  pressed.clear();
+  clearTimeout(escapeTimer);
+  escapeTimer = null;
+  clearTimeout(pollTimer);
+  clearTimeout(noticeTimer);
+  noticeEl.textContent = "";
+  noticeEl.title = "";
+  endKeep();
+  resEl.hidden = true;
+  setControl(false);
+  button.disabled = true;
+  setState("Stopped", "lost");
+  haltEl.textContent = text;
+  haltEl.hidden = false;
+}
+
 // About five frames a second: the next fetch goes once the last picture
 // is in, so a slow link gets fewer frames, never a queue of them.
 const FRAME_MS = 200;
+const LOCKED_MS = 2000;
+let pollTimer = null;
+let polling = false;
+function schedule(ms) {
+  clearTimeout(pollTimer);
+  pollTimer = setTimeout(poll, ms);
+}
+// Nobody sees a hidden tab's frames, and each one costs the remote a
+// capture. Becoming visible starts the loop again.
 async function poll() {
+  if (dead || polling || document.hidden) return;
+  polling = true;
   const began = performance.now();
+  let next = 1000;
   try {
-    const r = await fetch("/frame.jpg?" + q + "&w=" + wanted(), { cache: "no-store" });
-    if (r.status === 403) { setState("Wrong token", "lost"); return; }
-    if (!r.ok) throw new Error(r.status);
-    const was = screen;
-    screen = {
-      left: +r.headers.get("X-Screen-Left") || 0,
-      top: +r.headers.get("X-Screen-Top") || 0,
-      width: +r.headers.get("X-Screen-Width") || 0,
-      height: +r.headers.get("X-Screen-Height") || 0,
-    };
-    const url = URL.createObjectURL(await r.blob());
-    await new Promise((done) => { img.onload = img.onerror = done; img.src = url; });
-    if (shown) URL.revokeObjectURL(shown);
-    shown = url;
-    if (screen.width !== was.width || screen.height !== was.height) {
-      layout();
-      // Changed over there, by the list below or by someone at the machine.
-      if (was.width) loadDisplay();
+    const r = await api("/frame.jpg?w=" + wanted());
+    if (r.status === 423) {
+      const why = (await r.text()).trim() || "the desktop is locked";
+      setState(why.charAt(0).toUpperCase() + why.slice(1), "wait");
+      next = LOCKED_MS;
+    } else if (!r.ok) {
+      setState("Lost, retrying", "lost");
+    } else {
+      const was = desk;
+      desk = {
+        left: +r.headers.get("X-Screen-Left") || 0,
+        top: +r.headers.get("X-Screen-Top") || 0,
+        width: +r.headers.get("X-Screen-Width") || 0,
+        height: +r.headers.get("X-Screen-Height") || 0,
+      };
+      const url = URL.createObjectURL(await r.blob());
+      await new Promise((done) => { img.onload = img.onerror = done; img.src = url; });
+      if (shown) URL.revokeObjectURL(shown);
+      shown = url;
+      if (desk.width !== was.width || desk.height !== was.height) {
+        layout();
+        // Changed over there, by the list below or by someone at the machine.
+        if (was.width) loadDisplay();
+      }
+      if (!dead) setState(control ? "In control" : "Watching", "live");
+      next = Math.max(0, FRAME_MS - (performance.now() - began));
     }
-    setState(control ? "In control" : "Watching", "live");
-    setTimeout(poll, Math.max(0, FRAME_MS - (performance.now() - began)));
   } catch (e) {
-    setState("Lost, retrying", "lost");
-    setTimeout(poll, 1000);
+    if (!dead) {
+      // Also a picture cut off midway: the answer never fully came.
+      linkLost();
+      setState("Lost, retrying", "lost");
+    }
   }
+  polling = false;
+  if (!dead && !document.hidden) schedule(next);
 }
 
 // Zoom counts remote pixels per device pixel of this screen: at 1 each
@@ -137,8 +289,8 @@ function ratio() { return window.devicePixelRatio || 1; }
 // The zoom at which the whole screen just fits the stage, both ways: a
 // wide tab is often limited by its height, not its width.
 function fitZoom() {
-  if (!screen.width || !screen.height) return 1;
-  const css = Math.min(stage.clientWidth / screen.width, stage.clientHeight / screen.height);
+  if (!desk.width || !desk.height) return 1;
+  const css = Math.min(stage.clientWidth / desk.width, stage.clientHeight / desk.height);
   return css * ratio();
 }
 
@@ -148,10 +300,10 @@ function current() { return zoom === "fit" ? fitZoom() : zoom; }
 // frame fetched smaller than the stage (the first, or one during a resize)
 // would stay small, and one in device pixels would show too large.
 function layout() {
-  if (screen.width && screen.height) {
+  if (desk.width && desk.height) {
     const css = current() / ratio();
-    img.style.width = screen.width * css + "px";
-    img.style.height = screen.height * css + "px";
+    img.style.width = desk.width * css + "px";
+    img.style.height = desk.height * css + "px";
   }
   levelEl.textContent = zoom === "fit" ? "Fit" : Math.round(zoom * 100) + "%";
   oneButton.textContent = zoom === "fit" ? "1:1" : "Fit";
@@ -162,8 +314,8 @@ function layout() {
 // The frame width that fills the picture's device pixels exactly: any
 // fewer and the browser stretches it soft, any more is sent for nothing.
 function wanted() {
-  if (!screen.width) return Math.max(16, Math.round(stage.clientWidth * ratio()));
-  return Math.max(16, Math.min(screen.width, Math.round(screen.width * current())));
+  if (!desk.width) return Math.max(16, Math.round(stage.clientWidth * ratio()));
+  return Math.max(16, Math.min(desk.width, Math.round(desk.width * current())));
 }
 
 // Changes the zoom keeping the point at (x, y) of the stage where it is.
@@ -235,7 +387,7 @@ let modes = [];
 const modeName = (m) => m.width + " × " + m.height;
 async function loadDisplay() {
   try {
-    const r = await fetch("/display?" + q, { cache: "no-store" });
+    const r = await api("/display");
     if (r.status === 404) { resEl.hidden = true; return; }
     if (!r.ok) return;
     const d = await r.json();
@@ -250,93 +402,286 @@ async function loadDisplay() {
       o.selected = same(m);
       return o;
     }));
-    resEl.hidden = !modes.length;
+    resEl.hidden = dead || !modes.length;
   } catch (e) { /* the frame loop already says the link is down */ }
+}
+
+// A new resolution is on trial: the remote goes back by itself unless it
+// is told to keep it, so a mode that shows nothing usable here undoes
+// itself. Revert asks for the return at once, and when that does not get
+// through the time simply runs out.
+let keepTimer = null;
+function endKeep() {
+  clearInterval(keepTimer);
+  keepTimer = null;
+  keepEl.hidden = true;
+  resEl.disabled = false;
+}
+function offerKeep(seconds) {
+  const until = performance.now() + seconds * 1000;
+  let reverting = false;
+  const say = () => {
+    const left = Math.ceil((until - performance.now()) / 1000);
+    if (left <= 0) {
+      endKeep();
+      // The remote counts from a little earlier than this page does.
+      setTimeout(loadDisplay, 1000);
+      return;
+    }
+    keepText.textContent = (reverting ? "Reverting in " : "Keep this resolution? Reverting in ")
+      + left + " s";
+  };
+  keepYes.hidden = keepNo.hidden = false;
+  keepYes.disabled = false;
+  keepYes.onclick = async () => {
+    keepYes.disabled = true;
+    try {
+      const r = await api("/display/keep", { method: "POST" });
+      if (!r.ok) notice((await r.text()) || "the remote did not keep the resolution (" + r.status + ")");
+    } catch (e) {
+      // Still time to try again while the count runs.
+      notice("the answer did not reach the remote");
+      keepYes.disabled = false;
+      return;
+    }
+    if (keepTimer) { endKeep(); loadDisplay(); }
+  };
+  keepNo.onclick = async () => {
+    reverting = true;
+    keepYes.hidden = keepNo.hidden = true;
+    say();
+    try {
+      const r = await api("/display/revert", { method: "POST" });
+      if (!r.ok) return;
+    } catch (e) { return; }
+    if (keepTimer) { endKeep(); loadDisplay(); }
+  };
+  resEl.disabled = true;
+  keepEl.hidden = false;
+  clearInterval(keepTimer);
+  keepTimer = setInterval(say, 250);
+  say();
 }
 resEl.addEventListener("change", async () => {
   const m = modes[+resEl.value];
   resEl.blur();
   if (!m) return;
-  const sure = window.confirm("This changes the remote machine's own screen resolution to "
-    + modeName(m) + ", for anyone using it there too. Change it?");
-  if (sure) {
-    try {
-      const r = await fetch("/display?" + q, {
-        method: "POST", body: JSON.stringify({ width: m.width, height: m.height }),
-      });
-      if (!r.ok) notice((await r.text()) || "the remote refused the resolution (" + r.status + ")");
-    } catch (e) { notice("the resolution change did not reach the remote"); }
-  }
-  // Also puts the list back on the resolution in use when it was refused
-  // or called off.
+  try {
+    const r = await api("/display", {
+      method: "POST", body: JSON.stringify({ width: m.width, height: m.height }),
+    });
+    if (r.ok) {
+      const d = await r.json().catch(() => ({}));
+      offerKeep(+d.keep_within > 0 ? +d.keep_within : 15);
+    } else {
+      notice((await r.text()) || "the remote refused the resolution (" + r.status + ")");
+    }
+  } catch (e) { if (!dead) notice("the resolution change did not reach the remote"); }
+  // Also puts the list back on the resolution in use when it was refused.
   loadDisplay();
 });
-
-async function sessions() {
-  try {
-    const r = await fetch("/sessions?" + q, { cache: "no-store" });
-    if (!r.ok) throw new Error(r.status);
-    const rows = await r.json();
-    list.replaceChildren(...rows.map((s) => {
-      const el = document.createElement("span");
-      el.className = "s" + (s.waiting !== null ? " waiting" : "");
-      el.textContent = s.name + " · " + s.state;
-      el.title = s.project + (s.waiting ? "\n" + s.waiting : "");
-      return el;
-    }));
-  } catch (e) { /* the frame loop already says the link is down */ }
-}
 
 // Why the remote refused an input, shown for a few seconds.
 let noticeTimer = null;
 function notice(text) {
+  if (dead) return;
   noticeEl.textContent = text;
   noticeEl.title = text;
   clearTimeout(noticeTimer);
   noticeTimer = setTimeout(() => { noticeEl.textContent = ""; noticeEl.title = ""; }, 5000);
 }
 
-// Events go one at a time, each once the one before is answered: separate
-// requests may arrive in any order, and an up before its down leaves a
-// button held over there. A move waiting at the end is replaced by a newer
-// one, since only where the pointer ends up matters; nothing else is
-// dropped.
+// What may be down on the remote. A key or button is put here when its
+// press is queued and leaves only when the remote answered its release:
+// a release that got lost must be sent again, or it stays down over there.
+const held = new Set();      // virtual keys
+const pressed = new Set();   // mouse buttons
+
+// Events go in one request at a time, each once the one before is
+// answered: separate requests may arrive in any order, and an up before
+// its down leaves a button held over there. All that wait go together as
+// one list, which the remote runs as one sequence.
 const outbox = [];
+const repeats = new WeakSet();   // waiting events that only repeat a held key
 let sending = false;
-function post(event) {
-  if (!control) return;
-  const last = outbox[outbox.length - 1];
-  if (event.kind === "move" && last && last.kind === "move") outbox[outbox.length - 1] = event;
-  else outbox.push(event);
-  pump();
+const OUTBOX_MAX = 200;
+const BATCH_MAX = 256;
+// Under the remote's 64 KiB, with room left for the release sent beside
+// it when the tab closes (the browser caps what such requests carry).
+const BODY_MAX = 60000;
+const WHEEL_MAX = 12000;
+
+// Events that let go of something. They are never dropped.
+function letsGo(e) {
+  return e.kind === "up" || e.kind === "release" || (e.kind === "key" && !e.down);
 }
+
+function keepLettingGo() {
+  const keep = outbox.filter(letsGo);
+  outbox.length = 0;
+  outbox.push(...keep);
+}
+
+// False when the event was not taken, so the caller does not count a key
+// or button as down that never went.
+function post(event, repeat) {
+  if (dead) return false;
+  if (!letsGo(event)) {
+    // With the link down nothing new waits for it: played later it would
+    // land on a screen nobody was looking at.
+    if (!control || !proven) return false;
+    const last = outbox[outbox.length - 1];
+    if (event.kind === "move" && last && last.kind === "move") {
+      // Only where the pointer ends up matters.
+      outbox[outbox.length - 1] = event;
+      pump();
+      return true;
+    }
+    if (event.kind === "wheel" || event.kind === "hwheel") {
+      // Summed into the one already waiting. It may pass moves and the
+      // other wheel on the way, which changes nothing: each carries its
+      // own position.
+      for (let i = outbox.length - 1; i >= 0; i -= 1) {
+        const w = outbox[i];
+        if (w.kind === event.kind) {
+          const sum = Math.max(-WHEEL_MAX, Math.min(WHEEL_MAX, w.delta + event.delta));
+          outbox[i] = { ...event, delta: sum };
+          pump();
+          return true;
+        }
+        if (w.kind !== "move" && w.kind !== "wheel" && w.kind !== "hwheel") break;
+      }
+    }
+    if (repeat) {
+      if (event.kind === "key"
+        && outbox.some((w) => w.kind === "key" && w.down && w.vk === event.vk)) return true;
+      repeats.add(event);
+    }
+  }
+  outbox.push(event);
+  trim();
+  pump();
+  return true;
+}
+
+// A link slower than the hand: what matters least goes first, and a
+// letting go never.
+function trim() {
+  while (outbox.length > OUTBOX_MAX) {
+    let i = outbox.findIndex((e) => e.kind === "move");
+    if (i < 0) i = outbox.findIndex((e) => repeats.has(e));
+    if (i < 0) i = outbox.findIndex((e) => !letsGo(e));
+    if (i < 0) return;
+    outbox.splice(i, 1);
+  }
+}
+
+function take() {
+  const enc = new TextEncoder();
+  let n = 0, size = 2;
+  while (n < outbox.length && n < BATCH_MAX) {
+    const len = enc.encode(JSON.stringify(outbox[n])).length + 1;
+    if (n && size + len > BODY_MAX) break;
+    size += len;
+    n++;
+  }
+  return outbox.splice(0, n);
+}
+
+// The remote answered this batch: what it let go of is forgotten, unless
+// a press of the same thing is already waiting behind it.
+function settle(batch) {
+  for (const e of batch) {
+    if (e.kind === "key") { if (e.down) held.add(e.vk); else held.delete(e.vk); }
+    else if (e.kind === "down") pressed.add(e.button);
+    else if (e.kind === "up") pressed.delete(e.button);
+    else if (e.kind === "release") { held.clear(); pressed.clear(); }
+  }
+  for (const e of outbox) {
+    if (e.kind === "key" && e.down) held.add(e.vk);
+    else if (e.kind === "down") pressed.add(e.button);
+  }
+}
+
+// Runs whether in control or not: what lets go must still get there
+// after control was given up.
 async function pump() {
-  if (sending) return;
+  if (sending || dead) return;
   sending = true;
-  while (outbox.length) {
-    const event = outbox.shift();
-    try {
-      const r = await fetch("/input?" + q, { method: "POST", body: JSON.stringify(event) });
-      if (!r.ok) notice((await r.text()) || "the remote refused input (" + r.status + ")");
-    } catch (e) { /* the frame loop already says the link is down */ }
+  let wait = 1000;
+  try {
+    while (outbox.length && !dead) {
+      // Proved before the batch is taken, so that a link lost meanwhile
+      // can still clear out what waits.
+      await prove();
+      const batch = take();
+      if (!batch.length) break;
+      const body = JSON.stringify(batch.length === 1 ? batch[0] : batch);
+      let r;
+      try {
+        r = await send("/input", { method: "POST", body });
+      } catch (e) {
+        if (dead) break;
+        // No telling whether it ran. The presses are not played twice;
+        // what lets go is harmless twice and goes again.
+        outbox.unshift(...batch.filter(letsGo));
+        await sleep(500);
+        continue;
+      }
+      if (r.ok) {
+        settle(batch);
+        wait = 1000;
+        continue;
+      }
+      notice((await r.text().catch(() => "")) || "the remote refused input (" + r.status + ")");
+      if (r.status === 400 || r.status === 413) {
+        // Refused as written, so the same again would be refused again.
+        // One release lets go of whatever the batch was meant to.
+        if (batch.some(letsGo) && !batch.some((e) => e.kind === "release")) {
+          outbox.unshift({ kind: "release" });
+        }
+        continue;
+      }
+      outbox.unshift(...batch.filter(letsGo));
+      // Slower each time: past five seconds of quiet the remote lets go
+      // of everything by itself.
+      await sleep(wait);
+      wait = Math.min(wait * 2, 15000);
+    }
+  } catch (e) {
+    // The proof could not be worked out. Stopped for good, or worth
+    // another try in a moment, never at once in a tight loop.
+    if (!dead) setTimeout(pump, 1000);
   }
   sending = false;
 }
 
-// Where on the remote's virtual screen a point of the picture is.
+// The remote lets go of everything once it hears nothing for five
+// seconds. A key held on purpose with nothing else going on says so.
+setInterval(() => {
+  if (!control || dead || !proven || sending || outbox.length) return;
+  if (!held.size && !pressed.size) return;
+  outbox.push({ kind: "alive" });
+  pump();
+}, 2000);
+
+// Where on the remote's virtual screen a point of the picture is. The
+// picture's box is in the same viewport measure as the pointer, so zoom
+// and scrolling are already in it. Floor, since a pixel owns the whole
+// span from its left edge to the next: rounding would hand its right
+// half to the neighbour.
 function at(e) {
   const r = img.getBoundingClientRect();
-  if (!r.width || !r.height || !screen.width) return null;
-  const x = Math.round((e.clientX - r.left) / r.width * screen.width);
-  const y = Math.round((e.clientY - r.top) / r.height * screen.height);
+  if (!r.width || !r.height || !desk.width || !desk.height) return null;
+  const x = Math.floor((e.clientX - r.left) / r.width * desk.width);
+  const y = Math.floor((e.clientY - r.top) / r.height * desk.height);
   return {
-    x: Math.min(Math.max(x, 0), screen.width - 1),
-    y: Math.min(Math.max(y, 0), screen.height - 1),
+    x: Math.min(Math.max(x, 0), desk.width - 1),
+    y: Math.min(Math.max(y, 0), desk.height - 1),
   };
 }
 
 const BUTTONS = ["left", "middle", "right"];
-const pressed = new Set();   // mouse buttons down on the remote
 let lastAt = null;           // the last position sent or about to be
 let moveTimer = null, lastMove = null;
 img.addEventListener("mousemove", (e) => {
@@ -351,21 +696,23 @@ img.addEventListener("mousemove", (e) => {
   }, 40);
 });
 img.addEventListener("mousedown", (e) => {
-  if (!control || !BUTTONS[e.button]) return;
+  const b = BUTTONS[e.button];
+  if (!control || !b) return;
   e.preventDefault();
   const p = at(e);
   if (!p) return;
   lastAt = p;
-  pressed.add(BUTTONS[e.button]);
-  post({ kind: "down", ...p, button: BUTTONS[e.button] });
+  if (post({ kind: "down", ...p, button: b })) pressed.add(b);
 });
 window.addEventListener("mouseup", (e) => {
-  if (!control || !BUTTONS[e.button]) return;
+  const b = BUTTONS[e.button];
+  // Only a button that went down on the picture: a click on the bar is
+  // this page's own and must not let go of anything over there.
+  if (!control || !b || !pressed.has(b)) return;
   const p = at(e) || lastAt;
   if (!p) return;
   lastAt = p;
-  pressed.delete(BUTTONS[e.button]);
-  post({ kind: "up", ...p, button: BUTTONS[e.button] });
+  post({ kind: "up", ...p, button: b });
 });
 img.addEventListener("wheel", (e) => {
   if (!control) return;
@@ -375,13 +722,19 @@ img.addEventListener("wheel", (e) => {
   lastAt = p;
   // A notch is 120 on Windows and about 100 pixels in a browser.
   const per = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 800 : 1.2;
-  const delta = Math.max(-1200, Math.min(1200, Math.round(-e.deltaY * per)));
+  const notches = (d) => Math.max(-1200, Math.min(1200, Math.round(d * per)));
+  // Windows counts up and right as positive, a browser down and right.
+  const delta = notches(-e.deltaY);
+  const across = notches(e.deltaX);
   if (delta) post({ kind: "wheel", ...p, delta });
+  if (across) post({ kind: "hwheel", ...p, delta: across });
 }, { passive: false });
 document.addEventListener("contextmenu", (e) => { if (control) e.preventDefault(); });
 
 // KeyboardEvent.code to a Windows virtual key. The code names the key's
 // place, not its letter, so the remote's own layout decides what it types.
+// None of the keys the remote refuses is here (sleep, the browser, media
+// and launch keys, the mouse button codes).
 const VK = {
   Backspace: 8, Tab: 9, Enter: 13, NumpadEnter: 13, ShiftLeft: 160, ShiftRight: 161,
   ControlLeft: 162, ControlRight: 163, AltLeft: 164, AltRight: 165, Pause: 19,
@@ -398,8 +751,14 @@ for (let i = 0; i < 26; i++) VK["Key" + String.fromCharCode(65 + i)] = 65 + i;
 for (let i = 0; i < 10; i++) { VK["Digit" + i] = 48 + i; VK["Numpad" + i] = 96 + i; }
 for (let i = 1; i <= 24; i++) VK["F" + i] = 111 + i;
 
-const held = new Set();      // virtual keys down on the remote
-const typed = new Set();     // codes whose press went as text, so their release does not go
+function keyEvent(code, vk, down) {
+  const event = { kind: "key", vk, down };
+  // The numpad's Enter shares its virtual key with the main one and is
+  // told apart as an extended key.
+  if (code === "NumpadEnter") event.ext = true;
+  return event;
+}
+
 const ESCAPE = 27;
 const ESCAPE_TWICE_MS = 600;
 let escapeTimer = null;      // a first Esc held back, in case a second ends control
@@ -413,25 +772,37 @@ function printable(e) {
   // One character, not a name like "Enter"; AltGr makes characters too.
   const one = [...e.key].length === 1;
   const plain = !e.ctrlKey && !e.altKey && !e.metaKey;
-  return one && (plain || e.getModifierState("AltGraph"));
+  const altGr = e.getModifierState("AltGraph");
+  // Space goes as a key: typed as text it would not press the button or
+  // tick the box that has the focus over there.
+  if (e.code === "Space" && e.key === " " && !altGr) return false;
+  return one && (plain || altGr);
 }
 
-// Lets go of everything held over there: keys and mouse buttons alike
-// would otherwise stay down once input stops coming.
-function release() {
+// Lets go of everything held over there, keys and mouse buttons alike,
+// with the one event the remote answers by releasing all it holds.
+// `leaving` is for a tab that may be gone before the queue is through.
+function release(leaving) {
+  if (dead) return;
   if (escapeTimer) {
     // One Esc pressed and nothing after it: it was meant for the remote.
     clearTimeout(escapeTimer);
     escapeTimer = null;
     sendEscape();
   }
-  for (const vk of held) post({ kind: "key", vk, down: false });
-  held.clear();
-  typed.clear();
-  if (lastAt) {
-    for (const b of pressed) post({ kind: "up", ...lastAt, button: b });
+  if (!held.size && !pressed.size) return;
+  if (leaving === true && proven) {
+    // Sent beside the queue and allowed to outlive the page. It may
+    // overtake a request still on its way, which is why the queue sends
+    // its own after it when the page lives on.
+    fetch("/input", {
+      method: "POST", keepalive: true, cache: "no-store", redirect: "error",
+      headers: auth(), body: JSON.stringify({ kind: "release" }),
+    }).then((r) => { if (r.status === 403) stale(); }, linkLost);
   }
-  pressed.clear();
+  const last = outbox[outbox.length - 1];
+  if (!last || last.kind !== "release") outbox.push({ kind: "release" });
+  pump();
 }
 
 window.addEventListener("keydown", (e) => {
@@ -457,30 +828,34 @@ window.addEventListener("keydown", (e) => {
       // AltGr arrives as Ctrl and Alt, and a character typed under them
       // would be a shortcut over there.
       for (const vk of [162, 163, 164, 165]) {
-        if (held.delete(vk)) post({ kind: "key", vk, down: false });
+        if (held.has(vk)) post({ kind: "key", vk, down: false });
       }
     }
-    typed.add(e.code);
-    post({ kind: "text", text: e.key });
+    post({ kind: "text", text: e.key }, e.repeat);
     return;
   }
   if (e.key === "Dead") return;
   const vk = VK[e.code];
   if (!vk) return;
-  held.add(vk);
-  post({ kind: "key", vk, down: true });
+  if (post(keyEvent(e.code, vk, true), e.repeat)) held.add(vk);
 });
 window.addEventListener("keyup", (e) => {
   if (!control) return;
   e.preventDefault();
-  if (typed.delete(e.code)) return;
+  // Whatever this key last sent, a press of it as a key may still be down
+  // over there: it went down under Ctrl, say, and repeated as text after.
   const vk = VK[e.code];
   if (!vk || !held.has(vk)) return;
-  held.delete(vk);
-  post({ kind: "key", vk, down: false });
+  post(keyEvent(e.code, vk, false));
 });
-// A key held when the tab loses focus would stay down over there.
-window.addEventListener("blur", release);
+// A key held when the tab loses focus, is hidden or is closed would stay
+// down over there.
+window.addEventListener("blur", () => release());
+window.addEventListener("pagehide", () => release(true));
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) release(true);
+  else schedule(0);
+});
 
 function setControl(on) {
   if (!on) release();
@@ -492,13 +867,17 @@ function setControl(on) {
   if (stateEl.className === "live") setState(on ? "In control" : "Watching", "live");
   button.blur();
 }
-button.addEventListener("click", () => setControl(!control));
+button.addEventListener("click", () => setControl(!control && !dead));
 
 layout();
-poll();
-loadDisplay();
-sessions();
-setInterval(sessions, 3000);
+if (!token) {
+  stop("This page was opened without its key. Open the remote again.");
+} else if (!window.crypto || !crypto.subtle) {
+  stop("This page can only check the remote when opened on 127.0.0.1. Open the remote again.");
+} else {
+  poll();
+  loadDisplay();
+}
 </script>
 </body>
 </html>
