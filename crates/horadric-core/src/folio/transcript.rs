@@ -118,6 +118,10 @@ impl Folio {
     }
 
     fn transcript_user(&mut self, v: &Value) {
+        if let Some(p) = relayed_prompt(v) {
+            self.blocks.push(Block::Prompt(p.to_string()));
+            return;
+        }
         if v["isMeta"] == true || v["isCompactSummary"] == true {
             return;
         }
@@ -271,6 +275,20 @@ fn prompts_back(jsonl: &str, head: Option<&str>, most: usize) -> Vec<(Rewind, St
     found
 }
 
+/// What the CLI writes in front of a message sent with `isSynthetic`.
+const RELAYED: &str = "[MESSAGE FROM NON-USER SOURCE - NOT USER INPUT]";
+
+/// The text of a prompt Horadric sent on its own (`Folio::relay_prompt`),
+/// which the transcript keeps as one of the CLI's own notes: shown live,
+/// it must not be gone from the history after a resume.
+fn relayed_prompt(v: &Value) -> Option<&str> {
+    if v["isMeta"] != true || v["origin"]["kind"] != "unclassified" {
+        return None;
+    }
+    let text = v["message"]["content"].as_str()?.strip_prefix(RELAYED)?;
+    Some(text.trim_start_matches(['\r', '\n']))
+}
+
 /// What the human typed, from a transcript's prompt text: a slash command
 /// is kept as `/name args` rather than its tags, and the CLI's own wrapped
 /// notes are None.
@@ -322,6 +340,20 @@ mod tests {
             None
         );
         assert_eq!(typed_prompt(" hi "), Some("hi".into()));
+    }
+
+    #[test]
+    fn a_relayed_prompt_stays_in_the_history_without_the_clis_words() {
+        // As Claude Code 2.1.326 wrote one sent with `isSynthetic`.
+        let relayed = serde_json::json!({"type": "user", "uuid": "a", "parentUuid": null,
+            "isMeta": true, "origin": {"kind": "unclassified"}, "turnOrigin": "host_synthetic",
+            "message": {"role": "user",
+                "content": "[MESSAGE FROM NON-USER SOURCE - NOT USER INPUT]\nGo on."}});
+        // The CLI's own notes stay out, whatever they say.
+        let note = serde_json::json!({"type": "user", "uuid": "b", "parentUuid": "a",
+            "isMeta": true, "message": {"role": "user", "content": "a caveat"}});
+        let f = Folio::from_transcript(&format!("{relayed}\n{note}"));
+        assert_eq!(prompts(&f), ["Go on."]);
     }
 
     fn line(t: &str, uuid: &str, parent: Option<&str>, content: &str) -> String {

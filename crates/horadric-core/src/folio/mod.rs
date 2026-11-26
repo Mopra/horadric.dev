@@ -310,6 +310,9 @@ pub struct QueuedPrompt {
     pub text: String,
     pub images: Vec<ImageData>,
     pub priority: Priority,
+    /// Horadric sent it on its own ([`Folio::relay_prompt`]), so it is
+    /// never the human's to take back into the composer.
+    pub relayed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -419,6 +422,8 @@ pub struct Folio {
     pub busy: bool,
     /// What `system/init` and `initialize` said, latest wins.
     pub info: SessionInfo,
+    /// The plugin load errors already shown as notices.
+    plugin_errors_said: Vec<String>,
     /// The todo list as TodoWrite last wrote it.
     pub todos: Vec<Todo>,
     /// The context window, from the last result or `get_context_usage`.
@@ -431,6 +436,10 @@ pub struct Folio {
     /// Prompts the CLI dropped unstarted when the turn was stopped, for the
     /// composer to take back so nothing typed is lost.
     pub dropped: Vec<QueuedPrompt>,
+    /// Horadric's own prompts the CLI dropped the same way. Kept apart:
+    /// they are not the human's words, so they never go into the draft,
+    /// and go again by themselves with [`Folio::resend_relayed`].
+    pub relayed_dropped: Vec<QueuedPrompt>,
     /// How many blocks came from a transcript, before this process's own.
     pub history: usize,
     /// The background tasks alive now (shells, monitors, agents), as the
@@ -695,8 +704,51 @@ impl Folio {
             text: text.to_string(),
             images: images.to_vec(),
             priority,
+            relayed: false,
         });
         line
+    }
+
+    /// Horadric sent a prompt on its own: a quest's nudge, Warriv's answer,
+    /// a runeword's line. Returns the line to write, marked as not typed by
+    /// the human. While busy it waits for the turn to end, see
+    /// [`relayed_queued_line`]. A slash command goes as typed: it is for
+    /// the CLI, not words for Claude.
+    pub fn relay_prompt(&mut self, text: &str) -> String {
+        if text.trim_start().starts_with('/') {
+            let waits = self.busy;
+            let line = self.queue_prompt(text, &[], Priority::Next);
+            // Unmarked on the wire, yet still not the human's to take back.
+            if let Some(q) = self.queued.last_mut().filter(|_| waits) {
+                q.relayed = true;
+            }
+            return line;
+        }
+        if !self.busy {
+            self.push_prompt(text);
+            return relayed_prompt_line(text);
+        }
+        let uuid = self.next_uuid();
+        let line = relayed_queued_line(text, &uuid);
+        self.queued.push(QueuedPrompt {
+            uuid,
+            text: text.to_string(),
+            images: Vec::new(),
+            priority: Priority::Later,
+            relayed: true,
+        });
+        line
+    }
+
+    /// Sends again what [`Folio::relayed_dropped`] holds, each by itself
+    /// and marked as before: a quest's nudge must not be lost because the
+    /// human pressed Esc. Returns the lines to write, the first starting a
+    /// turn when Claude rests. Call it once the interrupt has settled. It
+    /// empties the list, so one drop is one resend and a prompt dropped
+    /// over and over cannot spin without the human stopping it each time.
+    pub fn resend_relayed(&mut self) -> Vec<String> {
+        let again = std::mem::take(&mut self.relayed_dropped);
+        again.iter().map(|q| self.relay_prompt(&q.text)).collect()
     }
 
     /// The permission mode the CLI is in now, such as `default`, `plan`,
@@ -849,6 +901,7 @@ impl Folio {
                 text,
                 images,
                 priority,
+                relayed: v["isSynthetic"] == true,
             });
             return true;
         }
@@ -1485,7 +1538,16 @@ impl Folio {
                 let mode = self.info.permission_mode.clone();
                 self.info.read_init(v);
                 let mcp = self.mcp_init();
+                // Init comes again with every turn: each error is said once.
+                let mut said = false;
+                for e in self.info.plugin_errors.clone() {
+                    if !self.plugin_errors_said.contains(&e) {
+                        self.plugin_errors_said.push(e.clone());
+                        said |= self.notice(Notice::Info(e));
+                    }
+                }
                 let changed = mcp
+                    || said
                     || id != self.session_id
                     || model != self.model
                     || mode != self.info.permission_mode;
@@ -1680,7 +1742,9 @@ impl Folio {
                 .into_iter()
                 .partition(|q| still.contains(&q.uuid));
             self.queued = kept;
-            self.dropped.extend::<Vec<_>>(dropped);
+            let (relayed, typed): (Vec<_>, Vec<_>) = dropped.into_iter().partition(|q| q.relayed);
+            self.dropped.extend(typed);
+            self.relayed_dropped.extend(relayed);
             if self.queued.len() != before && self.queued.is_empty() && self.turn_over() {
                 self.busy = false;
             }
@@ -2301,7 +2365,20 @@ impl Folio {
     pub fn end(&mut self) -> bool {
         self.stream_ended = true;
         let was = self.busy || !self.queued.is_empty() || !self.background.is_empty();
-        self.dropped.append(&mut self.queued);
+        let (relayed, mut typed): (Vec<_>, Vec<_>) = std::mem::take(&mut self.queued)
+            .into_iter()
+            .partition(|q| q.relayed);
+        self.dropped.append(&mut typed);
+        // No later start takes them: a resume builds a new Folio, and its
+        // first prompt goes as the human's. So they are said, not sent.
+        let unsent: Vec<_> = self.relayed_dropped.drain(..).chain(relayed).collect();
+        for q in unsent {
+            let line = q.text.lines().next().unwrap_or_default();
+            let said: String = line.chars().take(80).collect();
+            self.notice(Notice::Info(format!(
+                "Claude ended before this prompt of Horadric's ran: {said}"
+            )));
+        }
         // The CLI's background tasks die with it, and a new process says
         // nothing of them until its set first changes.
         self.background.clear();
@@ -4186,6 +4263,164 @@ mod tests {
             f.feed(l);
         }
         assert_eq!(replay(&all).blocks, f.blocks);
+    }
+
+    #[test]
+    fn a_relayed_prompt_is_marked_and_waits_for_the_turn_to_end() {
+        let mut f = Folio::new();
+        let v: Value = serde_json::from_str(&f.relay_prompt("Go on.")).unwrap();
+        assert_eq!(v["isSynthetic"], true);
+        assert!(v["priority"].is_null());
+        assert_eq!(f.blocks, [Block::Prompt("Go on.".into())]);
+        assert!(f.busy);
+
+        // While that turn runs: marked, and held until it ends.
+        let line = f.relay_prompt("And then stop.");
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["isSynthetic"], true);
+        assert_eq!(v["priority"], "later");
+        assert_eq!(f.queued.len(), 1);
+        assert_eq!(f.blocks.len(), 1);
+        let started = serde_json::json!({"type": "command_lifecycle",
+            "command_uuid": v["uuid"], "state": "started"});
+        assert!(f.feed(&started.to_string()));
+        assert!(f.queued.is_empty());
+        assert_eq!(
+            f.blocks.last(),
+            Some(&Block::Prompt("And then stop.".into()))
+        );
+
+        // What went rebuilds the same Folio for a UI that attaches.
+        let mut r = Folio::new();
+        r.feed_sent(&relayed_prompt_line("Go on."));
+        r.feed_sent(&line);
+        r.feed(&started.to_string());
+        assert_eq!(r.blocks, f.blocks);
+    }
+
+    /// What an interrupt answers when nothing still waits.
+    const NONE_STILL_QUEUED: &str = r#"{"type":"control_response","response":{"subtype":"success","request_id":"x","response":{"still_queued":[]}}}"#;
+
+    /// A turn running with a typed prompt and a relayed one waiting, then
+    /// the interrupt's answer that drops both.
+    fn stopped_with_both_waiting() -> Folio {
+        let mut f = Folio::new();
+        f.push_prompt("Look around");
+        f.queue_prompt("Also check docs", &[], Priority::Next);
+        f.relay_prompt("Quest: go on.");
+        assert_eq!(f.queued.len(), 2);
+        f.feed(NONE_STILL_QUEUED);
+        f
+    }
+
+    fn texts(q: &[QueuedPrompt]) -> Vec<&str> {
+        q.iter().map(|q| q.text.as_str()).collect()
+    }
+
+    #[test]
+    fn a_dropped_relayed_prompt_is_kept_apart_from_the_humans() {
+        let f = stopped_with_both_waiting();
+        assert!(f.queued.is_empty());
+        assert_eq!(texts(&f.dropped), ["Also check docs"]);
+        assert_eq!(texts(&f.relayed_dropped), ["Quest: go on."]);
+
+        // The same from what went, for a UI that attaches.
+        let mut r = Folio::new();
+        r.push_prompt("Look around");
+        r.feed_sent(&relayed_queued_line("Quest: go on.", "u1"));
+        r.feed_sent(&queued_prompt_line(
+            "Also check docs",
+            &[],
+            "u2",
+            Priority::Next,
+        ));
+        r.feed(NONE_STILL_QUEUED);
+        assert_eq!(texts(&r.dropped), ["Also check docs"]);
+        assert_eq!(texts(&r.relayed_dropped), ["Quest: go on."]);
+    }
+
+    #[test]
+    fn a_dropped_relayed_prompt_is_sent_again_marked_and_once() {
+        let mut f = stopped_with_both_waiting();
+        f.relayed_dropped.push(QueuedPrompt {
+            text: "Warriv: and this.".into(),
+            ..f.relayed_dropped[0].clone()
+        });
+        f.busy = false;
+        let lines = f.resend_relayed();
+        assert_eq!(lines.len(), 2);
+        // The first starts a turn, the second waits for its end.
+        let v: Value = serde_json::from_str(&lines[0]).unwrap();
+        assert_eq!(v["isSynthetic"], true);
+        assert_eq!(v["message"]["content"], "Quest: go on.");
+        assert!(v["priority"].is_null());
+        assert_eq!(
+            f.blocks.last(),
+            Some(&Block::Prompt("Quest: go on.".into()))
+        );
+        let v: Value = serde_json::from_str(&lines[1]).unwrap();
+        assert_eq!(v["isSynthetic"], true);
+        assert_eq!(v["message"]["content"], "Warriv: and this.");
+        assert_eq!(v["priority"], "later");
+        assert!(f.queued[0].relayed);
+        // The human's stays the composer's, and nothing goes twice.
+        assert_eq!(texts(&f.dropped), ["Also check docs"]);
+        assert!(f.relayed_dropped.is_empty());
+        assert!(f.resend_relayed().is_empty());
+    }
+
+    #[test]
+    fn a_relayed_prompt_claude_ended_under_is_said_not_drafted() {
+        let mut f = Folio::new();
+        f.push_prompt("Look around");
+        f.queue_prompt("Also check docs", &[], Priority::Next);
+        f.relay_prompt("Quest: go on.\nAnd more.");
+        f.end();
+        assert_eq!(texts(&f.dropped), ["Also check docs"]);
+        assert!(f.relayed_dropped.is_empty());
+        let said = "Claude ended before this prompt of Horadric's ran: Quest: go on.";
+        assert_eq!(
+            f.blocks.last(),
+            Some(&Block::Notice(Notice::Info(said.into())))
+        );
+    }
+
+    #[test]
+    fn a_relayed_slash_command_goes_as_typed() {
+        let mut f = Folio::new();
+        let v: Value = serde_json::from_str(&f.relay_prompt("/compact")).unwrap();
+        assert!(v.get("isSynthetic").is_none());
+        assert_eq!(v["message"]["content"], "/compact");
+    }
+
+    #[test]
+    fn a_prompt_the_cli_echoes_back_is_not_drawn_twice() {
+        let mut f = Folio::new();
+        f.push_prompt("hi");
+        // As `--replay-user-messages` echoes one, and as the CLI echoes a
+        // relayed one taken up mid turn without the flag.
+        let typed = serde_json::json!({"type": "user", "uuid": "u1", "isReplay": true,
+            "parent_tool_use_id": null, "message": {"role": "user", "content": "hi"}});
+        let relayed = serde_json::json!({"type": "user", "uuid": "u2", "isReplay": true,
+            "isSynthetic": true, "origin": {"kind": "unclassified"}, "parent_tool_use_id": null,
+            "message": {"role": "user", "content": [{"type": "text", "text": "hi"}]}});
+        assert!(!f.feed(&typed.to_string()));
+        assert!(!f.feed(&relayed.to_string()));
+        assert_eq!(f.blocks, [Block::Prompt("hi".into())]);
+    }
+
+    #[test]
+    fn a_plugin_that_did_not_load_is_said_once() {
+        let init = serde_json::json!({"type": "system", "subtype": "init", "session_id": "s",
+            "plugin_errors": [{"plugin": "lint", "type": "dependency-unsatisfied",
+                "message": "needs base 2"}]})
+        .to_string();
+        let mut f = Folio::new();
+        assert!(f.feed(&init));
+        // Init comes again with the next turn.
+        f.feed(&init);
+        let said = Notice::Info("Plugin lint did not load: needs base 2".into());
+        assert_eq!(f.blocks, [Block::Notice(said)]);
     }
 
     #[test]

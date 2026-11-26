@@ -26,6 +26,11 @@ use crate::{hook_url, HOOK_PATH, OWNER_ENV, SESSION_ENV};
 
 /// Hook events Horadric needs. Everything that moves a session between
 /// working, waiting and done.
+///
+/// Left out on purpose, since our hook must never be able to stop
+/// anything: `PreModelSwitch`, where a hook that runs into its timeout
+/// blocks the switch, and `WorktreeCreate` and `WorktreeRemove`, where a
+/// hook takes over making the worktree and its failure fails it.
 pub const EVENTS: &[&str] = &[
     "SessionStart",
     "UserPromptSubmit",
@@ -41,6 +46,15 @@ pub const EVENTS: &[&str] = &[
     // even where the mod is not loaded.
     "SubagentStart",
     "SubagentStop",
+    // A tool auto mode refused never gets its PostToolUse.
+    "PermissionDenied",
+    "TaskCreated",
+    "TaskCompleted",
+    // The minute a context is rewritten in, when no other hook speaks.
+    // PreCompact is also when the memory keeps the transcript.
+    "PreCompact",
+    "PostCompact",
+    "PostModelSwitch",
 ];
 
 /// `~/.claude/settings.json`.
@@ -550,6 +564,22 @@ mod tests {
         let timeout = handler(43117)["timeout"].as_u64().unwrap();
         assert!(crate::listener::PROMPT_WAIT.as_secs() + 1 < timeout);
         assert!(EVENTS.contains(&"UserPromptSubmit"));
+    }
+
+    #[test]
+    fn no_event_is_installed_whose_hook_could_stop_what_it_hears_of() {
+        for event in ["PreModelSwitch", "WorktreeCreate", "WorktreeRemove"] {
+            assert!(!EVENTS.contains(&event), "{event}");
+        }
+        let mut s = json!({});
+        install_into(&mut s, 43117);
+        for event in ["PreCompact", "PostCompact", "PostModelSwitch", "TaskCreated"] {
+            assert!(s.pointer(&format!("/hooks/{event}")).is_some(), "{event}");
+        }
+        // Settings an older build wrote lack the new events, so they are
+        // not current and the next install writes them.
+        s["hooks"].as_object_mut().unwrap().remove("PreCompact");
+        assert!(!is_installed(&s, 43117));
     }
 
     #[test]

@@ -185,7 +185,7 @@ const NOT_STARTED: &str =
     "this session was not started by Horadric, so it has no browser and no desktop tools";
 
 /// One call to the app, and what it answered, or why not.
-fn ask_app(port: u16, session: Option<&str>, body: &Value) -> Result<Value, String> {
+pub(crate) fn ask_app(port: u16, session: Option<&str>, body: &Value) -> Result<Value, String> {
     let session = session.ok_or(NOT_STARTED)?;
     let headers = [(COMMAND_HEADER, "browser"), (SESSION_HEADER, session)];
     // The session's key goes with every call, so the app knows the call is
@@ -281,6 +281,11 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
             return answer.map(|t| vec![text(t)]);
         }
         if let Some(answer) = forge::call(name, args, &mut self.app) {
+            return answer;
+        }
+        let app = &mut self.app;
+        let open_in_pane = |url: &str| app(json!({ "op": "open", "url": url }));
+        if let Some(answer) = crate::remote::call(name, args, open_in_pane) {
             return answer;
         }
         let s = |k: &str| args.get(k).and_then(Value::as_str);
@@ -679,7 +684,7 @@ fn cap(mut s: String) -> String {
 }
 
 /// What the app said about the page, for the agent.
-fn describe(info: &Value) -> String {
+pub(crate) fn describe(info: &Value) -> String {
     if info["open"] != true {
         return "The browser pane is closed.".into();
     }
@@ -799,6 +804,7 @@ pub(crate) fn tool_list() -> Value {
     json!(tools()
         .into_iter()
         .chain(forge::tools())
+        .chain(crate::remote::tools())
         .chain(lore_tools())
         .collect::<Vec<_>>())
 }
@@ -1265,7 +1271,7 @@ fn lore_tools() -> Vec<Value> {
     ]
 }
 
-fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
+pub(crate) fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({
         "name": name,
         "description": description,
@@ -1448,10 +1454,17 @@ B.";
     #[test]
     fn every_tool_has_a_name_a_description_and_a_schema() {
         assert!(tools().len() >= 15);
-        for t in &[tools(), forge::tools(), lore_tools()].concat() {
+        for t in &[
+            tools(),
+            forge::tools(),
+            crate::remote::tools(),
+            lore_tools(),
+        ]
+        .concat()
+        {
             let name = t["name"].as_str().unwrap();
             assert!(
-                ["browser_", "desktop_", "forge_", "lore_"]
+                ["browser_", "desktop_", "forge_", "remote_", "lore_"]
                     .iter()
                     .any(|p| name.starts_with(p)),
                 "{t}"

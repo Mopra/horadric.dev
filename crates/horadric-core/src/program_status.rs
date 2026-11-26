@@ -10,6 +10,15 @@
 //! `OSC 7501 ; key=value:key=value ST`, where ST is `ESC \` or BEL, and
 //! `OSC 7501 ; ? ST` asks whether the terminal speaks it.
 //!
+//! Claude Code, from 2.1.326, adds no key to it. What it runs beside its
+//! turn (a background command, a monitor, an MCP task, an agent) is a
+//! record of its own under the root: `id` its task id, `title` what it
+//! is, `state=working`, taken back with `state=clear:id=`. The root, the
+//! record with no id, is the turn. It says `working` with a `msg` like
+//! "1 shell still running" while the turn waits on that work, and `done`
+//! or `idle` while the work only runs on (a dev server). Read from the
+//! 2.1.326 binary, where the report is built.
+//!
 //! OSC 9;4, ConEmu's progress sequence that Windows Terminal draws on its
 //! tab, is read beside it for the same reason: a program sends it on
 //! purpose. Claude Code sends it (`terminalProgressBarEnabled`), and so do
@@ -186,6 +195,12 @@ impl Report {
             (None, Some(p)) => Some(format!("{p}%")),
             (None, None) => None,
         }
+    }
+
+    /// A record beneath the root that is at work: something the program
+    /// runs beside its own turn.
+    fn works_beside(&self) -> bool {
+        !self.id.is_empty() && self.state == State::Working
     }
 
     fn urgency(&self) -> u8 {
@@ -423,11 +438,37 @@ impl Records {
     /// The record that says the most to the human: one blocked on them
     /// over a failure, over work, over a result, over rest. OSC 9;4 speaks
     /// only when OSC 7501 says nothing.
+    ///
+    /// Work beneath a root that says its turn is over does not speak for
+    /// the terminal: the program itself calls that work background, and a
+    /// finished turn with a dev server running would never show as done.
+    /// [`Records::background`] tells of it instead.
     pub fn summary(&self) -> Option<Report> {
-        match self.reports.iter().max_by_key(|r| r.urgency()) {
+        let turn_over = self
+            .reports
+            .iter()
+            .any(|r| r.id.is_empty() && matches!(r.state, State::Idle | State::Done));
+        let speaks = self
+            .reports
+            .iter()
+            .filter(|r| !(turn_over && r.works_beside()))
+            .max_by_key(|r| r.urgency());
+        match speaks {
             Some(r) => Some(r.clone()),
             None => self.progress.map(Progress::report),
         }
+    }
+
+    /// What the program runs beside its turn, as a tile says it: the one
+    /// thing by its label, more by their number. None when nothing runs.
+    pub fn background(&self) -> Option<String> {
+        let mut beside = self.reports.iter().filter(|r| r.works_beside());
+        let first = beside.next()?;
+        let more = beside.count();
+        Some(match first.title.as_deref().filter(|t| !t.is_empty()) {
+            Some(title) if more == 0 => format!("background: {title}"),
+            _ => format!("{} in the background", more + 1),
+        })
     }
 
     /// What OSC 9;4 last said, for the taskbar button.
@@ -634,6 +675,61 @@ mod tests {
         assert_eq!(r.summary().unwrap().id, "ab");
         hear(&mut r, "7501;state=clear");
         assert!(r.summary().is_none());
+    }
+
+    /// What Claude Code 2.1.326 sends for a turn that ended with a dev
+    /// server left running, then for the server ending.
+    #[test]
+    fn work_beneath_a_finished_turn_is_background() {
+        let mut r = Records::default();
+        hear(&mut r, "7501;state=done:app=claude-code");
+        // "npm run dev"
+        assert!(hear(
+            &mut r,
+            "7501;state=working:app=claude-code:id=bcz1k2:title=bnBtIHJ1biBkZXY="
+        ));
+        assert_eq!(r.summary().unwrap().state, State::Done);
+        assert_eq!(r.background().as_deref(), Some("background: npm run dev"));
+        hear(&mut r, "7501;state=working:app=claude-code:id=m-7");
+        assert_eq!(r.summary().unwrap().state, State::Done);
+        assert_eq!(r.background().as_deref(), Some("2 in the background"));
+        hear(&mut r, "7501;state=idle:app=claude-code");
+        assert_eq!(r.summary().unwrap().state, State::Idle);
+        assert!(hear(&mut r, "7501;state=clear:id=bcz1k2"));
+        assert!(hear(&mut r, "7501;state=clear:id=m-7"));
+        assert_eq!(r.background(), None);
+    }
+
+    #[test]
+    fn a_turn_waiting_on_its_background_work_is_working() {
+        let mut r = Records::default();
+        // "1 shell still running"
+        hear(
+            &mut r,
+            "7501;state=working:app=claude-code:msg=MSBzaGVsbCBzdGlsbCBydW5uaW5n",
+        );
+        hear(&mut r, "7501;state=working:app=claude-code:id=b1");
+        assert_eq!(r.summary().unwrap().phase(), Phase::Working);
+        assert_eq!(r.background().as_deref(), Some("1 in the background"));
+    }
+
+    #[test]
+    fn background_work_that_needs_the_human_still_speaks() {
+        let mut r = Records::default();
+        hear(&mut r, "7501;state=done");
+        hear(&mut r, "7501;state=blocked:kind=question:id=agent1");
+        assert_eq!(r.summary().unwrap().state, State::Blocked);
+        assert_eq!(r.background(), None);
+    }
+
+    #[test]
+    fn work_with_no_root_at_rest_speaks_as_before() {
+        let mut r = Records::default();
+        hear(&mut r, "7501;state=working:id=deploy");
+        assert_eq!(r.summary().unwrap().state, State::Working);
+        hear(&mut r, "7501;state=error");
+        hear(&mut r, "7501;state=working:id=deploy/db");
+        assert_eq!(r.summary().unwrap().state, State::Error);
     }
 
     #[test]

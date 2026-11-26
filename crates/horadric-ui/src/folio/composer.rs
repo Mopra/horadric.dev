@@ -473,6 +473,8 @@ pub(super) fn tend(id: &str, chat: &mut Chat) {
         chat.input.busy_was = chat.folio.busy;
         // Taken back when it happened, and kept in the draft since.
         chat.folio.dropped.clear();
+        // Sent again when it happened: the replay holds that line too.
+        chat.folio.relayed_dropped.clear();
         return;
     }
     // Stopped before the CLI took them up: what was typed comes back.
@@ -534,6 +536,21 @@ pub(super) fn tend(id: &str, chat: &mut Chat) {
             deliver(chat, &next.text, &images);
         }
     }
+    // Horadric's own prompts a stop dropped go again by themselves, never
+    // through the draft. Only once Claude rests, so the stop has settled
+    // and cannot drop them a second time. A session on its way to a
+    // terminal ends instead, and the Folio says what did not run.
+    if !chat.folio.busy && !chat.to_terminal && !chat.folio.relayed_dropped.is_empty() {
+        for (i, line) in chat.folio.resend_relayed().iter().enumerate() {
+            let went = match i {
+                0 => started(chat, line),
+                _ => write(chat, line),
+            };
+            if !went {
+                break;
+            }
+        }
+    }
     chat.input.busy_was = chat.folio.busy;
 }
 
@@ -568,7 +585,13 @@ fn deliver(chat: &mut Chat, text: &str, images: &[ImageData]) -> bool {
     } else {
         chat.folio.push_prompt_with_images(text, images)
     };
-    let went = write(chat, &line);
+    started(chat, &line)
+}
+
+/// Writes `line`, a prompt that starts a turn and is drawn already. False
+/// when it did not go.
+fn started(chat: &mut Chat, line: &str) -> bool {
+    let went = write(chat, line);
     if !went {
         // No turn started, so none will end with a result.
         chat.folio.end();
@@ -579,14 +602,25 @@ fn deliver(chat: &mut Chat, text: &str, images: &[ImageData]) -> bool {
     went
 }
 
-/// Carries out a line the app types into the session, as a quest's nudge
-/// or Warriv's answer, the way the composer would had the human typed it.
-/// The composer's draft is the human's and stays as it is. While Claude
-/// works the prompt steers the turn, as typing into a busy terminal does.
+/// Who a line [`prompt`] carries out is from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum From {
+    /// The human, typed elsewhere, as `/all` in another chat.
+    Human,
+    /// Horadric on its own: a quest's nudge, Warriv's answer, a runeword.
+    /// Claude Code is told so (`Folio::relay_prompt`), since it otherwise
+    /// counts every message as the human's own word.
+    Horadric,
+}
+
+/// Carries out a line the app sends the session, the way the composer
+/// would had the human typed it. The composer's draft is the human's and
+/// stays as it is. While Claude works the human's prompt steers the turn,
+/// as typing into a busy terminal does, and Horadric's waits for its end.
 /// False when the session cannot take it yet: ended, handed to a
 /// terminal, its history or replay still coming, or a command only the
 /// terminal runs.
-pub(super) fn prompt(chat: &mut Chat, text: &str) -> bool {
+pub(super) fn prompt(chat: &mut Chat, text: &str, from: From) -> bool {
     if chat.ended || chat.to_terminal || chat.hosted.is_none() {
         return false;
     }
@@ -608,6 +642,17 @@ pub(super) fn prompt(chat: &mut Chat, text: &str) -> bool {
         }
         Typed::Prompt("") => false,
         Typed::Prompt(text) if terminal_command(text).is_some() => false,
+        Typed::Prompt(text) if from == From::Horadric => {
+            // Without the `!` runs waiting to go: those are the human's,
+            // and go with the human's next prompt.
+            let starts = !chat.folio.busy;
+            let line = chat.folio.relay_prompt(text);
+            if starts {
+                return started(chat, &line);
+            }
+            chat.follow = true;
+            write(chat, &line)
+        }
         Typed::Prompt(text) if !chat.folio.busy => deliver(chat, text, &[]),
         Typed::Prompt(text) => {
             let line = chat.folio.queue_prompt(text, &[], Priority::Next);

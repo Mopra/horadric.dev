@@ -787,14 +787,15 @@ pub fn detail(id: &str) -> String {
     with(id, |c| c.detail()).unwrap_or_default()
 }
 
-/// Sends `text` as a prompt, queued behind the turn running now. False
-/// when the session cannot take one yet.
+/// Sends `text` as a prompt of Horadric's own, marked as not typed by the
+/// human and queued behind the turn running now. False when the session
+/// cannot take one yet.
 pub fn prompt(id: &str, text: &str) -> bool {
     with(id, |c| {
         if !c.ready() {
             return false;
         }
-        let line = c.folio.queue_prompt(text, &[], Priority::Next);
+        let line = c.folio.relay_prompt(text);
         c.send(Some(line))
     })
     .unwrap_or(false)
@@ -851,6 +852,9 @@ pub(super) fn drain() {
                     }
                     Event::Live => {
                         chat.live = true;
+                        // Sent again when it happened: the replay held
+                        // that line too.
+                        chat.folio.relayed_dropped.clear();
                         moved = true;
                     }
                     Event::End(_) => {
@@ -945,7 +949,21 @@ fn tend(
         let title = chat.folio.ask_title();
         chat.send(title);
     }
-    chat.busy_was = busy;
+    // Horadric's own prompts a stop dropped go again by themselves, once
+    // Claude rests so the stop cannot drop them a second time.
+    if !busy && !chat.folio.relayed_dropped.is_empty() {
+        for (i, line) in chat.folio.resend_relayed().into_iter().enumerate() {
+            if !chat.send(Some(line)) {
+                if i == 0 {
+                    // No turn started, so none will end with a result.
+                    chat.folio.end();
+                }
+                break;
+            }
+        }
+        moved = true;
+    }
+    chat.busy_was = chat.folio.busy;
     match chat.folio.mcp_wanted() {
         McpWant::Now => {
             let line = chat.folio.mcp_status();
@@ -958,6 +976,9 @@ fn tend(
                 with(&id, |c| c.mcp_soon = false);
                 with(&id, |c| {
                     if c.ready() && c.folio.mcp_wanted() != McpWant::No {
+                        for line in c.folio.mcp_rechecks() {
+                            c.send(Some(line));
+                        }
                         let line = c.folio.mcp_status();
                         c.send(Some(line));
                     }

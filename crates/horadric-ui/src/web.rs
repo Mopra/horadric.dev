@@ -5,7 +5,10 @@
 //! followed its project, and one with a profile per project had to be
 //! logged into again for every one. So the page lives in a pane, and every
 //! project, every session and every Horadric on the machine, dev instances
-//! included, share one profile: log in once and it stays.
+//! included, share one profile: log in once and it stays. A project that
+//! signs in differently on a site gets a profile of its own, with every
+//! other site's cookies copied in from the shared one and back (see
+//! `resplit` and the cookie copying near the end).
 //!
 //! A project has one browser pane with tabs in it, as a browser has, so a
 //! second page does not mean a second pane in the grid. Every tab is a
@@ -40,7 +43,8 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN, COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC,
 };
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-    ICoreWebView2Environment10, ICoreWebView2Environment15, ICoreWebView2_19, ICoreWebView2_28,
+    ICoreWebView2Environment10, ICoreWebView2Environment15, ICoreWebView2Profile8,
+    ICoreWebView2_13, ICoreWebView2_19, ICoreWebView2_28,
     ICoreWebView2_3, ICoreWebView2_9, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
     COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
 };
@@ -80,6 +84,7 @@ use crate::terminal::WM_STAGE_LAYOUT;
 use crate::viewport;
 use horadric_core::history::{self, History};
 use horadric_core::saved::{Dock, SavedPages, SavedTab, Side};
+use horadric_core::vault::split;
 use windows::core::Interface;
 
 /// Posted to the pane showing a project's page when its title or address
@@ -194,6 +199,48 @@ struct Web {
     /// Asked for once: a popup must open in its opener's profile, so an
     /// identity changed while it is open applies when it is next opened.
     profile: Option<String>,
+    /// For a profile split off per site: the sites kept out of what is
+    /// copied in from the shared profile. None copies nothing.
+    split: Option<Vec<String>>,
+    sync: Sync,
+    /// A copy asked for while another ran: the sites to clear and to split
+    /// off when it runs, and who waits on it.
+    queued: Option<Queued>,
+}
+
+/// A copy in waiting: sites given back (all their cookies go), sites just
+/// split off (the shared copies of theirs go), and what runs after.
+#[derive(Default)]
+struct Queued {
+    clear: Vec<String>,
+    split_now: Vec<String>,
+    after: Vec<Box<dyn FnOnce()>>,
+}
+
+/// Where a split browser stands in copying cookies with the shared one.
+enum Sync {
+    /// Nothing copied yet: its first tab waits for it.
+    Before,
+    /// Copying; these tabs are made once it is done, so their first page
+    /// already has the inherited logins.
+    Copying(Vec<u64>),
+    Done,
+}
+
+fn new_web(key: &str) -> Web {
+    let profile = crate::town::profile_for(key);
+    Web {
+        tabs: Vec::new(),
+        active: 0,
+        pane: None,
+        bounds: RECT::default(),
+        zoom: 1.0,
+        room: None,
+        split: profile.as_ref().and_then(|_| crate::town::split_for(key)),
+        profile,
+        sync: Sync::Before,
+        queued: None,
+    }
 }
 
 impl Web {
@@ -492,15 +539,7 @@ fn add_tab(key: &str, tab: Tab, front: bool) {
     let id = tab.id;
     WEBS.with(|w| {
         let mut w = w.borrow_mut();
-        let web = w.entry(key.to_string()).or_insert_with(|| Web {
-            tabs: Vec::new(),
-            active: 0,
-            pane: None,
-            bounds: RECT::default(),
-            zoom: 1.0,
-            room: None,
-            profile: crate::town::profile_for(key),
-        });
+        let web = w.entry(key.to_string()).or_insert_with(|| new_web(key));
         web.tabs.push(tab);
         if front || web.tabs.len() == 1 {
             web.active = web.tabs.len() - 1;
@@ -604,8 +643,12 @@ fn navigate_view(view: &ICoreWebView2, url: &str) {
 /// Closes the project's browser for good, every tab of it.
 pub fn close(key: &str) {
     let gone = WEBS.with(|w| w.borrow_mut().remove(key));
+    let profile = gone.as_ref().and_then(|w| w.profile.clone());
     for tab in gone.map(|w| w.tabs).unwrap_or_default() {
         end(tab);
+    }
+    if let Some(profile) = profile {
+        drop_helper(&profile);
     }
     retiled(key);
 }
@@ -1213,10 +1256,14 @@ pub fn pages() -> std::collections::BTreeMap<String, SavedPages> {
 /// filled) is lost, which is the price of not being on the wrong account.
 pub fn reprofile(key: &str) {
     let now = crate::town::profile_for(key);
+    let mut left = None;
     let moved = WEBS.with(|w| {
         let mut w = w.borrow_mut();
         let web = w.get_mut(key).filter(|web| web.profile != now)?;
-        web.profile = now;
+        web.split = now.as_ref().and_then(|_| crate::town::split_for(key));
+        left = std::mem::replace(&mut web.profile, now);
+        web.sync = Sync::Before;
+        web.queued = None;
         let saved = saved_of(web);
         web.active = 0;
         Some((std::mem::take(&mut web.tabs), saved))
@@ -1224,6 +1271,9 @@ pub fn reprofile(key: &str) {
     let Some((tabs, saved)) = moved else { return };
     for tab in tabs {
         end(tab);
+    }
+    if let Some(left) = left {
+        drop_helper(&left);
     }
     if let Some(saved) = saved {
         restore(key, &saved);
@@ -1252,15 +1302,7 @@ fn saved_of(web: &Web) -> Option<SavedPages> {
 pub fn restore(key: &str, saved: &SavedPages) {
     let ids: Vec<u64> = WEBS.with(|w| {
         let mut w = w.borrow_mut();
-        let web = w.entry(key.to_string()).or_insert_with(|| Web {
-            tabs: Vec::new(),
-            active: 0,
-            pane: None,
-            bounds: RECT::default(),
-            zoom: 1.0,
-            room: None,
-            profile: crate::town::profile_for(key),
-        });
+        let web = w.entry(key.to_string()).or_insert_with(|| new_web(key));
         let start = web.tabs.len();
         for t in &saved.tabs {
             let mut tab = Tab::new(Some(t.url.clone()));
@@ -1319,6 +1361,8 @@ pub fn attach(key: &str, hwnd: HWND, bounds: RECT, zoom: f64) {
     });
     if known.is_some() {
         show(key);
+        // Logins made elsewhere while it was off the stage.
+        refresh(key);
     }
 }
 
@@ -1833,6 +1877,9 @@ fn start_env() {
 }
 
 fn make_controller(env: &ICoreWebView2Environment, key: &str, id: u64) {
+    if !synced(env, key, id) {
+        return;
+    }
     // Made in the pane when one is waiting for it, so it shows at once.
     let parent = WEBS
         .with(|w| w.borrow().get(key).and_then(|w| w.pane))
@@ -2385,6 +2432,554 @@ fn changed(key: &str, id: Option<u64>, set: impl FnOnce(&mut Tab)) {
         let _ = unsafe { PostMessageW(Some(p), WM_WEB_CHANGED, WPARAM(0), LPARAM(0)) };
     }
     retiled(key);
+}
+
+// A browser split off per site copies the shared profile's cookies for
+// every site it has not split in, when it opens and whenever it comes on
+// the stage, so a login made in the shared browser is seen everywhere that
+// did not split that site. One way only: Horadric never writes the shared
+// profile (see horadric_core::vault::split).
+
+/// A hidden WebView in one profile, to read and write its cookies
+/// through: a split browser's own tabs may not be made yet, and the
+/// shared profile may have no tab open at all.
+enum Helper {
+    Making(Vec<Box<dyn FnOnce(Option<ICoreWebView2>)>>),
+    Ready(ICoreWebView2Controller),
+}
+
+thread_local! {
+    /// By profile name, "" for the shared one.
+    static HELPERS: RefCell<HashMap<String, Helper>> = RefCell::new(HashMap::new());
+    /// Which cookies were last copied into each split profile, by profile:
+    /// those the shared one has since dropped are dropped there too, and
+    /// none the group set itself. Per profile, since a group's projects
+    /// share one. Lost with the app, so the first copy after a start
+    /// follows no logout.
+    static COPIED: RefCell<HashMap<String, std::collections::HashSet<String>>> =
+        RefCell::new(HashMap::new());
+}
+
+fn ready_env() -> Option<ICoreWebView2Environment> {
+    ENV.with(|e| match &*e.borrow() {
+        Env::Ready(env) => Some(env.clone()),
+        _ => None,
+    })
+}
+
+/// Whether this WebView2 runtime can make a browser profile of its own,
+/// None while the browser has not started. Without it a split browser
+/// would open in the shared profile and sign it out of the split site.
+pub fn named_profiles() -> Option<bool> {
+    ready_env().map(|env| env.cast::<ICoreWebView2Environment10>().is_ok())
+}
+
+/// Gives `f` the helper WebView of `profile`, making it the first time.
+fn helper(
+    env: &ICoreWebView2Environment,
+    profile: &str,
+    f: impl FnOnce(Option<ICoreWebView2>) + 'static,
+) {
+    let mut f: Option<Box<dyn FnOnce(Option<ICoreWebView2>)>> = Some(Box::new(f));
+    let (ready, start) = HELPERS.with(|h| {
+        let mut h = h.borrow_mut();
+        match h.get_mut(profile) {
+            Some(Helper::Ready(c)) => (Some(c.clone()), false),
+            Some(Helper::Making(waiting)) => {
+                waiting.extend(f.take());
+                (None, false)
+            }
+            None => {
+                let waiting = f.take().into_iter().collect();
+                h.insert(profile.to_string(), Helper::Making(waiting));
+                (None, true)
+            }
+        }
+    });
+    if let Some(c) = ready {
+        if let Some(f) = f {
+            f(unsafe { c.CoreWebView2() }.ok());
+        }
+        return;
+    }
+    if !start {
+        return;
+    }
+    let name = profile.to_string();
+    let handler = CreateCoreWebView2ControllerCompletedHandler::create(Box::new(
+        move |result, controller| {
+            let made = result.ok().and(controller);
+            if let Some(c) = &made {
+                let _ = unsafe { c.SetIsVisible(false) };
+            }
+            let waiting = HELPERS.with(|h| {
+                let mut h = h.borrow_mut();
+                let waiting = match h.remove(&name) {
+                    Some(Helper::Making(w)) => w,
+                    _ => Vec::new(),
+                };
+                if let Some(c) = &made {
+                    h.insert(name.clone(), Helper::Ready(c.clone()));
+                }
+                waiting
+            });
+            let view = made.and_then(|c| unsafe { c.CoreWebView2() }.ok());
+            for f in waiting {
+                f(view.clone());
+            }
+            Ok(())
+        },
+    ));
+    // Never the shared profile in place of a named one: that is the
+    // profile a split must not write.
+    let asked = unsafe {
+        if profile.is_empty() {
+            env.CreateCoreWebView2Controller(park_hwnd(), &handler)
+        } else {
+            with_profile(env, profile, park_hwnd(), &handler)
+        }
+    };
+    if let Err(e) = asked {
+        eprintln!("horadric: cannot reach the cookies of browser profile {profile:?}: {e}");
+        let waiting = HELPERS.with(|h| match h.borrow_mut().remove(profile) {
+            Some(Helper::Making(w)) => w,
+            _ => Vec::new(),
+        });
+        for f in waiting {
+            f(None);
+        }
+    }
+}
+
+/// Closes a split profile's helper once no browser uses that profile.
+fn drop_helper(profile: &str) {
+    let used = WEBS.with(|w| {
+        w.borrow()
+            .values()
+            .any(|web| web.profile.as_deref() == Some(profile))
+    });
+    if used || profile.is_empty() {
+        return;
+    }
+    let gone = HELPERS.with(|h| {
+        let mut h = h.borrow_mut();
+        match h.get(profile) {
+            Some(Helper::Ready(_)) => h.remove(profile),
+            _ => None,
+        }
+    });
+    if let Some(Helper::Ready(c)) = gone {
+        let _ = unsafe { c.Close() };
+    }
+}
+
+/// Deletes the WebView2 profile `profile` with its cookies and storage,
+/// as its identity is deleted: a group made later with the same slug must
+/// not start signed in as this one. Its open browsers move off it first.
+pub fn delete_profile(profile: &str) {
+    let users: Vec<String> = WEBS.with(|w| {
+        w.borrow()
+            .iter()
+            .filter(|(_, web)| web.profile.as_deref() == Some(profile))
+            .map(|(k, _)| k.clone())
+            .collect()
+    });
+    for key in users {
+        reprofile(&key);
+    }
+    COPIED.with(|c| c.borrow_mut().remove(profile));
+    let Some(env) = ready_env() else {
+        eprintln!("horadric: browser profile {profile} is kept, the browser is not running");
+        return;
+    };
+    let name = profile.to_string();
+    helper(&env, profile, move |view| {
+        let deleted = match view {
+            Some(v) => unsafe {
+                v.cast::<ICoreWebView2_13>()
+                    .and_then(|v| v.Profile())
+                    .and_then(|p| p.cast::<ICoreWebView2Profile8>())
+                    .and_then(|p| p.Delete())
+            },
+            None => Err(windows::Win32::Foundation::E_FAIL.into()),
+        };
+        if let Err(e) = deleted {
+            eprintln!("horadric: cannot delete browser profile {name}: {e}");
+        }
+        // Deleting closes its WebViews, the helper's too.
+        HELPERS.with(|h| h.borrow_mut().remove(&name));
+    });
+}
+
+/// A DevTools call on a helper, which no agent drives and nothing wakes.
+fn cdp(
+    view: &ICoreWebView2,
+    method: &str,
+    params: &str,
+    done: impl FnOnce(Result<String, String>) + 'static,
+) {
+    let once = Rc::new(Cell::new(Some(done)));
+    let answer = Rc::clone(&once);
+    let handler =
+        CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |result, json| {
+            if let Some(done) = answer.take() {
+                done(
+                    result
+                        .map(|()| json.clone())
+                        .map_err(|e| devtools_error(&json, &e)),
+                );
+            }
+            Ok(())
+        }));
+    let sent = unsafe {
+        view.CallDevToolsProtocolMethod(&HSTRING::from(method), &HSTRING::from(params), &handler)
+    };
+    if let Err(e) = sent {
+        if let Some(done) = once.take() {
+            done(Err(e.to_string()));
+        }
+    }
+}
+
+/// Every call of `method` with each of `params`, then `done` with those
+/// that went.
+fn calls(
+    view: &ICoreWebView2,
+    method: &str,
+    params: Vec<String>,
+    done: impl FnOnce(Vec<String>) + 'static,
+) {
+    if params.is_empty() {
+        return done(Vec::new());
+    }
+    let left = Rc::new(Cell::new(params.len()));
+    let went = Rc::new(RefCell::new(Vec::new()));
+    let done = Rc::new(Cell::new(Some(done)));
+    for p in params {
+        let (left, went, done) = (Rc::clone(&left), Rc::clone(&went), Rc::clone(&done));
+        let sent = p.clone();
+        cdp(view, method, &p, move |r| {
+            if r.is_ok() {
+                went.borrow_mut().push(sent);
+            }
+            left.set(left.get() - 1);
+            if left.get() == 0 {
+                if let Some(done) = done.take() {
+                    done(std::mem::take(&mut *went.borrow_mut()));
+                }
+            }
+        });
+    }
+}
+
+/// Sets `cookies` in the profile of `view`, and says which it took: one
+/// cookie the browser will not take fails the whole call, so then each
+/// goes alone and only that one is lost.
+fn set_all(
+    view: &ICoreWebView2,
+    cookies: Vec<serde_json::Value>,
+    done: impl FnOnce(Vec<serde_json::Value>) + 'static,
+) {
+    if cookies.is_empty() {
+        return done(Vec::new());
+    }
+    let (each, again) = (cookies.clone(), view.clone());
+    cdp(view, "Network.setCookies", &split::set_params(cookies), move |r| {
+        if r.is_ok() {
+            return done(each);
+        }
+        let one = each.iter().map(|c| split::set_params(vec![c.clone()])).collect();
+        calls(&again, "Network.setCookies", one, move |went| {
+            let took = each
+                .into_iter()
+                .filter(|c| went.contains(&split::set_params(vec![c.clone()])))
+                .collect();
+            done(took);
+        });
+    });
+}
+
+fn delete_all(
+    view: &ICoreWebView2,
+    removals: Vec<serde_json::Value>,
+    done: impl FnOnce() + 'static,
+) {
+    let params = removals.into_iter().map(|r| r.to_string()).collect();
+    calls(view, "Network.deleteCookies", params, |_| done());
+}
+
+fn all_cookies(
+    view: &ICoreWebView2,
+    done: impl FnOnce(Option<Vec<serde_json::Value>>) + 'static,
+) {
+    cdp(view, "Network.getAllCookies", "{}", move |r| match r {
+        Ok(answer) => done(Some(split::cookies(&answer))),
+        Err(e) => {
+            eprintln!("horadric: cannot read the browser's cookies: {e}");
+            done(None)
+        }
+    });
+}
+
+/// Whether the tab `id` may be made now. A split browser's first tab
+/// waits until the shared cookies are copied in, and starts that.
+fn synced(env: &ICoreWebView2Environment, key: &str, id: u64) -> bool {
+    let (go, start) = WEBS.with(|w| {
+        let mut w = w.borrow_mut();
+        let Some(web) = w.get_mut(key).filter(|web| web.split.is_some()) else {
+            return (true, false);
+        };
+        match &mut web.sync {
+            Sync::Done => (true, false),
+            Sync::Copying(waiting) => {
+                waiting.push(id);
+                (false, false)
+            }
+            Sync::Before => {
+                web.sync = Sync::Copying(vec![id]);
+                (false, true)
+            }
+        }
+    });
+    if start {
+        copy_in(env, key);
+    }
+    go
+}
+
+/// Copies the shared profile's cookies into the split browser's, with
+/// what was queued for it: the cookies of sites given back go, the shared
+/// copies of sites just split off go, and those the shared profile no
+/// longer has follow it out. The browser is `Copying` meanwhile.
+fn copy_in(env: &ICoreWebView2Environment, key: &str) {
+    let state = WEBS.with(|w| {
+        let mut w = w.borrow_mut();
+        let web = w.get_mut(key)?;
+        let queued = web.queued.take().unwrap_or_default();
+        Some((web.profile.clone()?, web.split.clone()?, queued))
+    });
+    let owned = key.to_string();
+    let Some((profile, kept_out, queued)) = state else {
+        return copied(&owned);
+    };
+    let Queued {
+        clear,
+        split_now,
+        after,
+    } = queued;
+    let finish = move |owned: &str| {
+        copied(owned);
+        for f in after {
+            f();
+        }
+    };
+    let env2 = env.clone();
+    helper(env, "", move |shared| {
+        let Some(shared) = shared else {
+            return finish(&owned);
+        };
+        all_cookies(&shared, move |theirs| {
+            let Some(theirs) = theirs else {
+                return finish(&owned);
+            };
+            let name = profile.clone();
+            helper(&env2, &name, move |own| {
+                let Some(own) = own else {
+                    return finish(&owned);
+                };
+                let target = own.clone();
+                all_cookies(&own, move |mine| {
+                    let mine = mine.unwrap_or_default();
+                    let copied_before =
+                        COPIED.with(|c| c.borrow().get(&profile).cloned().unwrap_or_default());
+                    let mut gone = split::mirror(&mine, &theirs, &copied_before, &kept_out);
+                    gone.extend(split::stale_copies(&mine, &theirs, &split_now));
+                    gone.extend(split::removals(&mine, &clear));
+                    let params = split::inherited(&theirs, &kept_out);
+                    let then = target.clone();
+                    delete_all(&target, gone, move || {
+                        set_all(&then, params, move |took| {
+                            // Only those it took: one refused is not
+                            // the group's to follow out later.
+                            COPIED.with(|c| {
+                                c.borrow_mut().insert(profile, split::keys(&took));
+                            });
+                            finish(&owned);
+                        });
+                    });
+                });
+            });
+        });
+    });
+}
+
+/// A copy finished: the browser's tabs waiting on it are made, and a copy
+/// queued meanwhile starts.
+fn copied(key: &str) {
+    let (waiting, again) = WEBS
+        .with(|w| {
+            let mut w = w.borrow_mut();
+            let web = w.get_mut(key)?;
+            let waiting = match std::mem::replace(&mut web.sync, Sync::Done) {
+                Sync::Copying(waiting) => waiting,
+                _ => Vec::new(),
+            };
+            Some((waiting, web.queued.is_some()))
+        })
+        .unwrap_or_default();
+    if let Some(env) = ready_env() {
+        for id in waiting {
+            make_controller(&env, key, id);
+        }
+    }
+    if again {
+        refresh(key);
+    }
+}
+
+/// Copies in again, now when the browser is idle, else once the copy
+/// running ends; one not yet made takes it in its first copy.
+fn refresh(key: &str) {
+    queue(key, Queued::default());
+}
+
+fn queue(key: &str, more: Queued) {
+    let split = WEBS.with(|w| w.borrow().get(key).is_some_and(|web| web.split.is_some()));
+    if !split {
+        // Nothing is copied, but the pages still load again.
+        for f in more.after {
+            f();
+        }
+        return;
+    }
+    let go = WEBS.with(|w| {
+        let mut w = w.borrow_mut();
+        let Some(web) = w.get_mut(key) else {
+            return false;
+        };
+        let q = web.queued.get_or_insert_with(Queued::default);
+        q.clear.extend(more.clear);
+        q.split_now.extend(more.split_now);
+        q.after.extend(more.after);
+        if !matches!(web.sync, Sync::Done) {
+            return false;
+        }
+        web.sync = Sync::Copying(Vec::new());
+        true
+    });
+    if go {
+        match ready_env() {
+            Some(env) => copy_in(&env, key),
+            None => copied(key),
+        }
+    }
+}
+
+/// Every open browser takes the sites its group splits now: one whose
+/// profile changed moves to it, one whose sites changed takes the cookies
+/// of the sites given back out and the shared copies of those split off,
+/// copies in again and loads those sites' pages again. Queued behind a
+/// copy already running, never dropped.
+pub fn resplit() {
+    let keys: Vec<String> = WEBS.with(|w| w.borrow().keys().cloned().collect());
+    for key in keys {
+        let profile = crate::town::profile_for(&key);
+        let same = WEBS.with(|w| {
+            w.borrow()
+                .get(&key)
+                .is_some_and(|web| web.profile == profile)
+        });
+        if !same {
+            reprofile(&key);
+            continue;
+        }
+        let now = profile.as_ref().and_then(|_| crate::town::split_for(&key));
+        let moved = WEBS.with(|w| {
+            let mut w = w.borrow_mut();
+            let web = w.get_mut(&key).filter(|web| web.split != now)?;
+            let old = web.split.clone().unwrap_or_default();
+            let new = now.clone().unwrap_or_default();
+            let given_back: Vec<String> = old.iter().filter(|s| !new.contains(s)).cloned().collect();
+            let split_now: Vec<String> = new.iter().filter(|s| !old.contains(s)).cloned().collect();
+            web.split = now;
+            Some((given_back, split_now))
+        });
+        let Some((clear, split_now)) = moved else { continue };
+        let owned = key.clone();
+        let sites: Vec<String> = clear.iter().chain(&split_now).cloned().collect();
+        queue(
+            &key,
+            Queued {
+                clear,
+                split_now,
+                after: vec![Box::new(move || reload_sites(&owned, &sites))],
+            },
+        );
+    }
+}
+
+/// Takes the cookies of `site` out of the split profile `profile` before
+/// [`resplit`], for a group whose browser is not open: given back, all of
+/// them, since a login of the group's left there would mix with the
+/// shared one copied in; split off, the shared copies only.
+pub fn clear_site(profile: &str, site: &str, given_back: bool) {
+    let open = WEBS.with(|w| {
+        w.borrow()
+            .values()
+            .any(|web| web.profile.as_deref() == Some(profile))
+    });
+    let Some(env) = ready_env().filter(|_| !open) else {
+        return resplit();
+    };
+    let sites = vec![site.to_string()];
+    let env2 = env.clone();
+    let profile = profile.to_string();
+    helper(&env, "", move |shared| {
+        let after_shared = move |theirs: Vec<serde_json::Value>| {
+            let name = profile.clone();
+            helper(&env2, &profile, move |own| {
+                let Some(own) = own else {
+                    drop_helper(&name);
+                    return resplit();
+                };
+                let target = own.clone();
+                all_cookies(&own, move |mine| {
+                    let mine = mine.unwrap_or_default();
+                    let gone = match given_back {
+                        true => split::removals(&mine, &sites),
+                        false => split::stale_copies(&mine, &theirs, &sites),
+                    };
+                    delete_all(&target, gone, move || {
+                        drop_helper(&name);
+                        resplit();
+                    });
+                });
+            });
+        };
+        match shared {
+            Some(shared) => all_cookies(&shared, move |t| after_shared(t.unwrap_or_default())),
+            None => after_shared(Vec::new()),
+        }
+    });
+}
+
+/// Loads again every tab of the project's browser on one of `sites`.
+fn reload_sites(key: &str, sites: &[String]) {
+    let views: Vec<ICoreWebView2> = WEBS.with(|w| {
+        w.borrow()
+            .get(key)
+            .map(|web| {
+                web.tabs
+                    .iter()
+                    .filter(|t| split::site_of(&t.url).is_some_and(|s| sites.contains(&s)))
+                    .filter_map(|t| t.webview.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
+    for v in views {
+        let _ = unsafe { v.Reload() };
+    }
 }
 
 #[cfg(test)]

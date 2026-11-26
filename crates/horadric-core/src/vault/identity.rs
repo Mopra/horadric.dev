@@ -21,6 +21,13 @@ pub struct Identity {
     /// Folders whose projects are this identity's unless they pick.
     #[serde(default)]
     pub claims: Vec<String>,
+    /// The sites its projects signed in to differently, for a group made
+    /// by splitting a site off in the browser pane; None for one made by
+    /// hand, whose browser and tools are its own whole. See [`split`].
+    ///
+    /// [`split`]: super::split
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sites: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,7 +109,13 @@ pub const MACHINE_TOKENS: [&str; 5] = [
 ];
 
 /// The variables [`tool_env`] points a tool at an identity's folder with.
-pub const TOOL_VARS: [&str; 3] = ["GH_CONFIG_DIR", "NPM_CONFIG_USERCONFIG", "XDG_DATA_HOME"];
+pub const TOOL_VARS: [&str; 5] = [
+    "GH_CONFIG_DIR",
+    "NPM_CONFIG_USERCONFIG",
+    "XDG_DATA_HOME",
+    "AZURE_CONFIG_DIR",
+    "CLOUDSDK_CONFIG",
+];
 
 /// Whether `name` is a variable an identity's session is given. One left
 /// over in a process started from such a session (a `reload`, a dev
@@ -256,6 +269,19 @@ pub fn git_env(git: &Git) -> Vec<(String, String)> {
 
 /// What a session of identity `id`, its folder `dir`, sets and removes.
 pub fn env(id: &Identity, dir: &Path) -> (Vec<(String, String)>, Vec<String>) {
+    env_with(id, dir, None)
+}
+
+/// [`env`], with who the identity's gh is signed in as where known, which
+/// a split group's git goes by when it has no git of its own.
+pub fn env_with(
+    id: &Identity,
+    dir: &Path,
+    gh_user: Option<&str>,
+) -> (Vec<(String, String)>, Vec<String>) {
+    if let Some(sites) = &id.sites {
+        return super::split::env(id, sites, dir, gh_user);
+    }
     let mut set = Vec::new();
     for tool in Tool::ALL.into_iter().filter(|t| id.tools.contains(t)) {
         set.extend(tool_env(tool, dir));
@@ -386,10 +412,25 @@ pub fn vercel_logged_in(auth_json: &str) -> bool {
 /// in as per tool (`who`, a tool's user; Some("") is logged in with no
 /// name known, None not logged in), and to leave the logins alone.
 pub fn prompt_lines(id: &Identity, who: &[(Tool, Option<String>)]) -> Vec<String> {
-    let mut lines = vec![format!(
-        "This project belongs to the identity \"{}\". Horadric started this session with that identity's own logins, not the machine's global ones.",
-        id.name
-    )];
+    let mut lines = vec![match id.sites.as_deref() {
+        Some(sites) => {
+            let tools: Vec<&str> = sites
+                .iter()
+                .flat_map(|s| super::split::tools_of(s))
+                .copied()
+                .collect();
+            format!(
+                "This project signs in differently on {}, as the group \"{}\". Horadric started this session with that group's logins for {}; every other tool uses the machine's global login.",
+                sites.join(", "),
+                id.name,
+                if tools.is_empty() { "no command line tool".to_string() } else { tools.join(", ") },
+            )
+        }
+        None => format!(
+            "This project belongs to the identity \"{}\". Horadric started this session with that identity's own logins, not the machine's global ones.",
+            id.name
+        ),
+    }];
     if let Some(git) = &id.git {
         let mut parts = Vec::new();
         match (git.name.trim(), git.email.trim()) {

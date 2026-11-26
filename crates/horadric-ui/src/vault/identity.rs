@@ -16,6 +16,7 @@ use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnviron
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 use horadric_core::vault::identity as core;
+use horadric_core::vault::split;
 pub use horadric_core::vault::identity::{Git, Identity, Resolved, Tool};
 
 use crate::console;
@@ -162,7 +163,11 @@ pub fn delete(slug: &str) -> Result<(), String> {
     for key in store.map_or_else(Vec::new, |f| core::picks_of(&read_text(&f), slug)) {
         set_pick(&key, None)?;
     }
-    change(|list| list.retain(|i| i.slug != slug))
+    change(|list| list.retain(|i| i.slug != slug))?;
+    // Its browser's logins go too, so an identity made later with the
+    // same slug does not start signed in as this one.
+    crate::web::delete_profile(&crate::town::identity_profile(slug));
+    Ok(())
 }
 
 /// Sets git's name, email and GitHub user; None takes git off the
@@ -202,8 +207,7 @@ fn started_list() -> Vec<(String, String)> {
 /// Notes the identity session `id` in `project_dir` starts with, so the
 /// Projects row can count those a change of pick left behind.
 pub fn note_started(id: &str, project_dir: &Path) {
-    let slug = of_project(project_dir).slug().unwrap_or("").to_string();
-    let list = core::noted(started_list(), id, &slug, 512);
+    let list = core::noted(started_list(), id, &stamp(project_dir), 512);
     let Some(path) = started_file() else {
         return;
     };
@@ -219,17 +223,31 @@ pub fn note_started(id: &str, project_dir: &Path) {
 
 /// The slug session `id` started with, "" for none, None when not noted.
 pub fn started_as(id: &str) -> Option<String> {
+    started_stamp(id).map(|s| s.split('#').next().unwrap_or("").to_string())
+}
+
+fn started_stamp(id: &str) -> Option<String> {
     started_list()
         .into_iter()
         .find(|(i, _)| i == id)
         .map(|(_, s)| s)
 }
 
+/// What a session in `project_dir` starts as: the identity's slug, and
+/// for a split group its sites after a `#`, since a site split or given
+/// back changes which tools point where as much as another identity does.
+fn stamp(project_dir: &Path) -> String {
+    let slug = of_project(project_dir).slug().unwrap_or("").to_string();
+    match get(&slug).and_then(|i| i.sites) {
+        Some(sites) => format!("{slug}#{}", sites.join(",")),
+        None => slug,
+    }
+}
+
 /// Whether session `id` in `cwd` runs on another identity than its
 /// project gets now.
 pub fn left_behind(id: &str, cwd: &Path) -> bool {
-    let now = of_project(cwd);
-    core::started_otherwise(started_as(id).as_deref(), now.slug())
+    core::started_otherwise(started_stamp(id).as_deref(), Some(&stamp(cwd)))
 }
 
 /// The identity's folder of the tools' config.
@@ -280,6 +298,57 @@ pub fn identity_of(project_dir: &Path) -> Option<Identity> {
     get(&slug)
 }
 
+/// The project keys whose pick on this machine is the group `slug`.
+pub fn members(slug: &str) -> Vec<String> {
+    let store = horadric_hooks::state_dir().map(|d| d.join("local.json"));
+    store.map_or_else(Vec::new, |f| core::picks_of(&read_text(&f), slug))
+}
+
+/// Splits `site` off for the project `key`: it joins the group `join`
+/// when given, else its own group gets the site, made for it (named after
+/// the project) when it has none. Says the group's slug.
+pub fn split_site(key: &str, site: &str, join: Option<&str>) -> Result<String, String> {
+    if let Some(slug) = join {
+        set_pick(key, Some(slug))?;
+        return Ok(slug.to_string());
+    }
+    let own = of_project(Path::new(key)).slug().map(String::from);
+    if let Some(slug) = own.filter(|s| get(s).is_some_and(|i| i.sites.is_some())) {
+        change_one(&slug, |i| {
+            i.sites = Some(split::with_site(i.sites.as_deref().unwrap_or(&[]), site));
+        })?;
+        return Ok(slug);
+    }
+    let name = Path::new(key)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| site.to_string());
+    let id = change(|list| {
+        let id = Identity {
+            name: name.clone(),
+            slug: core::new_slug(&name, list),
+            sites: Some(vec![site.to_string()]),
+            ..Default::default()
+        };
+        list.push(id.clone());
+        id
+    })?;
+    set_pick(key, Some(&id.slug))?;
+    Ok(id.slug)
+}
+
+/// Gives the site back to the shared browser for every project of the
+/// group `slug`. A group with no site left keeps its folder (logins may
+/// be in it) but opens the shared browser again.
+pub fn unsplit_site(slug: &str, site: &str) -> Result<(), String> {
+    change_one(slug, |i| {
+        if let Some(sites) = &i.sites {
+            i.sites = Some(split::without_site(sites, site));
+        }
+    })
+}
+
 /// What a session starts with besides the app's own: variables to set and
 /// to remove from what it inherits.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -302,17 +371,21 @@ pub fn session_env(project_dir: &Path) -> SessionEnv {
     let id = identity_of(project_dir);
     let mut set = Vec::new();
     if let Some(id) = &id {
-        let (s, r) = core::env(id, &dir(&id.slug));
+        let gh_user = who(&id.slug, Tool::Gh);
+        let (s, r) = core::env_with(id, &dir(&id.slug), gh_user.as_deref());
         set = s;
         remove.extend(r);
     }
     let sets = |k: &str| set.iter().any(|(s, _)| s.eq_ignore_ascii_case(k));
+    let removes = |k: &str| remove.iter().any(|r| r.eq_ignore_ascii_case(k));
     // The user's git entries past the identity's count would not be read,
     // and those under it would be overwritten: all or none.
     let own_git = !sets("GIT_CONFIG_COUNT");
     let own: Vec<(String, String)> = own_env()
         .iter()
-        .filter(|(k, _)| !(is_token(k) && id.is_some()) && !sets(k))
+        // A split group takes away only its split tools' tokens, and the
+        // rest stay the machine's.
+        .filter(|(k, _)| !(is_token(k) && removes(k)) && !sets(k))
         .filter(|(k, _)| own_git || !k.to_ascii_uppercase().starts_with("GIT_CONFIG_"))
         .cloned()
         .collect();

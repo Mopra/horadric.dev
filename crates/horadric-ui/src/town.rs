@@ -166,20 +166,56 @@ pub fn session_env(cwd: &Path) -> Vec<(String, String)> {
 /// goes only by a pick made for it, never by a folder an identity claims,
 /// since a claim on the home folder would take them all.
 pub fn profile_for(key: &str) -> Option<String> {
-    let town = of(key);
+    if let Some(slug) = identity_for(key) {
+        // A split group with every site given back is the shared browser
+        // again.
+        #[cfg(windows)]
+        let emptied = crate::vault::identity::get(&slug)
+            .is_some_and(|i| i.sites.as_ref().is_some_and(Vec::is_empty));
+        #[cfg(not(windows))]
+        let emptied = false;
+        if !emptied {
+            return Some(identity_profile(&slug));
+        }
+    }
+    of(key)?.saved.profile()
+}
+
+/// The identity the browser of the project `key` goes by. A town goes
+/// only by a pick made for it, never by a folder an identity claims,
+/// since a claim on the home folder would take them all.
+pub fn identity_for(key: &str) -> Option<String> {
     #[cfg(windows)]
     {
-        let identity = match &town {
+        match of(key) {
             Some(_) => crate::vault::identity::pick(key).filter(|s| !s.is_empty()),
             None => crate::vault::identity::of_project(Path::new(key))
                 .slug()
                 .map(String::from),
-        };
-        if let Some(slug) = identity {
-            return Some(identity_profile(&slug));
         }
     }
-    town?.saved.profile()
+    #[cfg(not(windows))]
+    {
+        let _ = key;
+        None
+    }
+}
+
+/// The sites the project `key`'s browser keeps out of what it copies from
+/// the shared one, None when it copies nothing: no profile of its own, or
+/// one made whole by hand (an identity from Settings, a town's own).
+pub fn split_for(key: &str) -> Option<Vec<String>> {
+    #[cfg(windows)]
+    {
+        crate::vault::identity::get(&identity_for(key)?)?
+            .sites
+            .filter(|s| !s.is_empty())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = key;
+        None
+    }
 }
 
 /// The profile name of an identity's browser.

@@ -16,6 +16,7 @@ use std::collections::HashSet;
 use horadric_core::vault::identity::Resolved;
 use horadric_core::Phase;
 use horadric_hooks::listener::{BrowserCall, Reply};
+use horadric_hooks::open_url;
 use serde_json::{json, Value};
 
 use super::{App, WEB};
@@ -44,6 +45,9 @@ impl App {
         let Some(key) = self.project_of(&call.session) else {
             return reply.send(error("this session has no project in Horadric"));
         };
+        if call.body["op"] == open_url::OPEN_OP {
+            return self.open_url_call(&key, &call.session, &call.body, reply);
+        }
         // The session id comes in a header any local program can set, and
         // a hook can make up a session the registry then adopts, so a call
         // counts only from a session the app started itself (a terminal or
@@ -164,6 +168,25 @@ impl App {
                 });
             }
         }
+    }
+
+    /// `horadric open-url` from a terminal of the project `key`, a
+    /// session's or a plain shell's: the link opens in a tab of its own on
+    /// the stage, with the keyboard, since it is nearly always a sign in
+    /// the human just started and finishes with a click there. Its key is
+    /// the pane's, not the session's secret key, so a plain shell can hold
+    /// one without being able to drive the page or run secrets.
+    fn open_url_call(&mut self, key: &str, pane: &str, body: &Value, reply: Reply) {
+        let ours = self.consoles.contains_key(pane) || self.folios.contains_key(pane);
+        let given = body["key"].as_str().unwrap_or("");
+        if !ours || !run::key_ok(&open_url::key_name(pane), given) {
+            return reply.send(error("not a terminal Horadric runs, or not its key"));
+        }
+        let Some(url) = body["url"].as_str().and_then(open_url::web_url) else {
+            return reply.send(error("only http and https addresses open in the pane"));
+        };
+        self.open_web_tab(key, url);
+        reply.send(json!({ "opened": true }));
     }
 
     /// The identity the project's sessions work as, if it has one.

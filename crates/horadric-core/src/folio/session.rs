@@ -21,6 +21,9 @@ pub struct SessionInfo {
     pub agents: Vec<String>,
     pub mcp_servers: Vec<McpServer>,
     pub plugins: Vec<String>,
+    /// Plugins that did not load, each as a line to read: the plugin and
+    /// what the CLI said of it. `init` leaves the key out when all loaded.
+    pub plugin_errors: Vec<String>,
     /// Protocol features this CLI has, such as `msg_lifecycle_v1`.
     pub capabilities: Vec<String>,
     /// From `initialize` only: each command with its description.
@@ -49,6 +52,9 @@ pub struct McpServer {
     pub sign_in: Option<String>,
     /// The CLI could not sign in to it, so only the terminal's `/mcp` can.
     pub sign_in_failed: bool,
+    /// Its sign-in ends on a web page the CLI never hears from (a claude.ai
+    /// connector's), so only dialling it again finds out it went through.
+    pub recheck: bool,
     /// A reconnect or toggle of ours is on its way.
     pub busy: bool,
     /// Where it is configured: `plugin`, `claudeai`, or a settings scope
@@ -148,6 +154,19 @@ impl SessionInfo {
                 .into_iter()
                 .flatten()
                 .filter_map(|p| p["name"].as_str().map(str::to_string))
+                .collect(),
+            plugin_errors: v["plugin_errors"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|e| {
+                    let said = [text(e, "message"), text(e, "type")];
+                    let said = said.iter().find(|s| !s.is_empty());
+                    match said {
+                        Some(s) => format!("Plugin {} did not load: {s}", text(e, "plugin")),
+                        None => format!("Plugin {} did not load.", text(e, "plugin")),
+                    }
+                })
                 .collect(),
             capabilities: strings(&v["capabilities"]),
             commands: keep.0,
@@ -344,6 +363,10 @@ mod tests {
             "skills": ["commit"], "agents": ["Explore"],
             "mcp_servers": [{"name": "horadric", "status": "connected"}],
             "plugins": [{"name": "horadric", "path": "x"}],
+            "plugin_errors": [
+                {"plugin": "lint", "type": "dependency-unsatisfied", "message": "needs base 2"},
+                {"plugin": "inline[0]", "type": "path-not-found", "message": "", "path": "p"},
+            ],
             "capabilities": ["msg_lifecycle_v1"],
         }));
         i
@@ -363,6 +386,13 @@ mod tests {
             }]
         );
         assert_eq!(i.plugins, ["horadric"]);
+        assert_eq!(
+            i.plugin_errors,
+            [
+                "Plugin lint did not load: needs base 2",
+                "Plugin inline[0] did not load: path-not-found",
+            ]
+        );
         assert!(i.has_capability("msg_lifecycle_v1"));
     }
 

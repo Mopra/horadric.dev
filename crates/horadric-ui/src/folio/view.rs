@@ -1229,7 +1229,9 @@ impl View {
         let top = if chat.watch.is_some() {
             composer.y
         } else {
-            super::band::draw(gfx, &self.shared.gpu, &pal, &chat.band, cx, cw, composer.y)
+            let top =
+                super::band::draw(gfx, &self.shared.gpu, &pal, &chat.band, cx, cw, composer.y);
+            super::mcp::notice(gfx, &pal, chat, cx, cw, top, &mut composer_hits)
         };
         let area = Rect::new(0.0, 0.0, w, (top - 10.0).max(0.0));
         self.transcript(gfx, &pal, chat, cx, cw, &area, &mut hits);

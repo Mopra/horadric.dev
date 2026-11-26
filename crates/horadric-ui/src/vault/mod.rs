@@ -4,4 +4,5 @@ pub mod fill;
 pub mod identity;
 pub mod run;
 pub mod settings;
+pub mod split;
 pub mod store;

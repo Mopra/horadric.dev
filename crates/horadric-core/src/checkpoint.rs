@@ -217,7 +217,7 @@ impl Record {
 pub fn written(event: &HookEvent) -> Option<(String, String)> {
     if !matches!(
         event.hook_event_name.as_str(),
-        "PreToolUse" | "PostToolUse" | "PostToolUseFailure"
+        "PreToolUse" | "PostToolUse" | "PostToolUseFailure" | "PermissionDenied"
     ) {
         return None;
     }

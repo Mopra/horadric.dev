@@ -54,11 +54,6 @@ pub struct HookEvent {
     /// ran past its timeout carries a `backgroundTaskId` here.
     #[serde(default)]
     pub tool_response: Option<Value>,
-    /// `PostToolUseFailure` only: what went wrong, for a shell command
-    /// `Exit code N` and its output. Kept as a value, so a payload that
-    /// ever sends it otherwise than as text still parses.
-    #[serde(default)]
-    pub error: Option<Value>,
     /// `PostToolUseFailure` only: the human interrupted the tool.
     #[serde(default)]
     pub is_interrupt: Option<Value>,
@@ -72,11 +67,42 @@ pub struct HookEvent {
     /// `UserPromptSubmit` only.
     #[serde(default)]
     pub user_prompt: Option<String>,
-    /// `StopFailure` only.
+    /// `StopFailure` as Horadric makes one up itself (a Folio's stream):
+    /// the kind and the words. Claude Code's own says `error` and
+    /// `error_details`, see [`HookEvent::failure`].
     #[serde(default)]
     pub error_type: Option<String>,
     #[serde(default)]
     pub error_message: Option<String>,
+    /// `StopFailure`: the kind, such as `rate_limit` or
+    /// `authentication_failed`. `PostToolUseFailure` has one too, the
+    /// tool's own words. Kept whole, so a shape not seen yet cannot cost
+    /// the event.
+    #[serde(default)]
+    pub error: Option<Value>,
+    /// `StopFailure` only: what the API said, "429 Too Many Requests".
+    #[serde(default)]
+    pub error_details: Option<String>,
+    /// The prompt the event belongs to. Absent before the first one.
+    #[serde(default)]
+    pub prompt_id: Option<String>,
+    /// Events inside a turn: `{"level": "high"}`, the effort it runs at.
+    /// Read with [`HookEvent::effort_level`].
+    #[serde(default)]
+    pub effort: Option<Value>,
+    /// `PreCompact` and `PostCompact`: `manual` or `auto`.
+    #[serde(default)]
+    pub trigger: Option<String>,
+    /// `TaskCreated` and `TaskCompleted`: the task in the session's list.
+    #[serde(default)]
+    pub task_id: Option<String>,
+    #[serde(default)]
+    pub task_subject: Option<String>,
+    /// `PostModelSwitch` only: the model's id before and after.
+    #[serde(default)]
+    pub from_model: Option<String>,
+    #[serde(default)]
+    pub to_model: Option<String>,
     /// Horadric's own `Register` event only: the name the user gave the
     /// session. Not part of any Claude Code payload.
     #[serde(default)]
@@ -188,6 +214,29 @@ impl HookEvent {
         serde_json::from_slice(body)
     }
 
+    /// Why a `StopFailure` stopped the turn, and what was said about it.
+    /// Claude Code's own fields win over the ones Horadric makes up.
+    pub fn failure(&self) -> (String, Option<&str>) {
+        let kind = self
+            .error
+            .as_ref()
+            .and_then(Value::as_str)
+            .or(self.error_type.as_deref())
+            .filter(|k| !k.is_empty())
+            .unwrap_or("unknown");
+        let said = self
+            .error_details
+            .as_deref()
+            .or(self.error_message.as_deref())
+            .filter(|m| !m.trim().is_empty());
+        (kind.to_string(), said)
+    }
+
+    /// The effort the turn runs at: `low` up to `max`.
+    pub fn effort_level(&self) -> Option<&str> {
+        self.effort.as_ref()?.get("level")?.as_str()
+    }
+
     /// True when the event came from a subagent rather than the main loop.
     pub fn is_subagent(&self) -> bool {
         self.agent_id.as_deref().is_some_and(|id| !id.is_empty())
@@ -271,6 +320,56 @@ mod tests {
         let plain = HookEvent::synthetic("PostToolUse");
         assert_eq!(plain.error_text(), None);
         assert!(!plain.interrupted());
+    }
+
+    #[test]
+    fn claude_codes_newer_fields_parse() {
+        let fail = br#"{"session_id":"c","hook_event_name":"StopFailure",
+            "prompt_id":"550e8400","error":"rate_limit",
+            "error_details":"429 Too Many Requests"}"#;
+        let e = HookEvent::from_json(fail).unwrap();
+        assert_eq!(
+            e.failure(),
+            ("rate_limit".into(), Some("429 Too Many Requests"))
+        );
+        assert_eq!(e.prompt_id.as_deref(), Some("550e8400"));
+
+        let tool = br#"{"session_id":"c","hook_event_name":"PreToolUse",
+            "effort":{"level":"xhigh"},"tool_name":"Bash"}"#;
+        assert_eq!(
+            HookEvent::from_json(tool).unwrap().effort_level(),
+            Some("xhigh")
+        );
+        // A shape the docs do not give must not lose the event.
+        let odd = br#"{"session_id":"c","hook_event_name":"Stop","effort":"high","error":{"a":1}}"#;
+        let e = HookEvent::from_json(odd).unwrap();
+        assert_eq!(e.effort_level(), None);
+        assert_eq!(e.failure().0, "unknown");
+
+        let own = HookEvent {
+            error_type: Some("billing_error".into()),
+            error_message: Some("Credit balance is too low".into()),
+            ..HookEvent::synthetic("StopFailure")
+        };
+        assert_eq!(
+            own.failure(),
+            ("billing_error".into(), Some("Credit balance is too low"))
+        );
+
+        let switch = br#"{"session_id":"c","hook_event_name":"PostModelSwitch",
+            "from_model":"claude-sonnet-5","to_model":"claude-opus-5","source":"command",
+            "requested_model":null,"context_tokens":182340}"#;
+        assert_eq!(
+            HookEvent::from_json(switch).unwrap().to_model.as_deref(),
+            Some("claude-opus-5")
+        );
+
+        let task = br#"{"session_id":"c","hook_event_name":"TaskCreated",
+            "task_id":"task-001","task_subject":"Implement user authentication"}"#;
+        assert_eq!(
+            HookEvent::from_json(task).unwrap().task_id.as_deref(),
+            Some("task-001")
+        );
     }
 
     #[test]

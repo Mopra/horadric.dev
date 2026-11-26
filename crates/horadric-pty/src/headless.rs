@@ -67,6 +67,12 @@ pub const ENV_REMOVE: &[&str] = &[
 /// `sdk-cli` the same.
 pub const ENTRYPOINT: (&str, &str) = ("CLAUDE_CODE_ENTRYPOINT", "horadric");
 
+/// Keeps `--resume` from running a tool call a hook deferred in an earlier
+/// run: opening a conversation again must start nothing by itself. Claude
+/// can still make the call anew, where the human sees and answers it.
+/// Read from Claude Code 2.1.328 on, and ignored before.
+pub const NO_DEFERRED_RESUME: (&str, &str) = ("CLAUDE_CODE_DISABLE_DEFERRED_TOOL_RESUME", "1");
+
 /// How long a dropped session gets to end on its own.
 const GRACE: Duration = Duration::from_secs(3);
 
@@ -154,6 +160,7 @@ impl Headless {
             command.env_remove(name);
         }
         command.env(ENTRYPOINT.0, ENTRYPOINT.1);
+        command.env(NO_DEFERRED_RESUME.0, NO_DEFERRED_RESUME.1);
         for (k, v) in &options.env_set {
             command.env(k, v);
         }

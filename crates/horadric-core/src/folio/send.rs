@@ -61,12 +61,27 @@ impl Priority {
 }
 
 fn user_line(content: Value, uuid: Option<&str>, priority: Option<Priority>) -> String {
+    user_line_from(content, uuid, priority, false)
+}
+
+/// `relayed` marks a message the human did not type as `isSynthetic`, a
+/// field beside `type` (SDKUserMessage in the Agent SDK reference). The
+/// CLI then tells Claude it is not the user's own input.
+fn user_line_from(
+    content: Value,
+    uuid: Option<&str>,
+    priority: Option<Priority>,
+    relayed: bool,
+) -> String {
     let mut line = json!({
         "type": "user",
         "message": {"role": "user", "content": content},
         "parent_tool_use_id": null,
         "session_id": "",
     });
+    if relayed {
+        line["isSynthetic"] = json!(true);
+    }
     if let Some(u) = uuid {
         line["uuid"] = json!(u);
     }
@@ -79,6 +94,20 @@ fn user_line(content: Value, uuid: Option<&str>, priority: Option<Priority>) -> 
 /// A prompt of plain text.
 pub fn prompt_line(text: &str) -> String {
     user_line(json!(text), None, None)
+}
+
+/// A prompt Horadric sends on its own, such as a quest's nudge or
+/// Warriv's answer, marked as not typed by the human.
+pub fn relayed_prompt_line(text: &str) -> String {
+    user_line_from(json!(text), None, None, true)
+}
+
+/// [`relayed_prompt_line`] sent while a turn runs, with the uuid the Folio
+/// knows it by. Always [`Priority::Later`]: folded into a running turn,
+/// Claude reads a relayed message as a note beside a tool's result and
+/// may pass it by, while one that starts a turn is acted on.
+pub fn relayed_queued_line(text: &str, uuid: &str) -> String {
+    user_line_from(json!(text), Some(uuid), Some(Priority::Later), true)
 }
 
 /// A prompt with images, the images first as the terminal sends them.
@@ -213,6 +242,31 @@ mod tests {
             serde_json::from_str(&queued_prompt_line("x", &[], "u1", Priority::Now)).unwrap();
         assert_eq!(v["uuid"], "u1");
         assert_eq!(v["priority"], "now");
+    }
+
+    #[test]
+    fn a_relayed_prompt_is_marked_synthetic_and_a_typed_one_is_not() {
+        let v: Value = serde_json::from_str(&relayed_prompt_line("go on")).unwrap();
+        assert_eq!(v["isSynthetic"], true);
+        assert_eq!(v["type"], "user");
+        assert_eq!(v["message"]["content"], "go on");
+        // Beside `type`, not inside the message, and with no origin.
+        assert!(v["message"]["isSynthetic"].is_null());
+        assert!(v["origin"].is_null());
+
+        let v: Value = serde_json::from_str(&relayed_queued_line("go on", "u2")).unwrap();
+        assert_eq!(v["isSynthetic"], true);
+        assert_eq!(v["uuid"], "u2");
+        assert_eq!(v["priority"], "later");
+
+        for typed in [
+            prompt_line("hi"),
+            prompt_line_with_images("hi", &[]),
+            queued_prompt_line("hi", &[], "u1", Priority::Next),
+        ] {
+            let v: Value = serde_json::from_str(&typed).unwrap();
+            assert!(v.get("isSynthetic").is_none());
+        }
     }
 
     #[test]

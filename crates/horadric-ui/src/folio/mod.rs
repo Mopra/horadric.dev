@@ -755,11 +755,13 @@ pub fn ready(id: &str) -> bool {
     .unwrap_or(false)
 }
 
-/// Sends session `id` a line as though typed into it and Enter pressed:
-/// `/model` and `/effort` switch it, anything else is a prompt. False when
-/// it cannot take one now, see [`composer::prompt`].
+/// Sends session `id` a line of Horadric's own (a quest, Warriv, a
+/// runeword, the usage window): `/model` and `/effort` switch it, anything
+/// else is a prompt, marked as not typed by the human. False when it
+/// cannot take one now, see [`composer::prompt`].
 pub fn prompt(id: &str, text: &str) -> bool {
-    let went = with(id, |c| composer::prompt(c, text)).unwrap_or(false);
+    let from = composer::From::Horadric;
+    let went = with(id, |c| composer::prompt(c, text, from)).unwrap_or(false);
     if went {
         redraw(id);
     }
@@ -776,7 +778,8 @@ pub fn broadcast(key: &str, text: &str) -> usize {
             return;
         };
         for (id, chat) in chats.iter_mut() {
-            if chat.key == key && chat.watch.is_none() && composer::prompt(chat, text) {
+            let from = composer::From::Human;
+            if chat.key == key && chat.watch.is_none() && composer::prompt(chat, text, from) {
                 went.push(id.clone());
             }
         }
@@ -1001,6 +1004,11 @@ fn drain() {
             }
             // Before the lines, which may ask whether an edit waits.
             chat.folio.review = chat.input.review;
+            // A watched transcript is another session's: it says nothing
+            // of servers itself.
+            if chat.folio.mcp.shared.is_none() && chat.watch.is_none() {
+                chat.folio.mcp.shared = Some((id.clone(), mcp::told()));
+            }
             let (cleared, live) = (chat.folio.cleared, chat.live);
             for event in events {
                 // A replay's lines are old, and when they came is lost.
@@ -1190,7 +1198,7 @@ fn tend_compaction(chat: &mut Chat) -> bool {
     let went = match chat.compaction.step(&m) {
         None => return false,
         Some(Act::Interrupt) => chat.hosted.as_ref().is_some_and(|h| h.interrupt().is_ok()),
-        Some(Act::Send(text)) => composer::prompt(chat, text),
+        Some(Act::Send(text)) => composer::prompt(chat, text, composer::From::Horadric),
     };
     if !went {
         chat.compaction.give_up();

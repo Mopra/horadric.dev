@@ -3738,10 +3738,21 @@ impl Painter<'_> {
         // looks stuck otherwise.
         let at_work = if let Some(queued) = s.queued_line(scene.now) {
             queued
+        } else if phase == &Phase::Working && s.is_compacting() {
+            // No other hook speaks for the minute this can take.
+            "compacting".to_string()
         } else if !s.band.hirelings.is_empty() {
             s.band.line(scene.now).unwrap_or_default()
         } else if phase == &Phase::Working || s.agents_alone(scene.now) > 0 {
             horadric_core::session::subagent_line(&s.subagent_types(scene.now))
+        } else if matches!(phase, Phase::Done | Phase::Idle) {
+            // At rest with a dev server or a monitor still running is
+            // not the same as at rest. Only at rest: a wait's own line
+            // says what the human must do.
+            s.program
+                .as_ref()
+                .and_then(|h| h.background.clone())
+                .unwrap_or_default()
         } else {
             String::new()
         };

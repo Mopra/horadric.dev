@@ -518,6 +518,45 @@ fn host_file_name(len: u64, modified: u64) -> String {
     format!("{HOST_PREFIX}{len}-{modified}.exe")
 }
 
+/// `BROWSER` and the pane's tag for terminal `id`, a session's or a plain
+/// shell's, so a link a program in it opens comes up in the project's
+/// browser pane (`horadric open-url`, see `horadric_hooks::open_url`).
+/// `BROWSER` names the host's copy of this binary: the terminal's own host
+/// runs from it, so it stays as long as the terminal does, and it is this
+/// instance's build, dev or installed.
+#[cfg(windows)]
+pub(crate) fn pane_env(id: &str) -> Vec<(String, String)> {
+    use horadric_hooks::open_url::{self, Pane, PANE_ENV};
+    let pane = Pane {
+        port: horadric_hooks::port(),
+        key: crate::vault::run::mint_key(&open_url::key_name(id)),
+        id: id.to_string(),
+    };
+    let program = host_program();
+    vec![
+        ("BROWSER".into(), open_url::browser_value(&no_spaces(&program))),
+        (PANE_ENV.into(), pane.to_env()),
+    ]
+}
+
+/// `path`'s 8.3 name when it has a space, which gh would split `BROWSER`
+/// at. Where the volume keeps no short names it stays as it is.
+#[cfg(windows)]
+fn no_spaces(path: &Path) -> PathBuf {
+    use windows::core::HSTRING;
+    use windows::Win32::Storage::FileSystem::GetShortPathNameW;
+    if !path.to_string_lossy().contains(' ') {
+        return path.to_path_buf();
+    }
+    let wide = HSTRING::from(path.as_os_str());
+    let mut buf = vec![0u16; 1024];
+    let n = unsafe { GetShortPathNameW(&wide, Some(&mut buf)) } as usize;
+    if n == 0 || n > buf.len() {
+        return path.to_path_buf();
+    }
+    PathBuf::from(String::from_utf16_lossy(&buf[..n]))
+}
+
 impl Console {
     /// Starts the agent in a session host and the thread that reads what
     /// the host sends. `notify` is the window that hears about output and
@@ -554,6 +593,8 @@ impl Console {
                 theirs,
             ));
         }
+        #[cfg(windows)]
+        env_set.extend(pane_env(&launch.id));
         env_set.extend(launch.env);
         // The setup runs in the pane, where its output can be read, and
         // the agent starts after it in the same console.
@@ -757,6 +798,11 @@ impl Console {
         }
         let records = self.program.lock().ok()?;
         Some(records.summary().map(|r| (r.phase(), r.line())))
+    }
+
+    /// What the program says it runs beside its turn (OSC 7501).
+    pub fn background(&self) -> Option<String> {
+        self.program.lock().ok()?.background()
     }
 
     /// What the program last said with OSC 9;4, while it runs.
