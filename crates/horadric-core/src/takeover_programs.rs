@@ -140,6 +140,17 @@ impl Mode {
         }
     }
 
+    /// Reads [`Mode::word`], None for no answer or a word this build does
+    /// not know. For what must fail closed: listing the windows, which no
+    /// later question guards.
+    pub fn known(word: Option<&str>) -> Option<Mode> {
+        match word {
+            Some("off") => Some(Mode::Off),
+            Some("ask") => Some(Mode::Ask),
+            _ => None,
+        }
+    }
+
     pub fn is_ask(&self) -> bool {
         *self == Mode::Ask
     }

@@ -22,6 +22,8 @@
 use std::cell::OnceCell;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -51,6 +53,60 @@ const APP_WAIT: Duration = Duration::from_secs(100);
 /// the client waits for the tool list behind it, and no answer reads as on.
 const MODE_WAIT: Duration = Duration::from_secs(2);
 
+/// How often a session's server asks whether the human turned takeover on
+/// or off since the tools were last listed, to tell the client the list
+/// changed. A round trip to the app on this machine, ten seconds apart.
+const MODE_EVERY: Duration = Duration::from_secs(10);
+
+/// Said when listing the windows and the app did not say in time whether
+/// takeover is on: the one call no later question guards, so it is not
+/// answered on a guess.
+const MODE_UNKNOWN: &str = "Horadric did not say in time whether takeover is on, so no windows \
+    were listed. Try again in a moment.";
+
+/// A mode as it is kept between threads: none listed yet, off, ask.
+fn mode_byte(mode: Option<Mode>) -> u8 {
+    match mode {
+        None => 0,
+        Some(Mode::Off) => 1,
+        Some(Mode::Ask) => 2,
+    }
+}
+
+/// Writes one message to the client, whole: the mode's watcher writes
+/// beside the answers.
+fn send(line: &str) -> Result<(), String> {
+    let mut out = std::io::stdout().lock();
+    writeln!(out, "{line}").map_err(|e| e.to_string())?;
+    out.flush().map_err(|e| e.to_string())
+}
+
+/// Tells the client the tool list changed whenever the human turns
+/// takeover on or off after the tools were listed, so the takeover tools
+/// leave a running session's list, and come back, without its restart.
+/// Calls are refused by the app while off either way: this only keeps the
+/// list true.
+fn watch_mode(port: u16, session: String, listed: Arc<AtomicU8>) {
+    thread::spawn(move || loop {
+        thread::sleep(MODE_EVERY);
+        let was = listed.load(Ordering::Acquire);
+        if was == 0 {
+            continue;
+        }
+        let asked = json!({ "op": "desktop.mode" });
+        let said = ask_app_within(port, Some(&session), &asked, MODE_WAIT).ok();
+        let now = mode_byte(Mode::known(said.as_ref().and_then(|a| a["mode"].as_str())));
+        if now == 0 || now == was {
+            continue;
+        }
+        listed.store(now, Ordering::Release);
+        let note = json!({ "jsonrpc": "2.0", "method": "notifications/tools/list_changed" });
+        if send(&note.to_string()).is_err() {
+            return;
+        }
+    });
+}
+
 /// Said of a call that failed after it reached the page, so the agent looks
 /// before it makes the call again and does not act twice.
 const MAY_HAVE_RUN: &str = "It may still have run in the page: look (browser_snapshot or browser_evaluate) before you make it again.";
@@ -73,6 +129,10 @@ pub fn run() -> Result<(), String> {
         .unwrap_or_else(horadric_hooks::port);
     let ours = session.clone();
     let asker = session.clone();
+    let listed = Arc::new(AtomicU8::new(0));
+    if let (true, Some(s)) = (cfg!(windows), &session) {
+        watch_mode(owner, s.clone(), Arc::clone(&listed));
+    }
     // Asked once, and only when a lore tool named files: the server's
     // folder does not change.
     let top: OnceCell<Option<PathBuf>> = OnceCell::new();
@@ -83,8 +143,9 @@ pub fn run() -> Result<(), String> {
         mode: Box::new(move || {
             let asked = json!({ "op": "desktop.mode" });
             let said = ask_app_within(owner, asker.as_deref(), &asked, MODE_WAIT).ok();
-            Mode::from_word(said.as_ref().and_then(|a| a["mode"].as_str()))
+            Mode::known(said.as_ref().and_then(|a| a["mode"].as_str()))
         }),
+        listed,
         settle: Duration::from_millis(400),
         #[cfg(not(target_os = "macos"))]
         lore: crate::lore::tool,
@@ -93,7 +154,6 @@ pub fn run() -> Result<(), String> {
         #[cfg(windows)]
         takeover: Takeover::default(),
     };
-    let mut out = std::io::stdout().lock();
     for line in std::io::stdin().lock().lines() {
         let line = line.map_err(|e| e.to_string())?;
         if line.trim().is_empty() {
@@ -107,8 +167,7 @@ pub fn run() -> Result<(), String> {
             })),
         };
         if let Some(a) = answer {
-            writeln!(out, "{a}").map_err(|e| e.to_string())?;
-            out.flush().map_err(|e| e.to_string())?;
+            send(&a.to_string())?;
             if let (Some(s), Ok(msg)) = (&ours, serde_json::from_str::<Value>(&line)) {
                 let is_file = |p: &str| {
                     let top =
@@ -242,8 +301,12 @@ struct Server<A> {
     /// Answers a lore tool, None for any other.
     lore: fn(&str, &Value) -> Option<Result<String, String>>,
     /// Whether the human has takeover on, asked of the app when the tools
-    /// are listed. It answers ask when the app does not, in time.
-    mode: Box<dyn FnMut() -> Mode>,
+    /// are listed and the windows asked for. None when the app does not
+    /// answer in time.
+    mode: Box<dyn FnMut() -> Option<Mode>>,
+    /// The mode the tools were last listed under, for the watcher that
+    /// tells the client when it changes (see [`mode_byte`]).
+    listed: Arc<AtomicU8>,
     /// The desktop programs the agent reads and operates, its UI
     /// Automation set up on first use.
     #[cfg(windows)]
@@ -262,7 +325,9 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
                     .get("protocolVersion")
                     .and_then(Value::as_str)
                     .unwrap_or(PROTOCOL),
-                "capabilities": { "tools": {} },
+                // The list changes when the human turns takeover on or
+                // off, and the client is told (see `watch_mode`).
+                "capabilities": { "tools": { "listChanged": true } },
                 "serverInfo": { "name": "horadric", "version": env!("CARGO_PKG_VERSION") },
                 "instructions": match (self.browser, HAS_LORE) {
                     (true, true) => format!("{}
@@ -277,7 +342,11 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
             "tools/list" if self.browser => {
                 // Off keeps the takeover tools out of every session's
                 // context, which is most of what this list weighs.
-                let takeover = cfg!(windows) && (self.mode)() == Mode::Ask;
+                // An app that does not say in time hides nothing: every
+                // call still asks it, and it refuses while off.
+                let mode = (self.mode)();
+                self.listed.store(mode_byte(mode), Ordering::Release);
+                let takeover = cfg!(windows) && mode.unwrap_or(Mode::Ask) == Mode::Ask;
                 Ok(json!({ "tools": tool_list(takeover) }))
             }
             "tools/list" => Ok(json!({ "tools": lore_tools() })),
@@ -406,10 +475,16 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
             n if is_takeover(n) && !self.browser => Err(NOT_STARTED.into()),
             // Every other takeover tool asks the app before it reads, and
             // hears there that takeover is off. Listing the windows asks
-            // nothing, so it is asked here: off shows no titles either.
-            n if is_takeover(n) && n.ends_with("_windows") && (self.mode)() == Mode::Off => {
-                Err(OFF.into())
-            }
+            // nothing, so it is asked here: off shows no titles either,
+            // and nor does an app that did not say.
+            n if is_takeover(n) && n.ends_with("_windows") => match (self.mode)() {
+                Some(Mode::Off) => Err(OFF.into()),
+                None => Err(MODE_UNKNOWN.into()),
+                #[cfg(windows)]
+                Some(Mode::Ask) => self.takeover.tool(n, args, &mut self.app, self.settle),
+                #[cfg(not(windows))]
+                Some(Mode::Ask) => Err(format!("there is no tool {name}")),
+            },
             #[cfg(windows)]
             n if is_takeover(n) => self.takeover.tool(n, args, &mut self.app, self.settle),
             _ => Err(format!("there is no tool {name}")),
@@ -1407,7 +1482,8 @@ mod tests {
             app,
             settle: Duration::ZERO,
             lore: |name, _| (name == "lore_recall").then(|| Ok("#1 a note".into())),
-            mode: Box::new(|| Mode::Ask),
+            mode: Box::new(|| Some(Mode::Ask)),
+            listed: Arc::new(AtomicU8::new(0)),
             #[cfg(windows)]
             takeover: Takeover::default(),
         };
@@ -1757,7 +1833,7 @@ B.";
         let (mut s, calls) = server(|_| Err(OFF.into()));
         let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
         let on = s.handle(&list).unwrap()["result"]["tools"].to_string();
-        s.mode = Box::new(|| Mode::Off);
+        s.mode = Box::new(|| Some(Mode::Off));
         let off = s.handle(&list).unwrap()["result"]["tools"].to_string();
         assert!(on.contains("\"takeover_click\"") && !off.contains("takeover_"));
         assert!(off.contains("\"desk_click\"") && off.contains("\"browser_click\""));
@@ -1768,6 +1844,33 @@ B.";
             assert_eq!(a["result"]["content"][0]["text"], OFF);
         }
         assert!(calls.borrow().is_empty());
+    }
+
+    /// An app that does not say whether takeover is on keeps the tools
+    /// listed, since every call asks it again, but lists no windows, the
+    /// one call nothing later guards.
+    #[cfg(windows)]
+    #[test]
+    fn an_unknown_mode_lists_the_tools_but_no_windows() {
+        let (mut s, calls) = server(|_| Err("no".into()));
+        s.mode = Box::new(|| None);
+        let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
+        let tools = s.handle(&list).unwrap()["result"]["tools"].to_string();
+        assert!(tools.contains("\"takeover_click\""));
+        for name in ["takeover_windows", "desktop_windows"] {
+            let a = s.handle(&call(name, json!({}))).unwrap();
+            assert_eq!(a["result"]["isError"], true);
+            assert_eq!(a["result"]["content"][0]["text"], MODE_UNKNOWN);
+        }
+        assert!(calls.borrow().is_empty());
+        // The list says it changes, so a running session hears of off.
+        let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" });
+        let a = s.handle(&init).unwrap();
+        assert_eq!(a["result"]["capabilities"]["tools"]["listChanged"], true);
+        assert_eq!(s.listed.load(Ordering::Acquire), mode_byte(None));
+        assert_eq!(Mode::known(Some("ask")), Some(Mode::Ask));
+        assert_eq!(Mode::known(Some("on")), None);
+        assert_eq!(Mode::known(None), None);
     }
 
     #[cfg(windows)]

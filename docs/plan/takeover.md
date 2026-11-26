@@ -237,10 +237,22 @@ What this does not promise:
 ## Using it
 
 **The tray.** The tray menu has an entry "Takeover" with two lines,
-"Off" and "Ask before each program". While it is off the tools are not
-listed to any session and every call is refused. "Ask before each
-program" is what the rest of this page describes. The choice is kept
-across restarts.
+"Off" and "Ask before each program". The app is the gate: while it is
+off every takeover call is refused by the app, in every session. The
+tool list follows as far as it can. A session started while it is off
+is not offered the tools. One already running is told the list changed
+(each session's `horadric mcp` asks the app every 10 seconds and sends
+`notifications/tools/list_changed` when the mode moved), so the tools
+leave its list if its client lists them again; until then it keeps the
+names, and every call of them is refused. "Ask before each program" is
+what the rest of this page describes. It is on, asking, by default: on
+a fresh install and after an upgrade from a build without the switch.
+The choice is kept across restarts.
+
+When the app does not say in time which it is (slower than 2 seconds,
+an older app, a session without its key), the tools are still listed,
+since every call asks the app again, but `takeover_windows`, the one
+call no later question guards, is refused.
 
 **The command.** `horadric takeover` (`horadric desktop` is kept as an
 alias). The human runs it in a terminal of their own: it changes no
