@@ -9,18 +9,44 @@
 //! elements whose name, value or state changed. The hooks only queue the
 //! event: the element is read later on the same thread, after a burst is
 //! folded, so a program that fires a thousand events reads as one change.
+//!
+//! What holds, and what the rest leans on:
+//!
+//! - One process serves one session. There is one ring, one set of
+//!   followed programs and one `handed` mark for the whole process, and
+//!   the places a session has read up to are kept by its `Desktop`
+//!   (`seen`). Whatever is in the ring may be told to whoever asks in
+//!   this process. Should this ever be hosted in a process that serves
+//!   several sessions, the ring, the followed set, the mark and the
+//!   grants must each become one per session first, or one session reads
+//!   what only another was allowed to see.
+//! - A program is watched only while its grant holds. `follow` is called
+//!   after the app said yes, the caller asks the app again before telling
+//!   changes it did not name the window for, and `unfollow` unhooks the
+//!   program and drops what the ring kept of it.
+//! - A hook is set by a program's id, so the id is pinned: a process
+//!   handle is held from `follow` until the program is unhooked, and the
+//!   thread looks each round whether it ended.
+//! - Reading an element is a call into the watched program, with no time
+//!   limit of its own, on the one watching thread. So what is worth a
+//!   read is settled before reading, a round reads for a limited time,
+//!   and the thread's heartbeat lets every answer say that the watcher is
+//!   stuck instead of that nothing changed.
+//! - A protected element's value (a password) is never read or kept.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, WAIT_OBJECT_0, WPARAM};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
-use windows::Win32::System::SystemInformation::GetLocalTime;
+use windows::Win32::System::SystemInformation::{GetLocalTime, GetTickCount};
 use windows::Win32::System::Threading::{
-    GetCurrentThreadId, GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetCurrentThreadId, GetExitCodeProcess, OpenProcess, WaitForSingleObject,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
 };
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::{
@@ -28,8 +54,8 @@ use windows::Win32::UI::Accessibility::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetAncestor, GetClassNameW, GetForegroundWindow, GetMessageW,
-    GetWindowThreadProcessId, IsWindowVisible, PeekMessageW, PostThreadMessageW, SetTimer, GA_ROOT,
-    MSG, PM_NOREMOVE, WM_APP,
+    GetWindowThreadProcessId, IsHungAppWindow, IsWindowVisible, PeekMessageW, PostThreadMessageW,
+    SetTimer, GA_ROOT, MSG, PM_NOREMOVE, WM_APP,
 };
 
 use crate::desktop::{info, short, Window};
@@ -90,6 +116,12 @@ const STATE_READONLY: u32 = 0x40;
 const STATE_EXPANDED: u32 = 0x200;
 const STATE_COLLAPSED: u32 = 0x400;
 const STATE_BUSY: u32 = 0x800;
+/// The element holds a password or the like, and its value is not read.
+const STATE_PROTECTED: u32 = 0x2000_0000;
+
+/// The watching thread comes round ten times a second. Silent for this
+/// long, it is stuck in a read of a program that does not answer.
+pub const STALLED_MS: u64 = 2000;
 
 /// What happened.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -135,6 +167,9 @@ pub struct Change {
     pub to: String,
     /// For a state change: the states before, when known, and after.
     pub states: Option<(Option<u32>, u32)>,
+    /// The value changed but is protected (a password), so it was not
+    /// read: `from` and `to` say nothing.
+    pub hidden: bool,
 }
 
 impl Change {
@@ -156,6 +191,42 @@ impl Change {
             from: None,
             to: String::new(),
             states: None,
+            hidden: false,
+        }
+    }
+
+    /// The note that `n` changes were not recorded. It is of no program
+    /// and no window, so nothing it carries can be taken for a change.
+    pub fn skipped(n: u32) -> Change {
+        Change {
+            seq: 0,
+            at_ms: 0,
+            clock: 0,
+            what: What::Skipped(n),
+            pid: 0,
+            exe: String::new(),
+            window: 0,
+            title: String::new(),
+            dialog: false,
+            role: String::new(),
+            name: String::new(),
+            key: None,
+            from: None,
+            to: String::new(),
+            states: None,
+            hidden: false,
+        }
+    }
+
+    /// The text this change brought: a value, name or title it changed
+    /// to, or the title of a window shown. What merely is in a change
+    /// (the window it happened in, the element's name beside a new
+    /// state) did not come with it.
+    pub fn brought(&self) -> Option<&str> {
+        match self.what {
+            What::Value | What::Name | What::Title if !self.hidden => Some(&self.to),
+            What::Shown => Some(&self.title),
+            _ => None,
         }
     }
 
@@ -206,6 +277,11 @@ impl Ring {
     /// they come close together and no reader has had that one yet.
     /// Whether anything new is there to read.
     pub fn push(&mut self, mut c: Change) -> bool {
+        // A count of what was skipped is never the same news twice.
+        if matches!(c.what, What::Skipped(_)) {
+            self.append(c);
+            return true;
+        }
         // The front moves through several windows in a moment (a dialog
         // closing hands it back); only where it came to rest matters.
         let anywhere = c.what == What::Front;
@@ -250,6 +326,11 @@ impl Ring {
                 }
             }
         }
+        self.append(c);
+        true
+    }
+
+    fn append(&mut self, mut c: Change) {
         c.seq = self.next;
         self.next += 1;
         self.items.push_back(c);
@@ -258,7 +339,12 @@ impl Ring {
                 self.lost_upto = gone.seq;
             }
         }
-        true
+    }
+
+    /// Drops what is kept of program `pid`, which may no longer be
+    /// looked at. The numbering goes on, so no reader's place moves.
+    pub fn forget(&mut self, pid: u32) {
+        self.items.retain(|c| c.pid != pid);
     }
 
     /// The changes after `seq`, and whether some that came after it have
@@ -275,30 +361,104 @@ pub struct Intake {
     second: u64,
     count: u32,
     skipped: u32,
+    /// The second the last of the skipped came in.
+    skipped_in: u64,
 }
 
 impl Intake {
-    /// Whether a change at `at_ms` is recorded, and when a new second
-    /// begins, how many the last one skipped.
-    pub fn admit(&mut self, at_ms: u64) -> (bool, Option<u32>) {
-        let second = at_ms / 1000;
-        let mut said = None;
+    /// Whether an element's change that happened at `at_ms` is worth
+    /// reading. Asked before the read, which is the costly part: what is
+    /// turned away is only counted.
+    pub fn admit(&mut self, at_ms: u64) -> bool {
+        // Events are read a little out of order; time does not go back.
+        let second = (at_ms / 1000).max(self.second);
         if second != self.second {
-            if self.skipped > 0 {
-                said = Some(self.skipped);
-            }
-            *self = Intake {
-                second,
-                count: 0,
-                skipped: 0,
-            };
+            self.second = second;
+            self.count = 0;
         }
         if self.count >= MOST_PER_SECOND {
-            self.skipped += 1;
-            return (false, said);
+            self.lose(1);
+            return false;
         }
         self.count += 1;
-        (true, said)
+        true
+    }
+
+    /// Counts `n` changes lost before they could be asked about, the
+    /// queue being full.
+    pub fn lose(&mut self, n: u32) {
+        if n > 0 {
+            self.skipped = self.skipped.saturating_add(n);
+            self.skipped_in = self.second;
+        }
+    }
+
+    /// How many were skipped and not said yet, once the second they came
+    /// in is over at `now_ms` or nothing more is coming (`idle`): said
+    /// without waiting for a later change, which may never come.
+    pub fn take_skipped(&mut self, now_ms: u64, idle: bool) -> Option<u32> {
+        if self.skipped == 0 || !(idle || now_ms / 1000 > self.skipped_in) {
+            return None;
+        }
+        Some(std::mem::take(&mut self.skipped))
+    }
+}
+
+/// An element, as an event names it: its window, object and child.
+pub type Key = (isize, i32, i32);
+
+/// What elements last held, for telling a change from what it was. Kept
+/// to a limit by forgetting the ones longest untouched: forgetting all
+/// at once would make the next change of every element look like a first
+/// sight, and a first name is mostly not told.
+#[derive(Debug)]
+pub struct Recall<V> {
+    /// Each with its program and when it was last set.
+    items: HashMap<Key, (V, u32, u64)>,
+    clock: u64,
+    most: usize,
+}
+
+impl<V> Recall<V> {
+    pub fn new(most: usize) -> Recall<V> {
+        Recall {
+            items: HashMap::new(),
+            clock: 0,
+            most,
+        }
+    }
+
+    /// Sets what `key`, an element of program `pid`, holds, and gives
+    /// what it held before.
+    pub fn insert(&mut self, key: Key, pid: u32, v: V) -> Option<V> {
+        self.clock += 1;
+        let before = self.items.insert(key, (v, pid, self.clock)).map(|e| e.0);
+        if self.items.len() > self.most {
+            // A quarter at once, so this is not done on every insert.
+            let mut touched: Vec<u64> = self.items.values().map(|e| e.2).collect();
+            let cut = (touched.len() / 4).max(1);
+            let (_, line, _) = touched.select_nth_unstable(cut);
+            let line = *line;
+            self.items.retain(|_, e| e.2 >= line);
+        }
+        before
+    }
+
+    pub fn remove(&mut self, key: &Key) {
+        self.items.remove(key);
+    }
+
+    /// Forgets the elements of program `pid`.
+    pub fn forget(&mut self, pid: u32) {
+        self.items.retain(|_, e| e.1 != pid);
+    }
+
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
     }
 }
 
@@ -445,6 +605,10 @@ pub fn brief(c: &Change) -> String {
             ),
             None => format!("{} now named {} in {title:?}", c.role, value(&c.to)),
         },
+        What::Value if c.hidden => format!(
+            "{} changed in {title:?} (its value is protected and was not read)",
+            element()
+        ),
         What::Value if c.role.is_empty() => {
             format!("something changed its value in {title:?}")
         }
@@ -476,16 +640,128 @@ pub fn in_scope(c: &Change, pid: Option<u32>) -> bool {
     pid.is_none_or(|p| c.pid == p || matches!(c.what, What::Skipped(_)))
 }
 
+/// For how many seconds the watching thread has been silent at `now_ms`,
+/// having last come round at `beat_ms`, when that is long enough to mean
+/// it is stuck.
+pub fn stall(beat_ms: u64, now_ms: u64) -> Option<u64> {
+    let silent = now_ms.saturating_sub(beat_ms);
+    (silent >= STALLED_MS).then_some(silent / 1000)
+}
+
+/// What is said in place of "nothing changed" while the watcher is stuck.
+pub fn stall_text(secs: u64) -> String {
+    format!("the watcher has not answered for {secs} s (a watched program may be hung)")
+}
+
+/// Where a `desktop_changes` reads from: the change the agent `asked`
+/// after, else the place the session `kept`. A number past the `newest`
+/// change is from before `horadric mcp` started again, when the count
+/// began anew: all that is kept is told then, with a note saying why.
+pub fn cursor_from(asked: Option<u64>, kept: u64, newest: u64) -> (u64, Option<String>) {
+    match asked {
+        Some(a) if a > newest => (
+            0,
+            Some(format!(
+                "(There is no change #{a} yet: the numbering started over, as it does when \
+                 horadric mcp starts again, and stands at #{newest}. Everything kept is told.)\n"
+            )),
+        ),
+        Some(a) => (a, None),
+        None => (kept.min(newest), None),
+    }
+}
+
+/// What a wait read from the session's place, in two: the changes up to
+/// `mark`, where the wait began, which came before it and were not told
+/// yet, and those after. Only the second decide what the wait found. A
+/// change folded into a later one has the later one's number, so one that
+/// began before the wait and went on during it counts as during.
+pub fn split_at(list: Vec<Change>, mark: u64) -> (Vec<Change>, Vec<Change>) {
+    list.into_iter().partition(|c| c.seq <= mark)
+}
+
+/// What a wait tells beside its verdict: what changed `before` it that
+/// the session had not been told, and what changed during it, `after`.
+/// Empty when there is nothing to tell and `quietly` is set.
+pub fn meanwhile_text(
+    before: &[Change],
+    after: &[Change],
+    lost: bool,
+    stalled: Option<u64>,
+    quietly: bool,
+) -> String {
+    if quietly && before.is_empty() && after.is_empty() && !lost && stalled.is_none() {
+        return String::new();
+    }
+    let mut out = String::new();
+    if lost {
+        out.push_str(&format!(
+            "\n(Some changes were pushed out before they were told: only the last {KEPT} are \
+             kept.)"
+        ));
+    }
+    // The lines of the wait itself come first when there is not room.
+    let room = MOST_LINES.saturating_sub(after.len().min(MOST_LINES));
+    let old = &before[before.len().saturating_sub(room)..];
+    let mut lines = |head: &str, all: usize, shown: &[Change]| {
+        out.push_str(head);
+        if all > shown.len() {
+            out.push_str(&format!(
+                "\n({} earlier changes left out.)",
+                all - shown.len()
+            ));
+        }
+        for c in shown {
+            out.push('\n');
+            out.push_str(&line(c));
+        }
+    };
+    if !before.is_empty() {
+        lines("\nBefore the wait:", before.len(), old);
+    }
+    let apart = lost || !before.is_empty();
+    let lead = if apart { "\n" } else { " " };
+    if !after.is_empty() {
+        let new = &after[after.len().saturating_sub(MOST_LINES)..];
+        lines(&format!("{lead}Meanwhile:"), after.len(), new);
+    }
+    match stalled {
+        Some(secs) => out.push_str(&format!(
+            "{}What changed meanwhile is not fully known: {}.",
+            if apart || !after.is_empty() { "\n" } else { " " },
+            stall_text(secs)
+        )),
+        None if after.is_empty() => out.push_str(&format!("{lead}Nothing changed meanwhile.")),
+        None => {}
+    }
+    out
+}
+
 /// The answer to `desktop_changes`: the lines, newest last, and the
 /// change to ask after next time.
-pub fn changes_text(list: &[Change], since: u64, newest: u64, lost: bool, scope: &str) -> String {
+pub fn changes_text(
+    list: &[Change],
+    since: u64,
+    newest: u64,
+    lost: bool,
+    scope: &str,
+    stalled: Option<u64>,
+) -> String {
     let mut out = String::new();
     if lost {
         out.push_str(&format!(
             "(Some changes after #{since} were pushed out: only the last {KEPT} are kept.)\n"
         ));
     }
-    if list.is_empty() {
+    if let Some(secs) = stalled {
+        out.push_str(&format!(
+            "What changed{scope} is not fully known: {}.\n",
+            stall_text(secs)
+        ));
+    }
+    if list.is_empty() && stalled.is_some() {
+        out.push_str(&format!("No change was recorded since #{since}."));
+    } else if list.is_empty() {
         out.push_str(&format!("Nothing changed{scope} since #{since}."));
     } else {
         push_lines(&mut out, list);
@@ -504,14 +780,22 @@ pub fn changes_text(list: &[Change], since: u64, newest: u64, lost: bool, scope:
 /// The changes the helper read in programs that run as administrator, as
 /// part of another answer. Its ring counts on its own, so no numbers: the
 /// agent's `since` names the other ring's.
-pub fn changes_part(list: &[Change], lost: bool, scope: &str) -> String {
+pub fn changes_part(list: &[Change], lost: bool, scope: &str, stalled: Option<u64>) -> String {
     let mut out = String::new();
     if lost {
         out.push_str(&format!(
             "(Some changes were pushed out: only the last {KEPT} are kept.)\n"
         ));
     }
-    if list.is_empty() {
+    if let Some(secs) = stalled {
+        out.push_str(&format!(
+            "What changed{scope} is not fully known: {}.\n",
+            stall_text(secs)
+        ));
+    }
+    if list.is_empty() && stalled.is_some() {
+        out.push_str("No change was recorded since the last look.");
+    } else if list.is_empty() {
         out.push_str(&format!("Nothing changed{scope} since the last look."));
     } else {
         push_lines(&mut out, list);
@@ -586,12 +870,15 @@ impl Until {
 
 /// Which of `u` holds, given the open windows' `titles`, the changes
 /// `seen` since the wait began at `started_ms`, and the time `now_ms`.
+/// While the watcher is `stalled` nothing is known to be quiet: no change
+/// seen then means none could be read, not that none happened.
 pub fn verdict(
     u: &Until,
     titles: &[String],
     seen: &[Change],
     started_ms: u64,
     now_ms: u64,
+    stalled: Option<u64>,
 ) -> Option<String> {
     let has = |s: &str, part: &str| s.to_lowercase().contains(&part.to_lowercase());
     if let Some(a) = u.appears.as_deref() {
@@ -605,16 +892,20 @@ pub fn verdict(
         }
     }
     if let Some(x) = u.text.as_deref() {
-        let hit = seen.iter().find(|c| {
-            !matches!(c.what, What::Closed | What::MenuClosed)
-                && (has(&c.to, x) || has(&c.name, x) || has(&c.title, x))
-        });
+        // Only what a change brought: a window's title or an element's
+        // name is in every change there, whatever it was that changed.
+        let hit = seen.iter().find(|c| c.brought().is_some_and(|t| has(t, x)));
         if let Some(c) = hit {
             return Some(format!("{x:?} appeared: {}", brief(c)));
         }
     }
-    if let Some(q) = u.quiet_ms {
-        let last = seen.last().map_or(started_ms, |c| c.at_ms.max(started_ms));
+    if let Some(q) = u.quiet_ms.filter(|_| stalled.is_none()) {
+        // Each change has its own time, and they are not always in order.
+        let last = seen
+            .iter()
+            .map(|c| c.at_ms)
+            .max()
+            .map_or(started_ms, |at| at.max(started_ms));
         if now_ms.saturating_sub(last) >= q {
             return Some(format!("nothing changed for {q} ms"));
         }
@@ -622,54 +913,155 @@ pub fn verdict(
     None
 }
 
-// The rest touches Windows, and is tried by hand rather than tested.
+// The rest touches Windows, and is tried by hand rather than tested,
+// but for the small pure parts it leans on.
+
+/// An open process handle, which keeps Windows from handing the program's
+/// id to another program for as long as it is held. A hook is set by id
+/// alone, so without it a hook would outlive its program and deliver the
+/// events of whatever got the id next, a program nobody approved.
+struct Held {
+    handle: HANDLE,
+    /// Whether the handle may be waited on, else its exit code is read.
+    waitable: bool,
+}
+
+// The handle is only waited on, asked for its exit code and closed, which
+// any thread may do.
+unsafe impl Send for Held {}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.handle);
+        }
+    }
+}
+
+impl Held {
+    /// Opens program `pid`, to wait on when Windows allows, else only to
+    /// ask. Either way the id is pinned.
+    fn open(pid: u32) -> Option<Held> {
+        unsafe {
+            let both = PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION;
+            if let Ok(handle) = OpenProcess(both, false, pid) {
+                return Some(Held {
+                    handle,
+                    waitable: true,
+                });
+            }
+            OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+                .ok()
+                .map(|handle| Held {
+                    handle,
+                    waitable: false,
+                })
+        }
+    }
+
+    /// Whether the program has ended. Costs no call into the program.
+    fn ended(&self) -> bool {
+        const STILL_ACTIVE: u32 = 259;
+        unsafe {
+            if self.waitable {
+                return WaitForSingleObject(self.handle, 0) == WAIT_OBJECT_0;
+            }
+            let mut code = 0u32;
+            GetExitCodeProcess(self.handle, &mut code).is_ok() && code != STILL_ACTIVE
+        }
+    }
+}
+
+/// A program to hook next.
+struct Ask {
+    /// The window the human approved the program by, kept so the app can
+    /// be asked again whether the grant still holds.
+    window: Window,
+    held: Held,
+}
 
 /// What the watching thread shares with the tools.
 struct Shared {
     ring: Ring,
-    /// The programs hooked.
-    followed: HashSet<u32>,
+    /// The programs hooked, each with the window it was approved by.
+    followed: HashMap<u32, Window>,
     /// The programs to hook next.
-    asked: Vec<u32>,
+    asked: Vec<Ask>,
+    /// The programs to stop watching.
+    dropped: Vec<u32>,
+    /// The programs that could not be watched, by name, and why.
+    failed: HashMap<u32, (String, String)>,
     /// How many times the thread has caught up, for waiting on it.
     rounds: u64,
+    /// Whether the last round left events unread, its time being up.
+    behind: bool,
+    /// Whether the thread was started.
+    spawned: bool,
 }
 
 struct Watch {
     shared: Arc<(Mutex<Shared>, Condvar)>,
-    thread: u32,
+    /// The watching thread's id, 0 until it runs.
+    thread: Arc<AtomicU32>,
+    /// When the thread last came round or finished a read, in
+    /// milliseconds since `start`.
+    beat: Arc<AtomicU64>,
     start: Instant,
 }
 
 static WATCH: OnceLock<Watch> = OnceLock::new();
 
 fn watch() -> &'static Watch {
-    WATCH.get_or_init(|| {
-        let shared = Arc::new((
+    WATCH.get_or_init(|| Watch {
+        shared: Arc::new((
             Mutex::new(Shared {
                 ring: Ring::new(KEPT),
-                followed: HashSet::new(),
+                followed: HashMap::new(),
                 asked: Vec::new(),
+                dropped: Vec::new(),
+                failed: HashMap::new(),
                 rounds: 0,
+                behind: false,
+                spawned: false,
             }),
             Condvar::new(),
-        ));
-        let start = Instant::now();
-        let (tx, rx) = mpsc::channel();
-        let theirs = shared.clone();
-        let spawned = thread::Builder::new()
-            .name("desktop-watch".into())
-            .spawn(move || run(theirs, start, tx));
-        let thread = match spawned {
-            Ok(_) => rx.recv_timeout(Duration::from_secs(5)).unwrap_or(0),
-            Err(_) => 0,
-        };
-        Watch {
-            shared,
-            thread,
-            start,
-        }
+        )),
+        thread: Arc::new(AtomicU32::new(0)),
+        beat: Arc::new(AtomicU64::new(0)),
+        start: Instant::now(),
     })
+}
+
+/// The watching thread's id, starting the thread when it does not run. A
+/// start that failed or has not answered is said, and tried or waited for
+/// again by the next call.
+fn thread_of(w: &'static Watch) -> Result<u32, String> {
+    let id = w.thread.load(Ordering::Acquire);
+    if id != 0 {
+        return Ok(id);
+    }
+    let (lock, changed) = &*w.shared;
+    let mut s = lock
+        .lock()
+        .map_err(|_| "the watcher broke down".to_string())?;
+    let first = !s.spawned;
+    if first {
+        let (theirs, id, beat, start) =
+            (w.shared.clone(), w.thread.clone(), w.beat.clone(), w.start);
+        thread::Builder::new()
+            .name("desktop-watch".into())
+            .spawn(move || run(theirs, start, id, beat))
+            .map_err(|e| format!("the thread that watches could not be started: {e}"))?;
+        s.spawned = true;
+    }
+    // A thread started by an earlier call and silent since is given only
+    // a moment more, so each action is not slowed by five seconds.
+    let most = Duration::from_millis(if first { 5000 } else { 200 });
+    let _ = changed.wait_timeout_while(s, most, |_| w.thread.load(Ordering::Acquire) == 0);
+    match w.thread.load(Ordering::Acquire) {
+        0 => Err("the thread that watches has not started yet".into()),
+        id => Ok(id),
+    }
 }
 
 /// Milliseconds since watching began.
@@ -683,48 +1075,109 @@ fn poke(thread: u32) {
     }
 }
 
-/// Starts watching program `pid`, and returns once it is.
-pub fn follow(pid: u32) {
+fn poke_watch(w: &Watch) {
+    poke(w.thread.load(Ordering::Acquire));
+}
+
+fn pid_of(h: isize) -> u32 {
+    let mut pid = 0;
+    unsafe { GetWindowThreadProcessId(HWND(h as *mut _), Some(&mut pid)) };
+    pid
+}
+
+/// Starts watching the program of `window`, the one the human approved,
+/// and returns once it is watched or could not be: [`trouble`] says why.
+pub fn follow(window: &Window) {
     let w = watch();
-    // The thread never started: nothing would ever hook it, and waiting
-    // each call would only slow every action down.
-    if w.thread == 0 {
-        return;
-    }
+    let pid = window.pid;
     let (lock, changed) = &*w.shared;
+    if let Ok(mut s) = lock.lock() {
+        if let Some(known) = s.followed.get_mut(&pid) {
+            *known = window.clone();
+            return;
+        }
+    }
+    let fail = |why: String| {
+        if let Ok(mut s) = lock.lock() {
+            s.failed.insert(pid, (window.exe.clone(), why));
+        }
+    };
+    let thread = match thread_of(w) {
+        Ok(t) => t,
+        Err(why) => return fail(why),
+    };
+    // Taken here, as soon as the program is approved, and checked against
+    // the window: from now on the id can not pass to another program.
+    let Some(held) = Held::open(pid) else {
+        return fail("Windows would not open the program, so its end could not be seen".into());
+    };
+    if pid_of(window.hwnd) != pid {
+        return fail("its window is gone".into());
+    }
     let Ok(mut s) = lock.lock() else { return };
-    if s.followed.contains(&pid) {
-        return;
+    s.failed.remove(&pid);
+    s.dropped.retain(|p| *p != pid);
+    s.asked.retain(|a| a.window.pid != pid);
+    s.asked.push(Ask {
+        window: window.clone(),
+        held,
+    });
+    poke(thread);
+    let _ = changed.wait_timeout_while(s, Duration::from_secs(2), |s| {
+        !s.followed.contains_key(&pid) && !s.failed.contains_key(&pid)
+    });
+}
+
+/// Stops watching program `pid` and drops what was kept of it: the grant
+/// it was watched under no longer holds.
+pub fn unfollow(pid: u32) {
+    let Some(w) = WATCH.get() else { return };
+    if let Ok(mut s) = w.shared.0.lock() {
+        s.followed.remove(&pid);
+        s.failed.remove(&pid);
+        s.asked.retain(|a| a.window.pid != pid);
+        s.ring.forget(pid);
+        if !s.dropped.contains(&pid) {
+            s.dropped.push(pid);
+        }
     }
-    if !s.asked.contains(&pid) {
-        s.asked.push(pid);
-    }
-    poke(w.thread);
-    let _ = changed.wait_timeout_while(s, Duration::from_secs(2), |s| !s.followed.contains(&pid));
+    poke_watch(w);
+}
+
+fn shared<T>(read: impl FnOnce(&mut Shared) -> T) -> Option<T> {
+    let w = WATCH.get()?;
+    let mut s = w.shared.0.lock().ok()?;
+    Some(read(&mut s))
 }
 
 /// Whether program `pid` is watched.
 pub fn following(pid: u32) -> bool {
-    WATCH
-        .get()
-        .and_then(|w| w.shared.0.lock().ok().map(|s| s.followed.contains(&pid)))
-        .unwrap_or(false)
+    shared(|s| s.followed.contains_key(&pid)).unwrap_or(false)
 }
 
 /// Whether anything is watched at all.
 pub fn any_followed() -> bool {
-    WATCH
-        .get()
-        .and_then(|w| w.shared.0.lock().ok().map(|s| !s.followed.is_empty()))
-        .unwrap_or(false)
+    shared(|s| !s.followed.is_empty()).unwrap_or(false)
+}
+
+/// The programs watched, each as the window it was approved by.
+pub fn followed() -> Vec<Window> {
+    shared(|s| s.followed.values().cloned().collect()).unwrap_or_default()
+}
+
+/// Why program `pid` could not be watched, when it could not.
+pub fn trouble(pid: u32) -> Option<String> {
+    shared(|s| s.failed.get(&pid).map(|(_, why)| why.clone())).flatten()
+}
+
+/// The programs that could not be watched, by name, and why.
+pub fn troubles() -> Vec<(String, String)> {
+    shared(|s| s.failed.values().cloned().collect()).unwrap_or_default()
 }
 
 /// The last change recorded.
 pub fn newest() -> u64 {
-    WATCH
-        .get()
-        .and_then(|w| w.shared.0.lock().ok().map(|s| s.ring.newest()))
-        .unwrap_or(0)
+    shared(|s| s.ring.newest()).unwrap_or(0)
 }
 
 /// The last change, once what came before now has been read, so changes
@@ -740,9 +1193,26 @@ pub fn flush() {
     let (lock, changed) = &*w.shared;
     let Ok(s) = lock.lock() else { return };
     let from = s.rounds;
-    poke(w.thread);
-    // One round may be under way already with older events in hand.
-    let _ = changed.wait_timeout_while(s, Duration::from_millis(600), |s| s.rounds < from + 2);
+    poke_watch(w);
+    // One round may be under way already with older events in hand, and
+    // a round whose time ran out leaves the rest to the next.
+    let _ = changed.wait_timeout_while(s, Duration::from_millis(600), |s| {
+        s.rounds < from + 2 || s.behind
+    });
+}
+
+/// For how many seconds the watching thread has not come round, when
+/// that is long enough to mean it is stuck in a read of a program that
+/// does not answer. Nothing can be said of what changed meanwhile.
+pub fn stalled() -> Option<u64> {
+    let w = WATCH.get()?;
+    if w.thread.load(Ordering::Acquire) == 0 {
+        return None;
+    }
+    stall(
+        w.beat.load(Ordering::Acquire),
+        w.start.elapsed().as_millis() as u64,
+    )
 }
 
 /// The changes after `seq` in program `pid`, or all, whether some were
@@ -758,19 +1228,16 @@ pub fn peek(seq: u64, pid: Option<u32>) -> (Vec<Change>, bool, u64) {
 }
 
 fn read_ring(seq: u64, pid: Option<u32>, handed: bool) -> (Vec<Change>, bool, u64) {
-    let Some(w) = WATCH.get() else {
-        return (Vec::new(), false, 0);
-    };
-    let Ok(mut s) = w.shared.0.lock() else {
-        return (Vec::new(), false, 0);
-    };
-    let (list, lost) = s.ring.since(seq);
-    let newest = s.ring.newest();
-    if handed {
-        s.ring.hand_out(newest);
-    }
-    let list = list.into_iter().filter(|c| in_scope(c, pid)).collect();
-    (list, lost, newest)
+    shared(|s| {
+        let (list, lost) = s.ring.since(seq);
+        let newest = s.ring.newest();
+        if handed {
+            s.ring.hand_out(newest);
+        }
+        let list = list.into_iter().filter(|c| in_scope(c, pid)).collect();
+        (list, lost, newest)
+    })
+    .unwrap_or_default()
 }
 
 /// Waits up to `most` for a change to be recorded.
@@ -785,20 +1252,162 @@ pub fn wait_for_change(after: u64, most: Duration) {
 }
 
 /// An event as the hook hands it over, to be read later.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Raw {
     event: u32,
     hwnd: isize,
     object: i32,
     child: i32,
+    /// When it happened, as Windows' tick count has it.
+    tick: u32,
+}
+
+impl Raw {
+    /// It is about the window itself, not something in it.
+    fn whole(&self) -> bool {
+        self.object == OBJID_WINDOW && self.child == CHILDID_SELF
+    }
+
+    /// A window or dialog coming.
+    fn opens(&self) -> bool {
+        self.event == EVENT_DIALOGSTART || (self.event == EVENT_SHOW && self.whole())
+    }
+
+    /// A window or dialog going.
+    fn closes(&self) -> bool {
+        self.event == EVENT_DIALOGEND
+            || (matches!(self.event, EVENT_HIDE | EVENT_DESTROY) && self.whole())
+    }
+
+    /// A change of an element, which takes a read of the program to tell.
+    fn element(&self) -> bool {
+        matches!(
+            self.event,
+            EVENT_NAMECHANGE | EVENT_VALUECHANGE | EVENT_STATECHANGE
+        )
+    }
+
+    /// Whether anything is made of it: the parts of a window showing,
+    /// hiding and being destroyed come in floods and are told by nobody.
+    fn matters(&self) -> bool {
+        self.whole() || !matches!(self.event, EVENT_SHOW | EVENT_HIDE | EVENT_DESTROY)
+    }
+
+    /// What it is of, whenever it came.
+    fn same(&self) -> (u32, isize, i32, i32) {
+        (self.event, self.hwnd, self.object, self.child)
+    }
 }
 
 /// The most events held before the thread reads them.
 const MOST_RAW: usize = 5000;
 
+/// Takes `r` into the queue of at most `most`, and says whether nothing
+/// was lost for it. A window going is never lost, as its entry would
+/// stay behind as open: the oldest element change makes room for it.
+fn enqueue(q: &mut VecDeque<Raw>, r: Raw, most: usize) -> bool {
+    if q.len() < most {
+        q.push_back(r);
+        return true;
+    }
+    if !r.closes() {
+        return false;
+    }
+    match q.iter().position(Raw::element) {
+        Some(i) => {
+            q.remove(i);
+            q.push_back(r);
+            false
+        }
+        // Nothing but windows coming and going: held past the limit, as
+        // long as that is not a flood of its own.
+        None if q.len() < most * 4 => {
+            q.push_back(r);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Of a burst, what is read and in which order. Of the same change of
+/// one element only the last is read: it has the value the others led to.
+/// A window shown goes ahead of what came before it, as the elements
+/// filled in while it is made say so before it shows and are known as its
+/// making only once it is, but never ahead of the same window going: one
+/// hidden and shown again in a moment is open, not closed.
+fn fold_burst(raw: Vec<Raw>) -> Vec<Raw> {
+    let mut kept = Vec::with_capacity(raw.len());
+    let mut had = HashSet::new();
+    for r in raw.into_iter().rev() {
+        if !r.element() || had.insert(r.same()) {
+            kept.push(r);
+        }
+    }
+    kept.reverse();
+    let mut went: HashMap<isize, i64> = HashMap::new();
+    let mut ordered: Vec<((i64, u8, usize), Raw)> = Vec::with_capacity(kept.len());
+    for (i, r) in kept.into_iter().enumerate() {
+        let place = if r.opens() {
+            (went.get(&r.hwnd).copied().unwrap_or(-1), 1, i)
+        } else {
+            (i as i64, 0, i)
+        };
+        if r.closes() {
+            went.insert(r.hwnd, i as i64);
+        }
+        ordered.push((place, r));
+    }
+    ordered.sort_by_key(|(place, _)| *place);
+    ordered.into_iter().map(|(_, r)| r).collect()
+}
+
+/// Cuts a queue down to `most` by its oldest element changes, and says
+/// how many went. Windows coming and going all stay.
+fn shed(queue: &mut VecDeque<Raw>, most: usize) -> u32 {
+    let mut over = queue.len().saturating_sub(most);
+    let mut gone = 0;
+    queue.retain(|r| {
+        if over > 0 && r.element() {
+            over -= 1;
+            gone += 1;
+            false
+        } else {
+            true
+        }
+    });
+    gone
+}
+
+/// When an event with tick count `tick` happened, in milliseconds since
+/// watching began, given both clocks now. An event read late keeps its
+/// own time, so a long round is not counted as one moment.
+fn happened_ms(now_ms: u64, now_tick: u32, tick: u32) -> u64 {
+    now_ms.saturating_sub(age_ms(now_tick, tick))
+}
+
+/// How long ago `tick` was. A tick that is not a time (some programs
+/// send none) or lies ahead counts as now.
+fn age_ms(now_tick: u32, tick: u32) -> u64 {
+    const A_DAY: u32 = 86_400_000;
+    let age = now_tick.wrapping_sub(tick);
+    if tick == 0 || age > A_DAY {
+        0
+    } else {
+        age as u64
+    }
+}
+
+/// The time of day `age_ms` before `clock`, both in seconds of the day.
+fn clock_before(clock: u32, age_ms: u64) -> u32 {
+    let back = (age_ms / 1000 % 86_400) as u32;
+    (clock + 86_400 - back) % 86_400
+}
+
 thread_local! {
     static RAW: RefCell<VecDeque<Raw>> = const { RefCell::new(VecDeque::new()) };
     static POKED: Cell<bool> = const { Cell::new(false) };
+    /// Events the queue had no room for, to be said.
+    static DROPPED: Cell<u32> = const { Cell::new(0) };
 }
 
 unsafe extern "system" fn on_event(
@@ -808,19 +1417,22 @@ unsafe extern "system" fn on_event(
     object: i32,
     child: i32,
     _thread: u32,
-    _time: u32,
+    time: u32,
 ) {
-    RAW.with(|r| {
-        let mut r = r.borrow_mut();
-        if r.len() < MOST_RAW {
-            r.push_back(Raw {
-                event,
-                hwnd: hwnd.0 as isize,
-                object,
-                child,
-            });
-        }
-    });
+    let r = Raw {
+        event,
+        hwnd: hwnd.0 as isize,
+        object,
+        child,
+        tick: time,
+    };
+    if !r.matters() {
+        return;
+    }
+    let taken = RAW.with(|q| enqueue(&mut q.borrow_mut(), r, MOST_RAW));
+    if !taken {
+        DROPPED.set(DROPPED.get().saturating_add(1));
+    }
     if !POKED.replace(true) {
         poke(unsafe { GetCurrentThreadId() });
     }
@@ -838,25 +1450,59 @@ struct Known {
 /// in, so their first values are its making and not a change.
 const MAKING: Duration = Duration::from_millis(1000);
 
+/// How long one round reads elements before it leaves the rest to the
+/// next, so a storm in one program does not hold up the answers about
+/// every other, nor the marks taken before each click.
+const READ_BUDGET: Duration = Duration::from_millis(50);
+
+/// How many elements' last values are remembered.
+const MOST_RECALLED: usize = 4000;
+
+/// A program hooked.
+struct Hooked {
+    hooks: Vec<HWINEVENTHOOK>,
+    /// Pins the program's id for as long as it is hooked.
+    held: Held,
+}
+
 /// What the watching thread keeps to itself.
 struct Local {
     windows: HashMap<isize, Known>,
-    values: HashMap<(isize, i32, i32), String>,
-    names: HashMap<(isize, i32, i32), String>,
-    states: HashMap<(isize, i32, i32), u32>,
+    values: Recall<String>,
+    names: Recall<String>,
+    states: Recall<u32>,
     intake: Intake,
     start: Instant,
-    /// Each followed program's hooks, removed when it ends or the thread
-    /// does.
-    hooks: HashMap<u32, Vec<HWINEVENTHOOK>>,
-    /// Rounds since the followed programs were last checked for having
-    /// ended.
-    unchecked: u32,
+    hooked: HashMap<u32, Hooked>,
+    /// Events worth a read that the last round had no time for.
+    pending: VecDeque<Raw>,
+    beat: Arc<AtomicU64>,
 }
 
-/// How many rounds, of a tenth of a second at least, between looks for
-/// programs that ended.
-const CHECK_ENDED: u32 = 50;
+impl Local {
+    fn now_ms(&self) -> u64 {
+        self.start.elapsed().as_millis() as u64
+    }
+
+    /// Notes that the thread is alive, for [`stalled`].
+    fn beat(&self) {
+        self.beat.store(self.now_ms(), Ordering::Release);
+    }
+
+    /// Unhooks program `pid` and forgets its windows and values, so a
+    /// window handle Windows uses again does not get the old title.
+    fn forget(&mut self, pid: u32) {
+        if let Some(h) = self.hooked.remove(&pid) {
+            for hook in h.hooks {
+                let _ = unsafe { UnhookWinEvent(hook) };
+            }
+        }
+        self.windows.retain(|_, k| k.window.pid != pid);
+        self.values.forget(pid);
+        self.names.forget(pid);
+        self.states.forget(pid);
+    }
+}
 
 /// Classes of windows that come and go with no meaning to the agent.
 const NOISE_CLASSES: &[&str] = &[
@@ -868,90 +1514,91 @@ const NOISE_CLASSES: &[&str] = &[
     "ComboLBox",
 ];
 
-fn run(shared: Arc<(Mutex<Shared>, Condvar)>, start: Instant, ready: mpsc::Sender<u32>) {
+fn run(
+    shared: Arc<(Mutex<Shared>, Condvar)>,
+    start: Instant,
+    id: Arc<AtomicU32>,
+    beat: Arc<AtomicU64>,
+) {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let mut msg = MSG::default();
         // A thread has a queue for posted messages once it has asked.
         let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
-        let _ = ready.send(GetCurrentThreadId());
-        // A poke the hooks post can be missed, so the thread also looks
-        // ten times a second.
-        SetTimer(None, 0, 100, None);
         let mut local = Local {
             windows: HashMap::new(),
-            values: HashMap::new(),
-            names: HashMap::new(),
-            states: HashMap::new(),
+            values: Recall::new(MOST_RECALLED),
+            names: Recall::new(MOST_RECALLED),
+            states: Recall::new(MOST_RECALLED),
             intake: Intake::default(),
             start,
-            hooks: HashMap::new(),
-            unchecked: 0,
+            hooked: HashMap::new(),
+            pending: VecDeque::new(),
+            beat,
         };
+        local.beat();
+        id.store(GetCurrentThreadId(), Ordering::Release);
+        // Under the lock, so a caller about to wait for the id hears it.
+        drop(shared.0.lock());
+        shared.1.notify_all();
+        // A poke the hooks post can be missed, so the thread also looks
+        // ten times a second, which is its heartbeat too.
+        SetTimer(None, 0, 100, None);
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             round(&shared, &mut local);
         }
-        for h in local.hooks.into_values().flatten() {
-            let _ = UnhookWinEvent(h);
+        let pids: Vec<u32> = local.hooked.keys().copied().collect();
+        for pid in pids {
+            local.forget(pid);
+        }
+        // Nothing is watched any more, and the next follow starts anew.
+        id.store(0, Ordering::Release);
+        if let Ok(mut s) = shared.0.lock() {
+            s.followed.clear();
+            s.spawned = false;
         }
     }
 }
 
-/// Whether program `pid` has ended. One that can not be opened for some
-/// other reason than being gone is taken as running.
-fn ended(pid: u32) -> bool {
-    const STILL_ACTIVE: u32 = 259;
-    unsafe {
-        match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
-            Ok(p) => {
-                let mut code = 0u32;
-                let read = GetExitCodeProcess(p, &mut code).is_ok();
-                let _ = CloseHandle(p);
-                read && code != STILL_ACTIVE
-            }
-            Err(e) => e.code() == ERROR_INVALID_PARAMETER.to_hresult(),
-        }
-    }
-}
-
-/// Unhooks the programs that ended, so their numbers, once Windows hands
-/// them to another program, are hooked afresh.
-fn drop_ended(shared: &Arc<(Mutex<Shared>, Condvar)>, local: &mut Local) {
-    local.unchecked += 1;
-    if local.unchecked < CHECK_ENDED {
-        return;
-    }
-    local.unchecked = 0;
-    let gone: Vec<u32> = local.hooks.keys().copied().filter(|&p| ended(p)).collect();
-    if gone.is_empty() {
-        return;
-    }
-    for pid in &gone {
-        for h in local.hooks.remove(pid).unwrap_or_default() {
-            let _ = unsafe { UnhookWinEvent(h) };
-        }
-    }
-    if let Ok(mut s) = shared.0.lock() {
-        for pid in &gone {
-            s.followed.remove(pid);
-        }
-    }
-}
-
-/// Hooks newly asked programs and reads the events that came.
+/// Hooks newly asked programs, unhooks those that ended or were dropped,
+/// and reads the events that came, as many as its time allows.
 fn round(shared: &Arc<(Mutex<Shared>, Condvar)>, local: &mut Local) {
+    local.beat();
     let (lock, changed) = &**shared;
-    let asked: Vec<u32> = lock
+    let (asked, dropped) = lock
         .lock()
-        .map(|mut s| std::mem::take(&mut s.asked))
+        .map(|mut s| {
+            (
+                std::mem::take(&mut s.asked),
+                std::mem::take(&mut s.dropped),
+            )
+        })
         .unwrap_or_default();
-    drop_ended(shared, local);
-    for pid in &asked {
-        let hooks = local.hooks.entry(*pid).or_default();
+    // Looked at every round: the handle answers without a call into the
+    // program, and an ended program's hooks must not last.
+    let ended: Vec<u32> = local
+        .hooked
+        .iter()
+        .filter(|(_, h)| h.held.ended())
+        .map(|(pid, _)| *pid)
+        .collect();
+    for pid in ended.iter().chain(&dropped) {
+        local.forget(*pid);
+    }
+    let mut hooked = Vec::new();
+    let mut failed = Vec::new();
+    for ask in asked {
+        let pid = ask.window.pid;
         // Asked twice before the first round answered: hooked once.
-        if !hooks.is_empty() {
+        if local.hooked.contains_key(&pid) {
+            hooked.push(ask.window);
             continue;
         }
+        if ask.held.ended() {
+            failed.push((pid, ask.window.exe, "the program has ended".to_string()));
+            continue;
+        }
+        let mut hooks = Vec::new();
         for (min, max) in HOOKED {
             let h = unsafe {
                 SetWinEventHook(
@@ -959,16 +1606,29 @@ fn round(shared: &Arc<(Mutex<Shared>, Condvar)>, local: &mut Local) {
                     max,
                     None,
                     Some(on_event),
-                    *pid,
+                    pid,
                     0,
                     WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
                 )
             };
-            if !h.is_invalid() {
-                hooks.push(h);
+            if h.is_invalid() {
+                break;
             }
+            hooks.push(h);
         }
-        for w in windows_of(*pid) {
+        // Half hooked would read as watched and tell half: all or none.
+        if hooks.len() < HOOKED.len() {
+            for h in hooks {
+                let _ = unsafe { UnhookWinEvent(h) };
+            }
+            failed.push((
+                pid,
+                ask.window.exe,
+                "Windows would not let its events be hooked".to_string(),
+            ));
+            continue;
+        }
+        for w in windows_of(pid) {
             local.windows.insert(
                 w.hwnd,
                 Known {
@@ -978,59 +1638,87 @@ fn round(shared: &Arc<(Mutex<Shared>, Condvar)>, local: &mut Local) {
                 },
             );
         }
-    }
-    POKED.set(false);
-    let mut raw: Vec<Raw> = RAW.with(|r| r.borrow_mut().drain(..).collect());
-    // Of a burst on one element only the last is read: it has the value
-    // the others led to.
-    let mut kept = Vec::with_capacity(raw.len());
-    let mut had = HashSet::new();
-    while let Some(r) = raw.pop() {
-        let element = matches!(
-            r.event,
-            EVENT_NAMECHANGE | EVENT_VALUECHANGE | EVENT_STATECHANGE
+        local.hooked.insert(
+            pid,
+            Hooked {
+                hooks,
+                held: ask.held,
+            },
         );
-        if !element || had.insert(r) {
-            kept.push(r);
+        hooked.push(ask.window);
+    }
+
+    POKED.set(false);
+    let came: Vec<Raw> = RAW.with(|r| r.borrow_mut().drain(..).collect());
+    let (now_ms, now_tick) = (local.now_ms(), unsafe { GetTickCount() });
+    let idle = came.is_empty() && local.pending.is_empty();
+    local.intake.lose(DROPPED.replace(0));
+    // Which are worth a read is settled before any is read: a read is a
+    // call into the program, and a grid of thousands of cells refreshing
+    // must not cost thousands of them.
+    for r in fold_burst(came) {
+        if !r.element() || local.intake.admit(happened_ms(now_ms, now_tick, r.tick)) {
+            local.pending.push_back(r);
         }
     }
-    kept.reverse();
-    // Windows shown first: the elements filled in as one is made say so
-    // before it shows, and are known as its making only once it is.
-    kept.sort_by_key(|r| !matches!(r.event, EVENT_SHOW | EVENT_DIALOGSTART));
-    let mut fresh = Vec::new();
-    for r in kept {
-        if let Some(c) = read(local, r) {
-            fresh.push(c);
-        }
-    }
-    if local.values.len() > 4000 {
-        local.values.clear();
-        local.names.clear();
-        local.states.clear();
-    }
+    let mut queue: VecDeque<Raw> = fold_burst(local.pending.drain(..).collect()).into();
+    let over = shed(&mut queue, MOST_RAW);
+    local.intake.lose(over);
     let clock = unsafe {
         let t = GetLocalTime();
         t.wHour as u32 * 3600 + t.wMinute as u32 * 60 + t.wSecond as u32
     };
-    if let Ok(mut s) = lock.lock() {
-        for mut c in fresh {
-            c.at_ms = local.start.elapsed().as_millis() as u64;
-            c.clock = clock;
-            let (take, skipped) = local.intake.admit(c.at_ms);
-            if let Some(n) = skipped {
-                let mut note = c.clone();
-                note.what = What::Skipped(n);
-                note.key = None;
-                note.to = n.to_string();
-                s.ring.push(note);
-            }
-            if take {
-                s.ring.push(c);
-            }
+    let began = Instant::now();
+    let mut fresh = Vec::new();
+    while let Some(r) = queue.pop_front() {
+        if let Some(mut c) = read(local, r) {
+            let age = age_ms(now_tick, r.tick);
+            c.at_ms = now_ms.saturating_sub(age);
+            c.clock = clock_before(clock, age);
+            fresh.push(c);
         }
-        s.followed.extend(asked);
+        local.beat();
+        if began.elapsed() >= READ_BUDGET {
+            break;
+        }
+    }
+    local.pending = queue;
+    let behind = !local.pending.is_empty();
+    if behind && !POKED.replace(true) {
+        // The rest at once, not at the next tick of the timer.
+        poke(unsafe { GetCurrentThreadId() });
+    }
+    let skipped = local.intake.take_skipped(now_ms, idle).map(|n| {
+        let mut note = Change::skipped(n);
+        note.at_ms = now_ms;
+        note.clock = clock;
+        note
+    });
+    if let Ok(mut s) = lock.lock() {
+        for c in fresh {
+            s.ring.push(c);
+        }
+        if let Some(note) = skipped {
+            s.ring.push(note);
+        }
+        for pid in &ended {
+            s.followed.remove(pid);
+        }
+        for pid in &dropped {
+            // Again, for what a round under way recorded since it was
+            // asked to stop.
+            s.followed.remove(pid);
+            s.ring.forget(*pid);
+        }
+        for w in hooked {
+            s.failed.remove(&w.pid);
+            s.followed.insert(w.pid, w);
+        }
+        for (pid, exe, why) in failed {
+            s.failed.insert(pid, (exe, why));
+        }
         s.rounds += 1;
+        s.behind = behind;
     }
     changed.notify_all();
 }
@@ -1047,11 +1735,7 @@ fn windows_of(pid: u32) -> Vec<Window> {
         let _ = EnumWindows(Some(each_window), LPARAM(&mut all as *mut _ as isize));
     }
     all.into_iter()
-        .filter(|&h| {
-            let mut p = 0;
-            unsafe { GetWindowThreadProcessId(HWND(h as *mut _), Some(&mut p)) };
-            p == pid && unsafe { IsWindowVisible(HWND(h as *mut _)) }.as_bool()
-        })
+        .filter(|&h| pid_of(h) == pid && unsafe { IsWindowVisible(HWND(h as *mut _)) }.as_bool())
         .map(info)
         .filter(worth_showing)
         .collect()
@@ -1073,14 +1757,18 @@ fn class_of(h: isize) -> String {
     String::from_utf16_lossy(&buf[..n.max(0) as usize])
 }
 
-/// The top level window `h` is in, named, known ones from memory.
-fn top_of(local: &Local, h: isize) -> Window {
+fn root_of(h: isize) -> isize {
     let root = unsafe { GetAncestor(HWND(h as *mut _), GA_ROOT) };
-    let root = if root.is_invalid() {
+    if root.is_invalid() {
         h
     } else {
         root.0 as isize
-    };
+    }
+}
+
+/// The top level window `h` is in, named, known ones from memory.
+fn top_of(local: &Local, h: isize) -> Window {
+    let root = root_of(h);
     match local.windows.get(&root) {
         Some(k) => k.window.clone(),
         None => info(root),
@@ -1089,9 +1777,15 @@ fn top_of(local: &Local, h: isize) -> Window {
 
 /// The change one event makes, none when it says nothing new.
 fn read(local: &mut Local, r: Raw) -> Option<Change> {
-    let whole = r.object == OBJID_WINDOW && r.child == CHILDID_SELF;
+    // A hook is set by a program's id, so what it delivers is checked
+    // against the programs watched now: an event still queued from one
+    // that ended or was dropped tells nothing. A window going is known by
+    // its entry instead, as Windows no longer says whose it was.
+    if !r.closes() && !local.hooked.contains_key(&pid_of(r.hwnd)) {
+        return None;
+    }
     match r.event {
-        EVENT_SHOW | EVENT_DIALOGSTART if whole || r.event == EVENT_DIALOGSTART => {
+        EVENT_SHOW | EVENT_DIALOGSTART if r.opens() => {
             if !is_top(r.hwnd) || !unsafe { IsWindowVisible(HWND(r.hwnd as *mut _)) }.as_bool() {
                 return None;
             }
@@ -1113,7 +1807,7 @@ fn read(local: &mut Local, r: Raw) -> Option<Change> {
             );
             Some(c)
         }
-        EVENT_HIDE | EVENT_DESTROY | EVENT_DIALOGEND if whole || r.event == EVENT_DIALOGEND => {
+        EVENT_HIDE | EVENT_DESTROY | EVENT_DIALOGEND if r.closes() => {
             let k = local.windows.get_mut(&r.hwnd)?;
             let was = std::mem::replace(&mut k.visible, false);
             let c = Change::of(What::Closed, &k.window);
@@ -1147,7 +1841,7 @@ fn read(local: &mut Local, r: Raw) -> Option<Change> {
         }
         // A top level window's name is its title, told only once it is
         // known: before, it is still being made.
-        EVENT_NAMECHANGE if whole && is_top(r.hwnd) => {
+        EVENT_NAMECHANGE if r.whole() && is_top(r.hwnd) => {
             let k = local.windows.get_mut(&r.hwnd)?;
             let title = info(r.hwnd).title;
             if k.window.title == title {
@@ -1171,10 +1865,10 @@ fn element(local: &mut Local, mut r: Raw) -> Option<Change> {
     }
     // A control that is a window of its own says a change twice, as the
     // window and as its content. The content has its real role.
-    if r.object == OBJID_WINDOW && r.child == CHILDID_SELF {
+    if r.whole() {
         r.object = OBJID_CLIENT;
     }
-    let root = unsafe { GetAncestor(HWND(r.hwnd as *mut _), GA_ROOT) }.0 as isize;
+    let root = root_of(r.hwnd);
     let making = match local.windows.get(&root) {
         Some(k) => k.shown.is_some_and(|at| at.elapsed() < MAKING),
         None => !unsafe { IsWindowVisible(HWND(root as *mut _)) }.as_bool(),
@@ -1188,17 +1882,30 @@ fn element(local: &mut Local, mut r: Raw) -> Option<Change> {
     };
     let mut c = Change::of(what, &w);
     c.key = Some(key);
-    // A window that runs as administrator answers nothing to a reader that
-    // does not, so the change is kept without what it was: still worth
-    // knowing for a wait until things are quiet.
-    let Some((role, name, value, state)) = (unsafe { read_element(r) }) else {
+    // A read is a call into the program, with no limit of its own: one
+    // that Windows already knows does not answer is not called at all.
+    // A window that runs as administrator answers nothing to a reader
+    // that does not. Either way the change is kept without what it was:
+    // still worth knowing for a wait until things are quiet.
+    let hung = unsafe { IsHungAppWindow(HWND(root as *mut _)) }.as_bool();
+    let seen = if hung {
+        None
+    } else {
+        unsafe { read_element(r, what == What::Value) }
+    };
+    let Some(seen) = seen else {
         return (what == What::Value).then_some(c);
     };
-    c.role = role_name(role).to_string();
-    c.name = name.clone();
+    c.role = role_name(seen.role).to_string();
+    c.name = seen.name.clone();
+    if seen.protected {
+        // Should it have been readable before it turned protected.
+        local.values.remove(&key);
+    }
     match what {
         What::Name => {
-            let before = local.names.insert(key, name.clone());
+            let name = seen.name;
+            let before = local.names.insert(key, w.pid, name.clone());
             if before.as_deref() == Some(name.as_str()) || name.is_empty() {
                 return None;
             }
@@ -1210,9 +1917,11 @@ fn element(local: &mut Local, mut r: Raw) -> Option<Change> {
             c.from = before;
             c.to = name;
         }
+        // A password's field: that it changed is told, never to what.
+        What::Value if seen.protected => c.hidden = true,
         What::Value => {
-            let value = value?;
-            let before = local.values.insert(key, value.clone());
+            let value = seen.value?;
+            let before = local.values.insert(key, w.pid, value.clone());
             if before.as_deref() == Some(value.as_str()) {
                 return None;
             }
@@ -1220,20 +1929,32 @@ fn element(local: &mut Local, mut r: Raw) -> Option<Change> {
             c.to = value;
         }
         _ => {
-            let before = local.states.insert(key, state);
-            if before == Some(state) {
+            let before = local.states.insert(key, w.pid, seen.state);
+            if before == Some(seen.state) {
                 return None;
             }
-            state_change(before, state)?;
-            c.states = Some((before, state));
+            state_change(before, seen.state)?;
+            c.states = Some((before, seen.state));
         }
     }
     let first = c.from.is_none() && c.states.is_none_or(|(b, _)| b.is_none());
     (!(making && first)).then_some(c)
 }
 
-/// The role, name, value and state of the element an event names.
-unsafe fn read_element(r: Raw) -> Option<(i32, String, Option<String>, u32)> {
+/// What an element says of itself.
+struct Seen {
+    role: i32,
+    name: String,
+    /// None when it has none, was not asked for, or is protected.
+    value: Option<String>,
+    state: u32,
+    protected: bool,
+}
+
+/// The element an event names, its value only when `with_value` and the
+/// element is not protected: the state is read first, so a password is
+/// never asked for, whatever the program would answer.
+unsafe fn read_element(r: Raw, with_value: bool) -> Option<Seen> {
     unsafe {
         let mut acc: Option<IAccessible> = None;
         let mut child = VARIANT::default();
@@ -1246,6 +1967,12 @@ unsafe fn read_element(r: Raw) -> Option<(i32, String, Option<String>, u32)> {
         )
         .ok()?;
         let acc = acc?;
+        let state = acc
+            .get_accState(&child)
+            .ok()
+            .and_then(|v| i32::try_from(&v).ok())
+            .unwrap_or(0) as u32;
+        let protected = state & STATE_PROTECTED != 0;
         let role = acc
             .get_accRole(&child)
             .ok()
@@ -1255,13 +1982,18 @@ unsafe fn read_element(r: Raw) -> Option<(i32, String, Option<String>, u32)> {
             .get_accName(&child)
             .map(|b| b.to_string())
             .unwrap_or_default();
-        let value = acc.get_accValue(&child).ok().map(|b| b.to_string());
-        let state = acc
-            .get_accState(&child)
-            .ok()
-            .and_then(|v| i32::try_from(&v).ok())
-            .unwrap_or(0) as u32;
-        Some((role, name, value, state))
+        let value = if with_value && !protected {
+            acc.get_accValue(&child).ok().map(|b| b.to_string())
+        } else {
+            None
+        };
+        Some(Seen {
+            role,
+            name,
+            value,
+            state,
+            protected,
+        })
     }
 }
 
@@ -1467,12 +2199,439 @@ pub(crate) mod tests {
     fn a_storm_is_cut_and_counted() {
         let mut i = Intake::default();
         for n in 0..MOST_PER_SECOND {
-            assert_eq!(i.admit(1000 + n as u64), (true, None));
+            assert!(i.admit(1000 + n as u64));
         }
-        assert_eq!(i.admit(1500), (false, None));
-        assert_eq!(i.admit(1600), (false, None));
-        assert_eq!(i.admit(2100), (true, Some(2)));
-        assert_eq!(i.admit(2200), (true, None));
+        assert!(!i.admit(1500));
+        assert!(!i.admit(1600));
+        // Not said while the second it happened in still runs.
+        assert_eq!(i.take_skipped(1900, false), None);
+        assert!(i.admit(2100));
+        assert_eq!(i.take_skipped(2100, false), Some(2));
+        assert_eq!(i.take_skipped(2100, false), None);
+        assert!(i.admit(2200));
+    }
+
+    #[test]
+    fn what_was_skipped_is_said_without_a_later_change() {
+        let mut i = Intake::default();
+        for _ in 0..MOST_PER_SECOND + 3 {
+            i.admit(1000);
+        }
+        // Nothing more came: said at once, not when something changes.
+        assert_eq!(i.take_skipped(1100, true), Some(3));
+        assert_eq!(i.take_skipped(5000, true), None);
+        // What the queue had no room for is counted with it.
+        i.lose(7);
+        assert_eq!(i.take_skipped(1100, false), None);
+        assert_eq!(i.take_skipped(2000, false), Some(7));
+    }
+
+    #[test]
+    fn a_storm_admits_a_second_s_worth_however_late_it_is_read() {
+        // 5000 cells refreshed in one second, read in a round much later:
+        // their own times count, so 60 are read and the rest only counted.
+        let mut i = Intake::default();
+        let read = (0..5000u64).filter(|n| i.admit(3000 + n % 900)).count();
+        assert_eq!(read, MOST_PER_SECOND as usize);
+        assert_eq!(i.take_skipped(9000, false), Some(5000 - MOST_PER_SECOND));
+        // A change read out of order does not open a second already over.
+        let mut i = Intake::default();
+        assert!(i.admit(5000));
+        for _ in 0..MOST_PER_SECOND {
+            i.admit(4999);
+        }
+        assert!(!i.admit(5000));
+    }
+
+    fn raw(event: u32, hwnd: isize) -> Raw {
+        Raw {
+            event,
+            hwnd,
+            object: OBJID_WINDOW,
+            child: CHILDID_SELF,
+            tick: 0,
+        }
+    }
+
+    fn cell(event: u32, hwnd: isize, child: i32) -> Raw {
+        Raw {
+            event,
+            hwnd,
+            object: OBJID_CLIENT,
+            child,
+            tick: 0,
+        }
+    }
+
+    #[test]
+    fn a_window_hidden_and_shown_again_in_one_burst_ends_shown() {
+        let burst = vec![raw(EVENT_HIDE, 7), raw(EVENT_SHOW, 7)];
+        assert_eq!(fold_burst(burst.clone()), burst);
+        // With other things between, the showing goes right behind the
+        // hiding, not ahead of it.
+        let burst = vec![
+            cell(EVENT_VALUECHANGE, 9, 1),
+            raw(EVENT_HIDE, 7),
+            cell(EVENT_VALUECHANGE, 9, 2),
+            raw(EVENT_SHOW, 7),
+        ];
+        let events: Vec<(u32, isize)> = fold_burst(burst)
+            .iter()
+            .map(|r| (r.event, r.hwnd))
+            .collect();
+        assert_eq!(
+            events,
+            [
+                (EVENT_VALUECHANGE, 9),
+                (EVENT_HIDE, 7),
+                (EVENT_SHOW, 7),
+                (EVENT_VALUECHANGE, 9)
+            ]
+        );
+        // Shown, hidden and shown: all three, in the order they came.
+        let burst = vec![
+            raw(EVENT_SHOW, 7),
+            raw(EVENT_DESTROY, 7),
+            raw(EVENT_SHOW, 7),
+        ];
+        assert_eq!(fold_burst(burst.clone()), burst);
+    }
+
+    #[test]
+    fn a_window_shown_goes_ahead_of_its_elements_filled_in_before() {
+        let burst = vec![
+            cell(EVENT_VALUECHANGE, 9, 1),
+            cell(EVENT_NAMECHANGE, 9, 2),
+            raw(EVENT_SHOW, 7),
+            raw(EVENT_DIALOGSTART, 8),
+            raw(EVENT_HIDE, 5),
+        ];
+        let events: Vec<u32> = fold_burst(burst).iter().map(|r| r.event).collect();
+        assert_eq!(
+            events,
+            [
+                EVENT_SHOW,
+                EVENT_DIALOGSTART,
+                EVENT_VALUECHANGE,
+                EVENT_NAMECHANGE,
+                EVENT_HIDE
+            ]
+        );
+    }
+
+    #[test]
+    fn of_a_burst_on_one_element_only_the_last_is_read() {
+        let mut burst: Vec<Raw> = (0..1000)
+            .map(|n| Raw {
+                tick: n,
+                ..cell(EVENT_VALUECHANGE, 9, 1)
+            })
+            .collect();
+        burst.push(cell(EVENT_STATECHANGE, 9, 1));
+        burst.push(cell(EVENT_VALUECHANGE, 9, 2));
+        let folded = fold_burst(burst);
+        assert_eq!(folded.len(), 3);
+        // The last of the thousand, with its own time.
+        assert_eq!(folded[0].tick, 999);
+        // Windows coming and going are never folded together.
+        let twice = vec![raw(EVENT_HIDE, 7), raw(EVENT_HIDE, 7)];
+        assert_eq!(fold_burst(twice).len(), 2);
+    }
+
+    #[test]
+    fn only_whole_windows_coming_and_going_matter() {
+        assert!(raw(EVENT_SHOW, 7).matters());
+        assert!(raw(EVENT_DESTROY, 7).closes());
+        assert!(raw(EVENT_DIALOGEND, 7).closes());
+        assert!(raw(EVENT_DIALOGSTART, 7).opens());
+        // A part of a window destroyed: a flood nobody tells.
+        assert!(!cell(EVENT_DESTROY, 7, 3).matters());
+        assert!(!cell(EVENT_DESTROY, 7, 3).closes());
+        assert!(cell(EVENT_VALUECHANGE, 7, 3).matters());
+        assert!(cell(EVENT_VALUECHANGE, 7, 3).element());
+        assert!(raw(EVENT_FOREGROUND, 7).matters());
+    }
+
+    #[test]
+    fn a_full_queue_never_loses_a_window_going() {
+        let mut q = VecDeque::new();
+        assert!(enqueue(&mut q, raw(EVENT_SHOW, 1), 3));
+        assert!(enqueue(&mut q, cell(EVENT_VALUECHANGE, 9, 1), 3));
+        assert!(enqueue(&mut q, cell(EVENT_VALUECHANGE, 9, 2), 3));
+        // Full: an element's change is lost, and said to be.
+        assert!(!enqueue(&mut q, cell(EVENT_VALUECHANGE, 9, 3), 3));
+        assert_eq!(q.len(), 3);
+        // A window going takes the place of the oldest element's change.
+        assert!(!enqueue(&mut q, raw(EVENT_DESTROY, 1), 3));
+        assert_eq!(q.len(), 3);
+        assert_eq!(q.back().map(|r| r.event), Some(EVENT_DESTROY));
+        assert_eq!(q.iter().filter(|r| r.element()).count(), 1);
+        // With only windows queued it is held past the limit.
+        assert!(!enqueue(&mut q, raw(EVENT_HIDE, 2), 3));
+        assert!(enqueue(&mut q, raw(EVENT_HIDE, 3), 3));
+        assert_eq!(q.len(), 4);
+        assert_eq!(q.iter().filter(|r| r.closes()).count(), 3);
+    }
+
+    #[test]
+    fn a_long_queue_sheds_its_oldest_element_changes_only() {
+        let mut q: VecDeque<Raw> = vec![
+            cell(EVENT_VALUECHANGE, 9, 1),
+            raw(EVENT_DESTROY, 1),
+            cell(EVENT_VALUECHANGE, 9, 2),
+            cell(EVENT_VALUECHANGE, 9, 3),
+        ]
+        .into();
+        assert_eq!(shed(&mut q, 10), 0);
+        assert_eq!(shed(&mut q, 2), 2);
+        let left: Vec<(u32, i32)> = q.iter().map(|r| (r.event, r.child)).collect();
+        assert_eq!(left, [(EVENT_DESTROY, 0), (EVENT_VALUECHANGE, 3)]);
+    }
+
+    #[test]
+    fn each_change_has_the_time_it_happened_not_the_time_it_was_read() {
+        // Read 700 ms after it happened, in a round at 10 s.
+        assert_eq!(happened_ms(10_000, 50_700, 50_000), 9_300);
+        // The tick count wraps every 49 days.
+        assert_eq!(age_ms(5, u32::MAX - 4), 10);
+        // No time given, or one that can not be right, counts as now.
+        assert_eq!(happened_ms(10_000, 50_700, 0), 10_000);
+        assert_eq!(age_ms(1000, 2000), 0);
+        assert_eq!(happened_ms(300, 50_700, 50_000), 0);
+        assert_eq!(clock_before(3605, 6_900), 3599);
+        assert_eq!(clock_before(2, 5_000), 86_397);
+    }
+
+    #[test]
+    fn recall_forgets_the_longest_untouched_not_everything() {
+        let mut r: Recall<String> = Recall::new(8);
+        for n in 0..8 {
+            assert_eq!(r.insert((n, 0, 0), 7, format!("v{n}")), None);
+        }
+        // Touched again, so it is not among the oldest.
+        assert_eq!(r.insert((0, 0, 0), 7, "again".into()).as_deref(), Some("v0"));
+        // One too many: the two longest untouched go, the rest stay.
+        r.insert((100, 0, 0), 7, "new".into());
+        assert_eq!(r.len(), 7);
+        assert_eq!(r.insert((0, 0, 0), 7, "x".into()).as_deref(), Some("again"));
+        assert_eq!(r.insert((1, 0, 0), 7, "x".into()), None);
+        assert_eq!(r.insert((3, 0, 0), 7, "x".into()).as_deref(), Some("v3"));
+    }
+
+    #[test]
+    fn recall_forgets_a_program_that_ended() {
+        let mut r: Recall<u32> = Recall::new(100);
+        r.insert((1, 0, 0), 7, 1);
+        r.insert((2, 0, 0), 8, 2);
+        r.forget(7);
+        assert_eq!(r.len(), 1);
+        // A window handle used again starts with nothing known.
+        assert_eq!(r.insert((1, 0, 0), 9, 5), None);
+        r.remove(&(1, 0, 0));
+        assert_eq!(r.insert((1, 0, 0), 9, 6), None);
+        assert!(!r.is_empty());
+    }
+
+    #[test]
+    fn the_ring_forgets_a_program_no_longer_allowed() {
+        let mut r = Ring::new(10);
+        r.push(value(0, None, "secret"));
+        let mut other = value(5000, None, "kept");
+        other.pid = 8;
+        r.push(other);
+        r.push(Change::skipped(4));
+        r.forget(7);
+        let (all, lost) = r.since(0);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].to, "kept");
+        assert_eq!(all[1].what, What::Skipped(4));
+        // The count goes on, so a reader's place still means the same.
+        assert!(!lost);
+        assert_eq!(r.newest(), 3);
+    }
+
+    #[test]
+    fn skipped_notes_are_each_kept() {
+        let mut r = Ring::new(10);
+        assert!(r.push(Change::skipped(4)));
+        assert!(r.push(Change::skipped(4)));
+        assert_eq!(r.since(0).0.len(), 2);
+    }
+
+    #[test]
+    fn a_text_wait_matches_only_what_a_change_brought() {
+        let u = |t: &str| Until {
+            text: Some(t.into()),
+            ..Default::default()
+        };
+        let hit = |t: &str, c: &Change| verdict(&u(t), &[], &[c.clone()], 0, 0, None).is_some();
+        // The title of the window a value changed in did not appear.
+        let v = value(0, Some("a"), "b");
+        assert!(!hit("Settings", &v));
+        // Nor did the element's own name, nor the value it had before.
+        assert!(!hit("IP address", &v));
+        assert!(!hit("a", &v));
+        assert!(hit("b", &v));
+        // A state change brings no text at all.
+        let mut s = Change::of(What::State, &win("Online"));
+        s.name = "Online".into();
+        s.states = Some((Some(0), STATE_CHECKED));
+        assert!(!hit("Online", &s));
+        // The front moving to a window does not make its title appear.
+        assert!(!hit("Settings", &Change::of(What::Front, &win("Settings"))));
+        assert!(!hit("Settings", &Change::of(What::Closed, &win("Settings"))));
+        // A window shown, a new title and a new name do.
+        assert!(hit("Settings", &Change::of(What::Shown, &win("Settings"))));
+        let mut t = Change::of(What::Title, &win("Done"));
+        t.from = Some("Working".into());
+        t.to = "Done".into();
+        assert!(hit("done", &t));
+        assert!(!hit("working", &t));
+        let mut n = Change::of(What::Name, &win("w"));
+        n.from = Some("Loading".into());
+        n.to = "Ready".into();
+        assert!(hit("ready", &n));
+        assert!(!hit("loading", &n));
+    }
+
+    #[test]
+    fn a_text_wait_never_matches_a_skipped_note_or_a_protected_value() {
+        let u = Until {
+            text: Some("5".into()),
+            ..Default::default()
+        };
+        let note = Change::skipped(5);
+        assert_eq!(verdict(&u, &[], &[note.clone()], 0, 0, None), None);
+        assert_eq!(note.brought(), None);
+        assert_eq!(note.title, "");
+        let mut p = value(0, None, "");
+        p.hidden = true;
+        let any = Until {
+            text: Some("IP".into()),
+            ..Default::default()
+        };
+        assert_eq!(verdict(&any, &[], &[p.clone()], 0, 0, None), None);
+        assert_eq!(
+            brief(&p),
+            "Edit \"IP address\" changed in \"Settings\" (its value is protected and was not \
+             read)"
+        );
+    }
+
+    #[test]
+    fn a_silent_watcher_is_stalled_and_nothing_is_quiet_then() {
+        assert_eq!(stall(1000, 1100), None);
+        assert_eq!(stall(1000, 1000 + STALLED_MS - 1), None);
+        assert_eq!(stall(1000, 1000 + STALLED_MS), Some(STALLED_MS / 1000));
+        assert_eq!(stall(1000, 8500), Some(7));
+        // A beat stamped a moment after the time was taken is not a stall.
+        assert_eq!(stall(1200, 1000), None);
+        let u = Until {
+            quiet_ms: Some(1000),
+            ..Default::default()
+        };
+        assert!(verdict(&u, &[], &[], 0, 5000, None).is_some());
+        assert_eq!(verdict(&u, &[], &[], 0, 5000, Some(4)), None);
+        // What does not lean on the watcher still holds.
+        let both = Until {
+            quiet_ms: Some(1000),
+            appears: Some("Save".into()),
+            ..Default::default()
+        };
+        assert!(verdict(&both, &["Save As".to_string()], &[], 0, 5000, Some(4)).is_some());
+        assert_eq!(
+            stall_text(7),
+            "the watcher has not answered for 7 s (a watched program may be hung)"
+        );
+        let said = changes_text(&[], 4, 4, false, " in app.exe", Some(7));
+        assert!(said.contains("has not answered for 7 s"), "{said}");
+        assert!(!said.contains("Nothing changed"), "{said}");
+        let part = changes_part(&[], false, "", Some(7));
+        assert!(part.contains("has not answered for 7 s"), "{part}");
+        assert!(!part.contains("Nothing changed"), "{part}");
+    }
+
+    #[test]
+    fn quiet_counts_from_the_latest_change_whatever_their_order() {
+        let u = Until {
+            quiet_ms: Some(1000),
+            ..Default::default()
+        };
+        let seen = [value(1900, None, "late"), value(1200, None, "early")];
+        assert_eq!(verdict(&u, &[], &seen, 0, 2500, None), None);
+        assert!(verdict(&u, &[], &seen, 0, 2900, None).is_some());
+    }
+
+    #[test]
+    fn a_wait_tells_what_came_before_it_apart_from_what_it_saw() {
+        let numbered = |seq: u64, to: &str| {
+            let mut c = value(seq * 5000, None, to);
+            c.seq = seq;
+            c
+        };
+        // The session read up to #2; the wait began at #4 and ended at #6.
+        let list = vec![numbered(3, "c"), numbered(4, "d"), numbered(6, "f")];
+        let (before, after) = split_at(list, 4);
+        assert_eq!(
+            before.iter().map(|c| c.seq).collect::<Vec<_>>(),
+            [3, 4],
+            "untold changes from before the wait are told, not dropped"
+        );
+        assert_eq!(after.iter().map(|c| c.seq).collect::<Vec<_>>(), [6]);
+        // Only what came after decides the verdict.
+        let u = Until {
+            text: Some("d".into()),
+            ..Default::default()
+        };
+        assert_eq!(verdict(&u, &[], &after, 0, 0, None), None);
+        let said = meanwhile_text(&before, &after, false, None, false);
+        let lines: Vec<&str> = said.lines().collect();
+        assert_eq!(lines[0], "");
+        assert_eq!(lines[1], "Before the wait:");
+        assert!(lines[2].contains("\"c\""));
+        assert!(lines[3].contains("\"d\""));
+        assert_eq!(lines[4], "Meanwhile:");
+        assert!(lines[5].contains("\"f\""));
+        assert_eq!(lines.len(), 6);
+    }
+
+    #[test]
+    fn a_wait_says_what_it_left_out_and_what_was_lost() {
+        assert_eq!(
+            meanwhile_text(&[], &[], false, None, false),
+            " Nothing changed meanwhile."
+        );
+        assert_eq!(meanwhile_text(&[], &[], false, None, true), "");
+        let one = meanwhile_text(&[], &[value(0, None, "x")], false, None, false);
+        assert!(one.starts_with(" Meanwhile:\n"), "{one}");
+        let many: Vec<Change> = (0..MOST_LINES + 20).map(|_| value(0, None, "x")).collect();
+        let said = meanwhile_text(&many[..30], &many, true, None, false);
+        assert!(said.contains("pushed out before they were told"), "{said}");
+        assert!(said.contains("(20 earlier changes left out.)"), "{said}");
+        // No room for the lines from before the wait: said, not dropped.
+        assert!(
+            said.contains("Before the wait:\n(30 earlier changes left out.)"),
+            "{said}"
+        );
+        assert_eq!(said.matches("value now").count(), MOST_LINES);
+        let before = meanwhile_text(&many[..3], &[], false, None, false);
+        assert!(before.ends_with("\nNothing changed meanwhile."), "{before}");
+        let stuck = meanwhile_text(&[], &[], false, Some(9), true);
+        assert!(stuck.contains("has not answered for 9 s"), "{stuck}");
+        assert!(!stuck.contains("Nothing changed"), "{stuck}");
+    }
+
+    #[test]
+    fn a_since_past_the_newest_says_the_numbering_started_over() {
+        assert_eq!(cursor_from(None, 12, 20), (12, None));
+        assert_eq!(cursor_from(Some(5), 12, 20), (5, None));
+        assert_eq!(cursor_from(Some(20), 12, 20), (20, None));
+        let (from, note) = cursor_from(Some(400), 0, 3);
+        assert_eq!(from, 0);
+        let note = note.unwrap();
+        assert!(note.contains("no change #400"), "{note}");
+        assert!(note.contains("started over"), "{note}");
+        assert!(note.contains("#3"), "{note}");
     }
 
     #[test]
@@ -1564,7 +2723,7 @@ pub(crate) mod tests {
     #[test]
     fn the_changes_answer_lists_newest_last_and_says_where_to_go_on() {
         assert_eq!(
-            changes_text(&[], 4, 4, false, " in app.exe"),
+            changes_text(&[], 4, 4, false, " in app.exe", None),
             "Nothing changed in app.exe since #4. The next desktop_changes starts after #4 by \
              itself."
         );
@@ -1572,7 +2731,7 @@ pub(crate) mod tests {
         a.seq = 5;
         let mut b = Change::of(What::Front, &win("Settings"));
         b.seq = 6;
-        let text = changes_text(&[a, b], 4, 6, true, "");
+        let text = changes_text(&[a, b], 4, 6, true, "", None);
         let lines: Vec<&str> = text.lines().collect();
         assert!(lines[0].contains("pushed out"));
         assert!(lines[1].contains("value now \"1\""));
@@ -1583,12 +2742,12 @@ pub(crate) mod tests {
     #[test]
     fn the_administrator_part_says_no_numbers() {
         assert_eq!(
-            changes_part(&[], false, " in the watched programs"),
+            changes_part(&[], false, " in the watched programs", None),
             "Nothing changed in the watched programs since the last look."
         );
         let mut a = value(0, None, "1");
         a.seq = 9;
-        let text = changes_part(&[a], true, "");
+        let text = changes_part(&[a], true, "", None);
         let lines: Vec<&str> = text.lines().collect();
         assert!(lines[0].contains("pushed out"));
         assert!(lines[1].contains("value now \"1\""));
@@ -1621,25 +2780,25 @@ pub(crate) mod tests {
             appears: Some("save as".into()),
             ..Default::default()
         };
-        assert!(verdict(&u, &titles, &[], 0, 0)
+        assert!(verdict(&u, &titles, &[], 0, 0, None)
             .unwrap()
             .contains("\"Save As\""));
         u.appears = Some("Print".into());
-        assert_eq!(verdict(&u, &titles, &[], 0, 0), None);
+        assert_eq!(verdict(&u, &titles, &[], 0, 0, None), None);
 
         let u = Until {
             gone: Some("Save".into()),
             ..Default::default()
         };
-        assert_eq!(verdict(&u, &titles, &[], 0, 0), None);
-        assert!(verdict(&u, &titles[..1], &[], 0, 0).is_some());
+        assert_eq!(verdict(&u, &titles, &[], 0, 0, None), None);
+        assert!(verdict(&u, &titles[..1], &[], 0, 0, None).is_some());
 
         let u = Until {
             text: Some("ONLINE".into()),
             ..Default::default()
         };
-        assert_eq!(verdict(&u, &[], &[value(0, None, "offline?")], 0, 0), None);
-        assert!(verdict(&u, &[], &[value(0, None, "Online")], 0, 0)
+        assert_eq!(verdict(&u, &[], &[value(0, None, "offline?")], 0, 0, None), None);
+        assert!(verdict(&u, &[], &[value(0, None, "Online")], 0, 0, None)
             .unwrap()
             .starts_with("\"ONLINE\" appeared: Edit"));
 
@@ -1647,10 +2806,10 @@ pub(crate) mod tests {
             quiet_ms: Some(1000),
             ..Default::default()
         };
-        assert_eq!(verdict(&u, &[], &[], 500, 1200), None);
-        assert!(verdict(&u, &[], &[], 500, 1500).is_some());
-        assert_eq!(verdict(&u, &[], &[value(1400, None, "x")], 500, 2000), None);
-        assert!(verdict(&u, &[], &[value(1400, None, "x")], 500, 2400).is_some());
+        assert_eq!(verdict(&u, &[], &[], 500, 1200, None), None);
+        assert!(verdict(&u, &[], &[], 500, 1500, None).is_some());
+        assert_eq!(verdict(&u, &[], &[value(1400, None, "x")], 500, 2000, None), None);
+        assert!(verdict(&u, &[], &[value(1400, None, "x")], 500, 2400, None).is_some());
         assert!(!u.is_empty());
         assert!(Until::default().is_empty());
     }
@@ -1707,8 +2866,18 @@ $timer.Start()
             .unwrap();
         let pid: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
         println!("form pid {pid}, elevated {elevated}");
-        follow(pid);
-        assert!(following(pid));
+        // The form takes a moment to show its window.
+        let mut shown = None;
+        for _ in 0..50 {
+            shown = windows_of(pid).into_iter().next();
+            if shown.is_some() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        let shown = shown.expect("the form came up");
+        follow(&shown);
+        assert!(following(pid), "{:?}", trouble(pid));
         thread::sleep(Duration::from_secs(10));
         flush();
         let (list, _, _) = since(0, None);

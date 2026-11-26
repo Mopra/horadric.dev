@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use horadric_core::desktop_programs::{Act, Kind};
 use serde_json::{json, Value};
 use windows::core::BOOL;
-use windows::core::{Interface, BSTR, HRESULT};
+use windows::core::{Interface, BSTR, HRESULT, PCWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, GlobalFree, E_ACCESSDENIED, HANDLE, HGLOBAL, HWND, LPARAM, POINT, RECT, WPARAM,
 };
@@ -41,10 +41,13 @@ use windows::Win32::System::Com::{
     STREAM_SEEK_SET,
 };
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber,
-    IsClipboardFormatAvailable, OpenClipboard, SetClipboardData,
+    CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
+    GetClipboardFormatNameW, GetClipboardOwner, GetClipboardSequenceNumber,
+    IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
 };
-use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use windows::Win32::System::Memory::{
+    GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
+};
 use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentProcess, GetCurrentThreadId, OpenProcess, OpenProcessToken,
     QueryFullProcessImageNameW, PROCESS_ACCESS_RIGHTS, PROCESS_NAME_WIN32,
@@ -56,7 +59,7 @@ use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    IsWindowEnabled, MapVirtualKeyW, SendInput, VkKeyScanW, INPUT, INPUT_0, INPUT_KEYBOARD,
+    GetAsyncKeyState, IsWindowEnabled, MapVirtualKeyW, SendInput, VkKeyScanW, INPUT, INPUT_0, INPUT_KEYBOARD,
     INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
     KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
     MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
@@ -94,6 +97,22 @@ const WAIT_DEFAULT_MS: u64 = 10_000;
 /// programs are slow.
 pub const WAIT_ENV: &str = "HORADRIC_DESKTOP_WAIT_MS";
 
+/// How much of a window's title `desktop_windows` tells of a program the
+/// human has not let the session into.
+const UNKNOWN_TITLE: usize = 40;
+
+/// How long a read of a whole window through UI Automation may take. One
+/// call fetches every element, so a vast or hung program would hold the
+/// server's one thread for as long as it liked.
+const TREE_WAIT: Duration = Duration::from_secs(20);
+
+/// How long a click waits for the human to let go of a mouse button.
+const HELD_WAIT: Duration = Duration::from_millis(1000);
+
+/// How many characters are typed between two looks at which window is in
+/// front: what a window that takes the front can get of the text at most.
+const TYPED_PIECE: usize = 20;
+
 /// The most characters `desktop_text` gives back.
 const TEXT_MOST: usize = 20_000;
 /// How long a copy is given to reach the clipboard.
@@ -116,6 +135,21 @@ changed, mostly without what the change was.";
 /// a call over a local pipe, cheap, but not on every turn of the loop.
 const HELPER_POLL: Duration = Duration::from_millis(300);
 
+/// How long the helper has to answer one look of a wait: it reads its own
+/// ring, a moment's work, so silence past this means it hangs, and the
+/// wait must not sit out the far longer limit of a call that operates.
+pub const PEEK_LIMIT: Duration = Duration::from_secs(2);
+
+/// What is said of a program whose changes are asked for but which is not
+/// watched, `why` being what kept it from being hooked when that is known.
+/// Never "nothing changed": nothing is known.
+pub fn not_watched(exe: &str, why: Option<String>) -> String {
+    let why = why.unwrap_or_else(|| "the watcher did not take it up in time".into());
+    format!(
+        "{exe} is not watched, so what changed in it is not known: {why}. The next call that          names its window tries again."
+    )
+}
+
 /// What an unnamed wait says when the helper failed it.
 pub fn helper_note(why: &str) -> String {
     format!(
@@ -133,8 +167,15 @@ const WIDEST: u32 = 1600;
 const PATTERN_WAIT: Duration = Duration::from_secs(5);
 
 /// Words in a control, title or dialog that mean an action may change the
-/// controlled machine or the project, so the human confirms it.
+/// controlled machine or the project, so the human confirms it. Each
+/// counts anywhere in a text, inside a longer word too.
 pub const RISKY_WORDS: &[&str] = &[
+    "remove",
+    "erase",
+    "upload",
+    "discard",
+    "uninstall",
+    "overskriv",
     "transfer",
     "download",
     "synchroni",
@@ -153,6 +194,15 @@ pub const RISKY_WORDS: &[&str] = &[
     "slet",
     "nulstil",
 ];
+
+/// Risky words that are also parts of harmless ones ("sender",
+/// "information", "stopwatch", "fjernskrivebord"), so each counts only as a
+/// word of its own.
+pub const RISKY_WHOLE_WORDS: &[&str] = &["send", "stop", "save", "apply", "format", "gem", "fjern"];
+
+/// What a standard Save dialog says of itself in its title and on its
+/// button. There they are no reason to ask: the dialog picks a file.
+const SAVE_WORDS: &[&str] = &["save", "gem"];
 
 /// A top level window, as the agent and the human see it.
 #[derive(Clone, Debug, PartialEq)]
@@ -173,10 +223,44 @@ pub struct Window {
 /// Whether any of `texts` names something that could change a machine or
 /// a project.
 pub fn looks_risky(texts: &[&str]) -> bool {
-    texts.iter().any(|t| {
-        let t = t.to_lowercase();
-        RISKY_WORDS.iter().any(|w| t.contains(w))
-    })
+    texts.iter().any(|t| risky_word(t, &[]).is_some())
+}
+
+/// The words of `text` in lower case. A word ends where a letter or digit
+/// does not follow and where a capital follows a small letter, as in the
+/// automation id `btnSave`. The `&` that marks an access key is no break.
+pub fn words(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut word = String::new();
+    let mut small = false;
+    for c in text.chars().filter(|c| *c != '&') {
+        if (!c.is_alphanumeric() || (c.is_uppercase() && small)) && !word.is_empty() {
+            out.push(std::mem::take(&mut word));
+        }
+        if c.is_alphanumeric() {
+            word.extend(c.to_lowercase());
+        }
+        small = c.is_lowercase();
+    }
+    if !word.is_empty() {
+        out.push(word);
+    }
+    out
+}
+
+/// The risky word `text` holds, leaving out those in `but`.
+pub fn risky_word(text: &str, but: &[&str]) -> Option<&'static str> {
+    let plain = text.replace('&', "").to_lowercase();
+    let own = words(text);
+    RISKY_WORDS
+        .iter()
+        .find(|w| plain.contains(**w))
+        .or_else(|| {
+            RISKY_WHOLE_WORDS
+                .iter()
+                .find(|w| !but.contains(w) && own.iter().any(|o| o == **w))
+        })
+        .copied()
 }
 
 /// The names Windows gives the file name box of its Open and Save
@@ -218,6 +302,130 @@ pub struct Said {
     pub texts: Vec<String>,
     /// It is a standard Open or Save dialog.
     pub file_dialog: bool,
+    /// A small dialog's buttons by name: what it offers to do, whichever
+    /// of them the action lands on.
+    pub buttons: Vec<String>,
+    /// It is a dialog whose elements could not be read, so nothing is
+    /// known of what it asks.
+    pub unread: bool,
+}
+
+/// What a dialog says, from the control type and name of each of its
+/// elements. Only a small one is read for its text and buttons: a large
+/// one is a window of its own with a toolbar's worth of words, and every
+/// action in it would be asked.
+pub fn said_from(elements: &[(&str, &str)]) -> Said {
+    let named = |kind: &str| -> Vec<String> {
+        elements
+            .iter()
+            .filter(|(c, n)| *c == kind && !n.trim().is_empty())
+            .map(|(_, n)| n.to_string())
+            .collect()
+    };
+    let small = elements.len() < SMALL_DIALOG;
+    Said {
+        file_dialog: elements.iter().any(|(c, n)| file_name_field(c, n)),
+        texts: if small { named("Text") } else { Vec::new() },
+        buttons: if small { named("Button") } else { Vec::new() },
+        unread: false,
+    }
+}
+
+/// The element an action lands on: the one aimed at, or for a key the one
+/// that has the keyboard.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Target<'a> {
+    pub control: &'a str,
+    pub name: &'a str,
+    pub automation_id: &'a str,
+}
+
+/// Where an action lands, as read before the human is asked.
+#[derive(Clone, Copy, Debug)]
+pub struct Scene<'a> {
+    /// The window's title.
+    pub title: &'a str,
+    /// The window is a dialog.
+    pub dialog: bool,
+    pub said: &'a Said,
+    pub target: Target<'a>,
+}
+
+/// What a tool is about to do, as far as the risk of it goes.
+#[derive(Clone, Copy, Debug)]
+pub enum Doing<'a> {
+    Click,
+    Type { submit: bool },
+    Press { chord: &'a Chord, key: &'a str },
+}
+
+/// Why an action looks risky, none when it does not. The agent's own
+/// `risky` flag is asked on beside this, so this only ever adds questions.
+///
+/// The element's own name and automation id are judged by every risky
+/// word. What stands around it (the title, a small dialog's text and its
+/// buttons) is too, except that a file dialog calling itself Save is no
+/// reason: it picks a file on this PC.
+pub fn risk(doing: Doing, scene: &Scene) -> Option<String> {
+    let (said, t) = (scene.said, scene.target);
+    let around: &[&str] = if said.file_dialog { SAVE_WORDS } else { &[] };
+    let found = |what: &str, text: &str, but: &[&str]| {
+        risky_word(text, but).map(|w| format!("{what} {:?} says {w:?}", short(text, 60)))
+    };
+    let key = match doing {
+        Doing::Press { key, .. } => key,
+        _ => "",
+    };
+    let by_word = found("the element", t.name, &[])
+        .or_else(|| found("the automation id", t.automation_id, &[]))
+        .or_else(|| found("the key", key, &[]))
+        .or_else(|| found("the window", scene.title, around))
+        .or_else(|| said.texts.iter().find_map(|x| found("the dialog", x, &[])))
+        .or_else(|| {
+            said.buttons
+                .iter()
+                .find_map(|b| found("the dialog's button", b, around))
+        });
+    if by_word.is_some() {
+        return by_word;
+    }
+    if scene.dialog && said.unread {
+        return Some("the dialog could not be read, so what it asks is not known".into());
+    }
+    match doing {
+        Doing::Click => None,
+        Doing::Type { submit } => {
+            let picks_file = said.file_dialog && file_name_field(t.control, t.name);
+            (submit && enter_confirms(scene.dialog, picks_file))
+                .then(|| "Enter presses the dialog's default button".to_string())
+        }
+        Doing::Press { chord, .. } => {
+            key_risk(chord, scene.dialog, said.file_dialog, t.control).map(str::to_string)
+        }
+    }
+}
+
+/// Why `text` is not typed as keys into an element of type `control`,
+/// none when it is. `by_keys` says the element takes no value, so the text
+/// goes in as keystrokes: a line break is then Enter and a tab leaves the
+/// field, with the rest of the text typed into whatever has the keyboard
+/// next. Only a document keeps both as text. Elsewhere the agent presses
+/// them itself, where each is judged as the key it is.
+pub fn typed_refusal(text: &str, by_keys: bool, control: &str) -> Option<String> {
+    if !by_keys || control == "Document" {
+        return None;
+    }
+    let what = match (text.contains('\n'), text.contains('\t')) {
+        (true, true) => "line breaks and tabs",
+        (true, false) => "a line break",
+        (false, true) => "a tab",
+        (false, false) => return None,
+    };
+    Some(format!(
+        "the text holds {what}, which would be typed into this {control} as the Enter and Tab \
+         keys, so nothing was typed; type the text without them, with submit for a final Enter \
+         or desktop_press for a key between"
+    ))
 }
 
 /// The titles a wait's `appears` and `gone` look at: the named program's
@@ -441,17 +649,29 @@ pub fn centre(left: i32, top: i32, right: i32, bottom: i32) -> Option<(i32, i32)
 
 /// The window list as the agent reads it. `reach` says which windows are
 /// out of this session's own reach, so the agent knows before its first
-/// call there that Windows will ask the human.
-pub fn windows_text(list: &[Window], reach: impl Fn(&Window) -> Reach) -> String {
+/// call there that Windows will ask the human. `known` says which windows
+/// are of a program the human let this session into: any other's title is
+/// cut to [`UNKNOWN_TITLE`] characters, enough to find the window by and
+/// little of the document, mail or page it names.
+pub fn windows_text(
+    list: &[Window],
+    reach: impl Fn(&Window) -> Reach,
+    known: impl Fn(&Window) -> bool,
+) -> String {
     if list.is_empty() {
         return "No windows are open on the desktop.".into();
     }
     let mut out = String::from("Windows on the desktop, frontmost first:\n");
     let (mut above, mut unsure) = (false, false);
     for w in list {
+        let title = if known(w) {
+            w.title.clone()
+        } else {
+            short(&w.title, UNKNOWN_TITLE)
+        };
         out.push_str(&format!(
             "- id={} {:?} {} pid {}",
-            w.hwnd, w.title, w.exe, w.pid
+            w.hwnd, title, w.exe, w.pid
         ));
         if let Some(o) = w.owner {
             out.push_str(&format!(" (dialog of id={o})"));
@@ -544,6 +764,12 @@ pub struct Peeked {
     pub quiet: Option<bool>,
     /// What changed there, a line each.
     pub lines: Vec<String>,
+    /// At the wait's end: what changed there before and during the wait,
+    /// as the agent is told it, empty when nothing is to tell.
+    pub said: String,
+    /// At the wait's end: a program there may no longer be looked at, so
+    /// what the wait found may have come from it.
+    pub revoked: bool,
 }
 
 /// Reads the helper's answer to [`PEEK`].
@@ -561,7 +787,46 @@ pub fn peeked(v: &Value) -> Peeked {
                     .collect()
             })
             .unwrap_or_default(),
+        said: v["said"].as_str().unwrap_or_default().to_string(),
+        revoked: v["revoked"].as_bool().unwrap_or(false),
     }
+}
+
+/// How long the app's yes to looking at a watched program is taken to
+/// hold before it is asked again, so a loop of waits does not ask it
+/// several times a second.
+pub const GRANT_HOLDS: Duration = Duration::from_secs(5);
+
+/// Which of the watched programs the app must be asked about again before
+/// their changes are told: those whose last yes, in `still`, is older
+/// than [`GRANT_HOLDS`] at `now` or was never given, and only `pid`'s when
+/// one program is asked for.
+pub fn to_ask_again(
+    followed: Vec<Window>,
+    still: &HashMap<u32, Instant>,
+    pid: Option<u32>,
+    now: Instant,
+) -> Vec<Window> {
+    followed
+        .into_iter()
+        .filter(|w| pid.is_none_or(|p| w.pid == p))
+        .filter(|w| {
+            still
+                .get(&w.pid)
+                .is_none_or(|at| now.saturating_duration_since(*at) >= GRANT_HOLDS)
+        })
+        .collect()
+}
+
+/// How long a wait's loop runs when the helper takes part, of the `most`
+/// the wait may last: the last look at the helper and the reading of its
+/// changes each get [`PEEK_LIMIT`] of it, so the whole wait stays inside
+/// `most`. A wait too short to spare that keeps half for its loop.
+pub fn loop_limit(most: Duration, with_helper: bool) -> Duration {
+    if !with_helper {
+        return most;
+    }
+    most.saturating_sub(PEEK_LIMIT * 2).max(most / 2)
 }
 
 /// Which of a wait's ends holds when the helper's programs count too:
@@ -792,6 +1057,7 @@ const VK_DELETE: u16 = 0x2E;
 const VK_F4: u16 = 0x73;
 const VK_S: u16 = b'S' as u16;
 const VK_TAB: u16 = 0x09;
+const VK_SPACE: u16 = 0x20;
 
 /// `spec` as keys: a key's name (`Enter`, `F5`, `a`) after any modifiers
 /// joined by `+` (`Control+Shift+S`).
@@ -968,17 +1234,67 @@ pub fn press_refusal(chord: &Chord) -> Option<String> {
     })
 }
 
-/// Whether a key commits or destroys whatever it meets: Delete, Control+S
-/// (saving over), Alt+F4 (closing, maybe through a prompt), and Enter in a
-/// dialog, which confirms it.
-pub fn risky_key(chord: &Chord, in_dialog: bool) -> bool {
+/// Whether a key typed into an element of type `control` is taken as
+/// text or as a search in a list, and so presses nothing.
+fn takes_keys(control: &str) -> bool {
+    matches!(
+        control,
+        "Edit"
+            | "Document"
+            | "ComboBox"
+            | "Spinner"
+            | "List"
+            | "ListItem"
+            | "Tree"
+            | "TreeItem"
+            | "DataGrid"
+            | "DataItem"
+            | "Table"
+    )
+}
+
+/// Why a key commits or destroys whatever it meets, none when it does
+/// not: Delete, Control+S (saving over), Alt+F4 (closing, maybe through a
+/// prompt), and the keys that press a button nobody named. In a `dialog`
+/// those are Enter (its default button, except in a `file_dialog`, where
+/// it picks the file), Space on a button, and a button's access key: Alt
+/// with a character, or the character alone when `focus`, the control type
+/// of what has the keyboard, takes no text. In an open menu a character
+/// alone picks the item with that access key.
+pub fn key_risk(
+    chord: &Chord,
+    dialog: bool,
+    file_dialog: bool,
+    focus: &str,
+) -> Option<&'static str> {
     let held = |vk| chord.mods.contains(&vk);
+    // Shift changes the character, not what the key does.
+    let alone = chord.mods.iter().all(|m| *m == VK_SHIFT);
+    let character = match chord.key {
+        Key::Vk(vk) => (0x30..=0x39).contains(&vk) || (0x41..=0x5A).contains(&vk),
+        Key::Char(_) => true,
+    };
     match chord.key {
-        Key::Vk(VK_DELETE) => true,
-        Key::Vk(VK_RETURN) => in_dialog,
-        Key::Vk(VK_S) => held(VK_CONTROL),
-        Key::Vk(VK_F4) => held(VK_MENU),
-        _ => false,
+        Key::Vk(VK_DELETE) => Some("Delete removes what is selected"),
+        Key::Vk(VK_S) if held(VK_CONTROL) => Some("Control+S saves over the file"),
+        Key::Vk(VK_F4) if held(VK_MENU) => Some("Alt+F4 closes the window"),
+        Key::Vk(VK_RETURN) if enter_confirms(dialog, file_dialog) => {
+            Some("Enter presses the dialog's default button")
+        }
+        Key::Vk(VK_SPACE) if dialog && alone && matches!(focus, "Button" | "SplitButton") => {
+            Some("Space presses the button that has the keyboard")
+        }
+        _ if character && alone && matches!(focus, "Menu" | "MenuBar" | "MenuItem") => {
+            Some("a character picks the menu item with that access key")
+        }
+        _ if character && dialog && held(VK_MENU) && !held(VK_CONTROL) => {
+            Some("Alt and a character press the dialog's button with that access key")
+        }
+        _ if character && dialog && alone && !takes_keys(focus) => Some(
+            "a character presses the dialog's button with that access key when the keyboard \
+             is not in a field",
+        ),
+        _ => None,
     }
 }
 
@@ -1087,6 +1403,96 @@ pub fn covered(found: bool, under: u32, target: u32) -> bool {
     !found || under != target
 }
 
+/// What is said when typing stopped part way because the keyboard left
+/// the program: how much went in, so the agent knows what the field holds.
+pub fn typed_short(typed: usize, of: usize, why: &str) -> String {
+    format!(
+        "typing stopped after {typed} of {of} characters: {why}. Nothing more was sent and \
+         Enter was not pressed; look with desktop_snapshot at what the field holds before \
+         typing again"
+    )
+}
+
+/// Whether `desktop_text` may click into an element to give it the
+/// keyboard: only one that holds text and has no action of its own. A
+/// click on a button, a menu item or a link does what it says, which
+/// reading must never do.
+pub fn click_to_read(control: &str, invoke: bool, toggle: bool) -> bool {
+    !invoke
+        && !toggle
+        && matches!(
+            control,
+            "Edit"
+                | "Document"
+                | "List"
+                | "DataGrid"
+                | "Table"
+                | "Tree"
+                | "Pane"
+                | "Text"
+                | "Group"
+                | "Custom"
+        )
+}
+
+const CF_TEXT: u32 = 1;
+const CF_BITMAP: u32 = 2;
+const CF_METAFILEPICT: u32 = 3;
+const CF_OEMTEXT: u32 = 7;
+const CF_DIB: u32 = 8;
+const CF_ENHMETAFILE: u32 = 14;
+const CF_HDROP: u32 = 15;
+const CF_LOCALE: u32 = 16;
+const CF_DIBV5: u32 = 17;
+
+/// The formats by which a program (a password manager, mostly) tells
+/// Windows to keep what it copied out of the clipboard history and the
+/// cloud. They are put back with the text they came with.
+pub const CLIP_MARKS: [&str; 3] = [
+    "ExcludeClipboardContentFromMonitorProcessing",
+    "CanIncludeInClipboardHistory",
+    "CanUploadToCloudClipboard",
+];
+
+/// What the clipboard holds that a copy would destroy for good, in words,
+/// from its formats by number and registered name: anything but plain
+/// text and the marks that go with it. None when all of it can be put
+/// back.
+pub fn clip_other(formats: &[(u32, String)]) -> Option<String> {
+    formats.iter().find_map(|(id, name)| match *id {
+        CF_TEXT | CF_OEMTEXT | CF_UNICODETEXT | CF_LOCALE => None,
+        CF_BITMAP | CF_DIB | CF_DIBV5 | CF_METAFILEPICT | CF_ENHMETAFILE => {
+            Some("a picture".to_string())
+        }
+        CF_HDROP => Some("files".to_string()),
+        _ if CLIP_MARKS.contains(&name.as_str()) => None,
+        _ if name.is_empty() => Some(format!("something that is not text (format {id})")),
+        _ => Some(format!("more than plain text ({name})")),
+    })
+}
+
+/// What the agent said of the element it wants, before anything of the
+/// window is read: its ref or the name it gave, in its own words.
+pub fn wanted(args: &Value) -> String {
+    let s = |k: &str| args.get(k).and_then(Value::as_str);
+    match (s("ref"), s("name")) {
+        (Some(r), _) => format!("element {}", short(r, 20)),
+        (None, Some(n)) => format!("the element named {:?}", short(n, 60)),
+        (None, None) => "what has the keyboard".to_string(),
+    }
+}
+
+/// The points of a 5 by 5 grid over `r`, each in the middle of its cell:
+/// where a window is looked at to tell whether another covers it.
+pub fn probe_points(r: RECT) -> Vec<(i32, i32)> {
+    let (w, h) = (r.right - r.left, r.bottom - r.top);
+    let at = |from: i32, size: i32, i: i32| from + (size * (2 * i + 1)) / 10;
+    (0..5)
+        .flat_map(|y| (0..5).map(move |x| (x, y)))
+        .map(|(x, y)| (at(r.left, w, x), at(r.top, h, y)))
+        .collect()
+}
+
 /// What a failed Windows call says: its message, or for the codes that
 /// have none, what the code means, and the code itself.
 pub fn error_reason(code: u32, message: &str) -> String {
@@ -1151,10 +1557,18 @@ pub struct Desktop {
     /// The last change `desktop_changes` told, per program (none for
     /// all), so the next call starts after it.
     seen: HashMap<Option<u32>, u64>,
+    /// When the app last said this session may still look at each watched
+    /// program, so changes are not told on a grant taken back since.
+    still: HashMap<u32, Instant>,
     /// This is the helper, whose changes are a part of the session's
     /// answer: its ring numbers apart from the session's, so it keeps its
     /// own place and says no numbers.
     part: bool,
+    /// The programs, by process id, the app let this session into, and
+    /// whether to operate. Nothing of a program is read before it is
+    /// here, so what a window holds can not be sounded out by asking for
+    /// elements by name; the app still decides every action.
+    granted: HashMap<u32, bool>,
 }
 
 /// Why a call for an elevated window did not go to the helper.
@@ -1191,6 +1605,50 @@ impl Aim {
             format!("{} {:?}", self.control, short(&self.name, 60))
         }
     }
+
+    /// Where an action on this element in `w` lands, for [`risk`].
+    fn scene<'a>(&'a self, w: &'a Window, said: &'a Said) -> Scene<'a> {
+        Scene {
+            title: &w.title,
+            dialog: is_dialog(w),
+            said,
+            target: Target {
+                control: self.control,
+                name: &self.name,
+                automation_id: &self.automation_id,
+            },
+        }
+    }
+}
+
+/// What has the keyboard in a window. Empty when nothing of the window
+/// does, or it can not be told.
+#[derive(Default)]
+struct Focused {
+    control: &'static str,
+    name: String,
+    automation_id: String,
+    /// Its middle on the screen.
+    at: Option<(i32, i32)>,
+}
+
+/// Tells the app how the read went that [`Desktop::ask_first`] asked
+/// for, so the question does not stand open in the history the human
+/// watches, and hands the read on.
+fn looked<T, A: FnMut(Value) -> Result<Value, String>>(
+    app: &mut A,
+    root: &Window,
+    asked: Option<String>,
+    read: Result<T, String>,
+) -> Result<T, String> {
+    if let Some(what) = asked {
+        let body = match &read {
+            Ok(_) => done_body(root, &what, true, "Found where it lands."),
+            Err(why) => done_body(root, &what, false, why),
+        };
+        let _ = app(body);
+    }
+    read
 }
 
 const PROPERTIES: [UIA_PROPERTY_ID; 17] = [
@@ -1748,16 +2206,98 @@ fn send(inputs: &[INPUT]) -> bool {
     n as usize == inputs.len()
 }
 
-fn send_strokes(strokes: &[Stroke]) -> Result<(), String> {
+/// Whether the window in front is still of the program with process id
+/// `pid`, the rule a click's point is held to. Keys go to whatever is in
+/// front, so this is asked right before each lot of them: a window that
+/// took the front since (a notification, the human's own click) must get
+/// none of the text and never the Enter. The error names what is in front.
+fn front_is(pid: u32) -> Result<(), String> {
+    let front = foreground();
+    if !covered(front.is_some(), front.map_or(0, |(_, p)| p), pid) {
+        return Ok(());
+    }
+    Err(match front {
+        Some((id, _)) => {
+            let f = info(id);
+            format!("{:?} ({}) took the front", f.title, f.exe)
+        }
+        None => "no window is in front any more".to_string(),
+    })
+}
+
+/// Whether window `w` is still the one that was found: a handle is used
+/// again once its window is gone, and the human may have taken a minute
+/// and a half to answer.
+fn same_window(w: &Window) -> Result<(), String> {
+    let h = hwnd(w.hwnd);
+    let mut pid = 0;
+    let alive = unsafe {
+        GetWindowThreadProcessId(h, Some(&mut pid));
+        IsWindow(Some(h)).as_bool()
+    };
+    if alive && pid == w.pid {
+        return Ok(());
+    }
+    Err(format!(
+        "{:?} is gone since it was asked about, so nothing was sent; desktop_windows lists what \
+         is open now",
+        w.title
+    ))
+}
+
+/// Sends keys to the program with process id `pid`, as long as it is in
+/// front.
+fn send_strokes(pid: u32, strokes: &[Stroke]) -> Result<(), String> {
     let inputs: Vec<INPUT> = strokes.iter().map(|&s| key_input(s)).collect();
-    // A long text goes in pieces, so a program reading its queue keeps up.
     for piece in inputs.chunks(40) {
+        front_is(pid).map_err(|why| format!("{why}, so the keys were not sent"))?;
         if !send(piece) {
             return Err(BLOCKED.into());
         }
         thread::sleep(Duration::from_millis(15));
     }
     Ok(())
+}
+
+/// Types `text` into the program with process id `pid`, a piece at a time
+/// so a program reading its queue keeps up, and only while that program
+/// is in front. The error says how many characters went in before it
+/// stopped.
+fn type_keys(pid: u32, text: &str) -> Result<(), String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut typed = 0;
+    for piece in chars.chunks(TYPED_PIECE) {
+        front_is(pid).map_err(|why| typed_short(typed, chars.len(), &why))?;
+        let piece: String = piece.iter().collect();
+        let inputs: Vec<INPUT> = text_strokes(&piece).into_iter().map(key_input).collect();
+        if !send(&inputs) {
+            return Err(typed_short(typed, chars.len(), BLOCKED));
+        }
+        typed += piece.chars().count();
+        thread::sleep(Duration::from_millis(15));
+    }
+    Ok(())
+}
+
+/// Whether the human holds a mouse button down right now.
+fn mouse_held() -> bool {
+    // VK_LBUTTON, VK_RBUTTON and VK_MBUTTON.
+    [1, 2, 4]
+        .iter()
+        .any(|&vk| unsafe { GetAsyncKeyState(vk) } as u16 & 0x8000 != 0)
+}
+
+/// Waits a moment for the human to let go of the mouse. A click sent
+/// while they drag would drop what they hold wherever the pointer is put.
+fn mouse_let_go() -> bool {
+    let begun = Instant::now();
+    while mouse_held() {
+        if begun.elapsed() >= HELD_WAIT {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    true
 }
 
 const BLOCKED: &str = "Windows blocked the input (the program may run as administrator, or \
@@ -1827,6 +2367,31 @@ fn read_on_the_side<T: Send + 'static>(
     rx.recv_timeout(PATTERN_WAIT).ok().flatten()
 }
 
+/// Runs a read of a whole window on its own thread and waits `limit` for
+/// it, as [`read_on_the_side`] does for one element. `whose` names the
+/// window in the error. A read given up on runs to its end unheard: UI
+/// Automation has no way to call one off.
+fn timed<T: Send + 'static>(
+    limit: Duration,
+    whose: &str,
+    read: impl FnOnce() -> windows::core::Result<T> + Send + 'static,
+) -> Result<T, String> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        let _ = tx.send(read());
+    });
+    match rx.recv_timeout(limit) {
+        Ok(r) => r.map_err(|e| format!("UI Automation could not read {whose:?}: {}", win_err(e))),
+        Err(_) => Err(format!(
+            "{whose:?} did not answer UI Automation in {} s: the program is busy or hung, or \
+             the window has more controls than can be read in that time. desktop_screenshot \
+             still shows it",
+            limit.as_secs()
+        )),
+    }
+}
+
 /// Scrolls an element into view through UI Automation where it can be,
 /// and where it is then.
 fn scroll_into_view(el: &IUIAutomationElement) -> Option<RECT> {
@@ -1859,42 +2424,146 @@ fn open_clipboard() -> bool {
     false
 }
 
+/// The bytes the open clipboard holds in `format`, none when it holds
+/// none. Never read past what Windows says the memory holds.
+unsafe fn clip_bytes(format: u32) -> Option<Vec<u8>> {
+    let mem = HGLOBAL(GetClipboardData(format).ok()?.0);
+    let size = GlobalSize(mem);
+    let ptr = GlobalLock(mem) as *const u8;
+    if ptr.is_null() {
+        return None;
+    }
+    let bytes = std::slice::from_raw_parts(ptr, size).to_vec();
+    let _ = GlobalUnlock(mem);
+    Some(bytes)
+}
+
+/// The open clipboard's text, if it holds any: up to the first NUL, or
+/// all of it when the program that put it there set none.
+unsafe fn open_clip_text() -> Option<String> {
+    let bytes = clip_bytes(CF_UNICODETEXT)?;
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|b| u16::from_ne_bytes([b[0], b[1]]))
+        .take_while(|u| *u != 0)
+        .collect();
+    Some(String::from_utf16_lossy(&units))
+}
+
 /// The clipboard's text, if it holds any.
 fn clip_text() -> Option<String> {
     if unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT) }.is_err() || !open_clipboard() {
         return None;
     }
-    let text = unsafe {
-        GetClipboardData(CF_UNICODETEXT).ok().and_then(|h| {
-            let mem = HGLOBAL(h.0);
-            let ptr = GlobalLock(mem) as *const u16;
-            if ptr.is_null() {
-                return None;
-            }
-            let mut len = 0;
-            while *ptr.add(len) != 0 {
-                len += 1;
-            }
-            let s = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
-            let _ = GlobalUnlock(mem);
-            Some(s)
-        })
-    };
+    let text = unsafe { open_clip_text() };
     unsafe {
         let _ = CloseClipboard();
     }
     text
 }
 
-/// Empties the clipboard.
-fn clear_clip() {
-    if open_clipboard() {
-        unsafe {
-            let _ = EmptyClipboard();
-            let _ = CloseClipboard();
+/// What the human had on the clipboard before a copy, to put back.
+#[derive(Debug, Default)]
+struct Kept {
+    text: Option<String>,
+    /// Those of [`CLIP_MARKS`] it carried, each with its bytes.
+    marks: Vec<(&'static str, Vec<u8>)>,
+}
+
+/// Takes note of what the clipboard holds so a copy can put it back, or
+/// says why a copy must not be made: it holds something that could not be
+/// put back, or can not be looked at.
+fn keep_clip() -> Result<Kept, String> {
+    if !open_clipboard() {
+        return Err(
+            "another program holds the clipboard, so what is on it could not be kept and \
+             nothing was copied; try again, or use desktop_snapshot or desktop_screenshot"
+                .into(),
+        );
+    }
+    let (formats, kept) = unsafe {
+        let mut formats = Vec::new();
+        let mut at = EnumClipboardFormats(0);
+        while at != 0 {
+            let mut buf = [0u16; 128];
+            let n = GetClipboardFormatNameW(at, &mut buf).max(0) as usize;
+            formats.push((at, String::from_utf16_lossy(&buf[..n])));
+            at = EnumClipboardFormats(at);
         }
+        let marks = CLIP_MARKS
+            .iter()
+            .filter_map(|mark| {
+                let (id, _) = formats.iter().find(|(_, name)| name == mark)?;
+                Some((*mark, clip_bytes(*id).unwrap_or_default()))
+            })
+            .collect();
+        let kept = Kept {
+            text: open_clip_text(),
+            marks,
+        };
+        let _ = CloseClipboard();
+        (formats, kept)
+    };
+    match clip_other(&formats) {
+        Some(what) => Err(format!(
+            "the clipboard holds {what}, which desktop_text's select all and copy would \
+             destroy since only plain text can be put back, so nothing was copied; read this \
+             with desktop_snapshot or desktop_screenshot instead"
+        )),
+        None => Ok(kept),
     }
 }
+
+/// Puts `bytes` on the open clipboard as `format`.
+unsafe fn set_clip_bytes(format: u32, bytes: &[u8]) {
+    let Ok(mem) = GlobalAlloc(GMEM_MOVEABLE, bytes.len().max(1)) else {
+        return;
+    };
+    let ptr = GlobalLock(mem) as *mut u8;
+    if ptr.is_null() {
+        let _ = GlobalFree(Some(mem));
+        return;
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+    let _ = GlobalUnlock(mem);
+    // The clipboard owns the memory once it takes it.
+    if SetClipboardData(format, Some(HANDLE(mem.0))).is_err() {
+        let _ = GlobalFree(Some(mem));
+    }
+}
+
+/// Leaves the clipboard as `kept` found it: its text with the marks that
+/// kept it out of the clipboard history, or empty. False when the
+/// clipboard could not be opened, so it still holds what was copied.
+fn put_back(kept: &Kept) -> bool {
+    if !open_clipboard() {
+        return false;
+    }
+    unsafe {
+        let _ = EmptyClipboard();
+        for (name, bytes) in &kept.marks {
+            let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+            let format = RegisterClipboardFormatW(PCWSTR(wide.as_ptr()));
+            if format != 0 {
+                set_clip_bytes(format, bytes);
+            }
+        }
+        if let Some(text) = &kept.text {
+            let wide: Vec<u8> = text
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .flat_map(u16::to_ne_bytes)
+                .collect();
+            set_clip_bytes(CF_UNICODETEXT, &wide);
+        }
+        let _ = CloseClipboard();
+    }
+    true
+}
+
+/// Said when [`put_back`] could not.
+const NOT_PUT_BACK: &str = " The clipboard could not be opened to put back what it held, so it \
+now holds the program's text instead of the user's.";
 
 /// The class of window `h`.
 fn class_of(h: HWND) -> String {
@@ -1925,29 +2594,6 @@ fn window_text(h: HWND) -> Option<String> {
     let mut buf = vec![0u16; len + 1];
     let got = ask(WM_GETTEXT, buf.len(), buf.as_mut_ptr() as isize)?;
     Some(String::from_utf16_lossy(&buf[..got.min(len)]))
-}
-
-/// Puts `text` on the clipboard, in place of what it held.
-fn set_clip_text(text: &str) {
-    if !open_clipboard() {
-        return;
-    }
-    unsafe {
-        let _ = EmptyClipboard();
-        let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-        if let Ok(mem) = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2) {
-            let ptr = GlobalLock(mem) as *mut u16;
-            if !ptr.is_null() {
-                std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
-                let _ = GlobalUnlock(mem);
-                // The clipboard owns the memory once it takes it.
-                if SetClipboardData(CF_UNICODETEXT, Some(HANDLE(mem.0))).is_err() {
-                    let _ = GlobalFree(Some(mem));
-                }
-            }
-        }
-        let _ = CloseClipboard();
-    }
 }
 
 impl Desktop {
@@ -2089,13 +2735,19 @@ impl Desktop {
         self.setback = Some((Setback::Lost, why.to_string(), Instant::now()));
     }
 
-    /// Calls the helper for something of its own, asking the app nothing.
-    /// An error that is not the helper's answer loses it.
-    fn ask_helper(&mut self, name: &str, args: &Value) -> Result<Vec<Value>, String> {
+    /// Calls the helper for a look of a wait, which it answers from its
+    /// own ring within [`PEEK_LIMIT`]. All it may ask `app` is whether a
+    /// program it watches may still be looked at. An error that is not
+    /// the helper's answer loses it.
+    fn ask_helper<A: FnMut(Value) -> Result<Value, String>>(
+        &mut self,
+        name: &str,
+        args: &Value,
+        app: &mut A,
+    ) -> Result<Vec<Value>, String> {
         let helper = self.helper.as_mut().ok_or("the helper is not running")?;
-        let mut nobody =
-            |_: Value| -> Result<Value, String> { Err("this call asks Horadric nothing".into()) };
-        match helper.call(name, args, &mut nobody, Duration::ZERO) {
+        let mut marked = |body: Value| app(as_administrator(body));
+        match helper.call_within(name, args, &mut marked, Duration::ZERO, PEEK_LIMIT) {
             Ok(answer) => answer,
             Err(why) => {
                 self.lose_helper(&why);
@@ -2115,13 +2767,15 @@ impl Desktop {
         let flag = |k: &str| args.get(k) == Some(&json!(true));
         let s = |k: &str| args.get(k).and_then(Value::as_str);
         if name == "desktop_windows" {
-            return Ok(vec![text(windows_text(&list_windows(), reach_of))]);
+            let known = |w: &Window| self.granted.contains_key(&w.pid);
+            return Ok(vec![text(windows_text(&list_windows(), reach_of, known))]);
         }
         if name == PEEK && self.part {
-            return Ok(vec![self.peek(args)]);
+            return Ok(vec![self.peek(args, app)]);
         }
         // Without a window these read what is watched already, every
-        // program in it approved earlier, so there is nothing to ask.
+        // program in it approved earlier. Whether each still is, the app
+        // is asked again before its changes are told (`regrant`).
         let unnamed = args.get("window").is_none_or(Value::is_null);
         if unnamed {
             // A helper that connected after its call gave up waiting is
@@ -2130,14 +2784,21 @@ impl Desktop {
         }
         match name {
             "desktop_changes" if unnamed => return Ok(vec![text(self.changes(args, None, app))]),
-            "desktop_wait" if unnamed => return Ok(vec![text(self.wait(args, None)?)]),
+            "desktop_wait" if unnamed => return Ok(vec![text(self.wait(args, None, app)?)]),
             _ => {}
         }
         let (w, root) = find(args.get("window"))?;
         let (mut walled, by_helper) = out_of_reach(&w, self.part).unzip();
         if let (Some(why), Some(true)) = (&walled, by_helper) {
             match self.through_helper(name, args, app, settle, &w) {
-                Ok(answer) => return answer,
+                Ok(answer) => {
+                    // The helper asked the app itself, and only answers
+                    // well what was allowed.
+                    if answer.is_ok() {
+                        self.let_in(&w, false);
+                    }
+                    return answer;
+                }
                 Err(Unreached::Stop(no)) => return Err(no),
                 Err(Unreached::Walled(no)) => walled = Some(format!("{why}, and {no}")),
             }
@@ -2164,8 +2825,9 @@ impl Desktop {
         match name {
             "desktop_snapshot" => {
                 let what = format!("read the controls of {:?}", w.title);
-                allow(app, &root, "see", &what, false, None, &reason)?;
-                watch::follow(w.pid);
+                let answer = allow(app, &root, "see", &what, false, None, &reason);
+                self.heard(&w, false, answer)?;
+                watch::follow(&root);
                 let result = self.snapshot(&w).map(|mut tree| {
                     if let Some(why) = walled {
                         tree.push_str(&format!("\n(Note: {why}.)"));
@@ -2175,13 +2837,14 @@ impl Desktop {
                 report(app, &root, &what, result)
             }
             "desktop_screenshot" => {
-                let crop = match s("ref") {
-                    Some(r) => Some(self.by_ref(&w, r)?),
-                    None => None,
-                };
                 let what = format!("take a picture of {:?}", w.title);
-                allow(app, &root, "see", &what, false, None, &reason)?;
-                watch::follow(w.pid);
+                let answer = allow(app, &root, "see", &what, false, None, &reason);
+                self.heard(&w, false, answer)?;
+                watch::follow(&root);
+                let crop = match s("ref").map(|r| self.by_ref(&w, r)).transpose() {
+                    Ok(crop) => crop,
+                    Err(why) => return report(app, &root, &what, Err(why)),
+                };
                 let result =
                     self.picture(&w, crop.as_ref().map(|a| a.rect))
                         .map(|(png, copied)| {
@@ -2193,7 +2856,8 @@ impl Desktop {
                             if copied {
                                 content.push(text(
                                     "Windows would not draw this window for the agent, so this is \
-                                 copied off the screen: whatever covers the window shows too.",
+                                 copied off the screen, where the window was in front with \
+                                 nothing of another program found over it.",
                                 ));
                             }
                             let outcome = if copied {
@@ -2211,7 +2875,12 @@ impl Desktop {
                     return Err("button is left, right or middle".into());
                 }
                 let double = flag("double");
-                let aim = self.aim(&w, args, false)?;
+                let first = format!("click {} in {:?}", wanted(args), w.title);
+                let asked = self.ask_first(app, &w, &root, true, first, &reason)?;
+                let read = self
+                    .aim(&w, args, false)
+                    .map(|aim| (aim, self.said(&w)));
+                let (aim, said) = looked(app, &root, asked, read)?;
                 let how = match (button, double) {
                     ("left", false) => "click".to_string(),
                     ("left", true) => "double click".to_string(),
@@ -2219,14 +2888,15 @@ impl Desktop {
                     (b, true) => format!("{b} double click"),
                 };
                 let what = format!("{how} {}", aim.what());
-                let said = self.said(&w);
-                let risky = flag("risky") || looks_risky_in(&w, &said, &[&aim.name]);
+                let risky =
+                    flag("risky") || risk(Doing::Click, &aim.scene(&w, &said)).is_some();
                 let act = act_of(Kind::Click, &w, &said, aim.control, &aim.name, "");
                 let point = aim_point(&w, &aim);
-                allow_act(app, &root, &what, risky, &act, point, &reason)?;
-                watch::follow(w.pid);
+                let answer = allow_act(app, &root, &what, risky, &act, point, &reason);
+                self.heard(&w, true, answer)?;
+                watch::follow(&root);
                 let (before, mark, front) = (list_windows(), watch::mark(), front_before());
-                let acted = self.click(&w, &aim, button, double);
+                let acted = same_window(&w).and_then(|()| self.click(&w, &aim, button, double));
                 let back = after_action(front.as_ref(), &w, settle, acted.is_ok());
                 let result = acted.map(|mut said| {
                     said.push_str(&came_of(&before, &w, mark));
@@ -2238,25 +2908,31 @@ impl Desktop {
             "desktop_type" => {
                 let typed = s("text").ok_or("say what to type: text")?;
                 let submit = flag("submit");
-                let aim = self.aim(&w, args, true)?;
+                let first = format!("type into {} in {:?}", wanted(args), w.title);
+                let asked = self.ask_first(app, &w, &root, true, first, &reason)?;
+                let read = self
+                    .aim(&w, args, true)
+                    .map(|aim| (aim, self.said(&w)));
+                let (aim, said) = looked(app, &root, asked, read)?;
+                // Before the human is asked about a text that will not be
+                // typed anyway.
+                if let Some(no) = typed_refusal(typed, !aim.writable, aim.control) {
+                    return Err(no);
+                }
                 let mut what = format!("type {:?} into {}", short(typed, 60), aim.what());
                 if submit {
                     what.push_str(" and press Enter");
                 }
-                // Enter in a dialog confirms it, as pressing it alone would,
-                // but a path typed into a file dialog's name box only picks
-                // the file.
-                let said = self.said(&w);
-                let picks_file = said.file_dialog && file_name_field(aim.control, &aim.name);
                 let risky = flag("risky")
-                    || (submit && enter_confirms(is_dialog(&w), picks_file))
-                    || looks_risky_in(&w, &said, &[&aim.name]);
+                    || risk(Doing::Type { submit }, &aim.scene(&w, &said)).is_some();
                 let act = act_of(Kind::Type, &w, &said, aim.control, &aim.name, "");
                 let point = aim_point(&w, &aim);
-                allow_act(app, &root, &what, risky, &act, point, &reason)?;
-                watch::follow(w.pid);
+                let answer = allow_act(app, &root, &what, risky, &act, point, &reason);
+                self.heard(&w, true, answer)?;
+                watch::follow(&root);
                 let (before, mark, front) = (list_windows(), watch::mark(), front_before());
-                let acted = self.type_in(&w, &aim, typed, submit);
+                let acted =
+                    same_window(&w).and_then(|()| self.type_in(&w, &aim, typed, submit));
                 let back = after_action(front.as_ref(), &w, settle, acted.is_ok());
                 let result = acted.map(|mut said| {
                     said.push_str(&came_of(&before, &w, mark));
@@ -2272,17 +2948,35 @@ impl Desktop {
                     return Err(why);
                 }
                 let what = format!("press {key} in {:?}", w.title);
-                let (focused, at) = self.focused(&w);
+                let asked = self.ask_first(app, &w, &root, true, what.clone(), &reason)?;
+                let focus = self.focused(&w);
                 let said = self.said(&w);
-                let risky = flag("risky")
-                    || risky_key(&chord, enter_confirms(is_dialog(&w), said.file_dialog))
-                    || looks_risky_in(&w, &said, &[&focused, key]);
-                let act = act_of(Kind::Press, &w, &said, "", &focused, key);
-                let point = at.or_else(|| window_point(&w));
-                allow_act(app, &root, &what, risky, &act, point, &reason)?;
-                watch::follow(w.pid);
+                looked(app, &root, asked, Ok(()))?;
+                let scene = Scene {
+                    title: &w.title,
+                    dialog: is_dialog(&w),
+                    said: &said,
+                    target: Target {
+                        control: focus.control,
+                        name: &focus.name,
+                        automation_id: &focus.automation_id,
+                    },
+                };
+                let doing = Doing::Press {
+                    chord: &chord,
+                    key,
+                };
+                let risky = flag("risky") || risk(doing, &scene).is_some();
+                let act = act_of(Kind::Press, &w, &said, "", &focus.name, key);
+                let point = focus.at.or_else(|| window_point(&w));
+                let answer = allow_act(app, &root, &what, risky, &act, point, &reason);
+                self.heard(&w, true, answer)?;
+                watch::follow(&root);
                 let (before, mark, front) = (list_windows(), watch::mark(), front_before());
-                let pressed = bring_forward(&w).and_then(|()| send_strokes(&chord_input(&chord)));
+                // The human may have taken a minute and a half to answer.
+                let pressed = same_window(&w)
+                    .and_then(|()| bring_forward(&w))
+                    .and_then(|()| send_strokes(w.pid, &chord_input(&chord)));
                 let back = after_action(front.as_ref(), &w, settle, pressed.is_ok());
                 let result = pressed.map(|()| {
                     let mut said = format!("Pressed {key} in {:?}.", w.title);
@@ -2293,17 +2987,20 @@ impl Desktop {
                 report(app, &root, &what, result)
             }
             "desktop_text" => {
-                let aim = if args.get("ref").is_some() || args.get("name").is_some() {
-                    Some(self.aim(&w, args, false)?)
-                } else {
-                    None
+                // Asked in the agent's words, since the element is found
+                // only once the human lets the session look.
+                let what = format!("read the text of {} in {:?}", wanted(args), w.title);
+                let answer = allow(app, &root, "see", &what, false, None, &reason);
+                self.heard(&w, false, answer)?;
+                watch::follow(&root);
+                let named = args.get("ref").is_some() || args.get("name").is_some();
+                let aim = match named.then(|| self.aim(&w, args, false)).transpose() {
+                    Ok(aim) => aim,
+                    Err(why) => return report(app, &root, &what, Err(why)),
                 };
                 let thing = aim
                     .as_ref()
                     .map_or_else(|| format!("{:?}", w.title), Aim::what);
-                let what = format!("read the text of {thing}");
-                allow(app, &root, "see", &what, false, None, &reason)?;
-                watch::follow(w.pid);
                 let read = self
                     .text_pattern(&w, aim.as_ref())
                     .map(|t| (t, "through UI Automation"))
@@ -2317,17 +3014,45 @@ impl Desktop {
                         Ok((vec![text(said)], "Read its text.".into())),
                     );
                 }
+                // Before the human is asked about a copy that will not be
+                // made: one that would cost them what they had copied.
+                let kept = match keep_clip() {
+                    Ok(kept) => kept,
+                    Err(why) => return report(app, &root, &what, Err(why)),
+                };
                 // Copying takes keys and the clipboard, so it is operating.
-                let what = format!("select all and copy in {thing}, to read its text");
+                // An element that will not take the keyboard otherwise is
+                // clicked into, but only one that holds text: the click is
+                // named in the question and judged as desktop_click's is,
+                // and anything with an action of its own is never clicked
+                // to be read.
+                let clicks = aim
+                    .as_ref()
+                    .is_some_and(|a| click_to_read(a.control, a.invoke, a.toggle));
+                let mut what = format!("select all and copy in {thing}, to read its text");
+                if clicks {
+                    what.push_str(", clicking into it if it does not take the keyboard");
+                }
+                let said = self.said(&w);
+                let by_click = aim
+                    .as_ref()
+                    .filter(|_| clicks)
+                    .and_then(|a| risk(Doing::Click, &a.scene(&w, &said)));
+                let risky = flag("risky") || by_click.is_some();
                 let point = aim
                     .as_ref()
                     .map_or_else(|| window_point(&w), |a| aim_point(&w, a));
-                allow(app, &root, "operate", &what, flag("risky"), point, &reason)?;
+                let answer = allow(app, &root, "operate", &what, risky, point, &reason);
+                self.heard(&w, true, answer)?;
                 let front = front_before();
-                let copied = self.copy_text(&w, aim.as_ref());
+                let copied = same_window(&w)
+                    .and_then(|()| self.copy_text(&w, aim.as_ref(), clicks, &kept));
                 let back = after_action(front.as_ref(), &w, Duration::ZERO, false);
-                let result = copied.map(|t| {
+                let result = copied.map(|(t, put_back)| {
                     let mut said = text_answer(&t, "by selecting all and copying it");
+                    if !put_back {
+                        said.push_str(NOT_PUT_BACK);
+                    }
                     said.push_str(&back);
                     (vec![text(said)], "Copied its text.".to_string())
                 });
@@ -2339,10 +3064,16 @@ impl Desktop {
                 } else {
                     format!("read what changed in {:?}", w.title)
                 };
-                allow(app, &root, "see", &what, false, None, &reason)?;
-                watch::follow(w.pid);
+                let answer = allow(app, &root, "see", &what, false, None, &reason);
+                if answer.is_err() {
+                    // A no to a program watched since earlier ends that.
+                    self.revoke(w.pid);
+                }
+                self.heard(&w, false, answer)?;
+                self.still.insert(w.pid, Instant::now());
+                watch::follow(&root);
                 let answer = if name == "desktop_wait" {
-                    self.wait(args, Some(&w))
+                    self.wait(args, Some(&w), app)
                 } else {
                     Ok(self.changes(args, Some(&w), app))
                 };
@@ -2363,6 +3094,54 @@ impl Desktop {
         }
     }
 
+    /// Takes program `pid` for no longer allowed: unhooks it, drops what
+    /// was kept of its changes and forgets the session's place in them.
+    fn revoke(&mut self, pid: u32) {
+        watch::unfollow(pid);
+        self.still.remove(&pid);
+        self.seen.remove(&Some(pid));
+        self.granted.remove(&pid);
+    }
+
+    /// Asks the app again whether this session may still look at each
+    /// watched program, or at `pid`'s alone, before changes are told that
+    /// no window was named for: a program is watched from its first
+    /// approval on, and the human may have taken it off the list of
+    /// allowed programs since, which counts at once. It is the question a
+    /// named call asks, which the app answers from its standing grant
+    /// without a dialog while that holds. A yes holds for
+    /// [`GRANT_HOLDS`]. A no, or no answer, ends the watching and drops
+    /// what was kept. Says what the agent is told of the programs
+    /// dropped, nothing when all may still be looked at.
+    fn regrant<A: FnMut(Value) -> Result<Value, String>>(
+        &mut self,
+        pid: Option<u32>,
+        app: &mut A,
+    ) -> String {
+        let followed = watch::followed();
+        // A program that ended is not asked about, nor kept.
+        self.still
+            .retain(|p, _| followed.iter().any(|w| w.pid == *p));
+        let mut said = String::new();
+        for w in to_ask_again(followed, &self.still, pid, Instant::now()) {
+            let what = format!("keep reading what changes in {}", w.exe);
+            match allow(app, &w, "see", &what, false, None, "") {
+                Ok(()) => {
+                    self.still.insert(w.pid, Instant::now());
+                }
+                Err(why) => {
+                    self.revoke(w.pid);
+                    said.push_str(&format!(
+                        "\n({} is no longer watched, and what was kept of its changes is \
+                         dropped: {why}. Name its window to ask for it again.)",
+                        w.exe
+                    ));
+                }
+            }
+        }
+        said
+    }
+
     /// What changed since the last call, in `w`'s program or in every
     /// program watched, the helper's too.
     fn changes<A: FnMut(Value) -> Result<Value, String>>(
@@ -2372,28 +3151,44 @@ impl Desktop {
         app: &mut A,
     ) -> String {
         let pid = w.map(|w| w.pid);
+        // A named window was asked for just now. The rest is asked again.
+        let revoked = match pid {
+            Some(_) => String::new(),
+            None => self.regrant(None, app),
+        };
+        let unwatched = w.filter(|w| !watch::following(w.pid));
         let mut out = if pid.is_none() && !watch::any_followed() {
             NOTHING_WATCHED.to_string()
+        } else if let Some(w) = unwatched {
+            // Not "nothing changed": nothing is known.
+            not_watched(&w.exe, watch::trouble(w.pid))
         } else {
             watch::flush();
             let asked = args
                 .get("since")
                 .and_then(Value::as_u64)
                 .filter(|_| !self.part);
-            let since = asked.unwrap_or_else(|| self.seen.get(&pid).copied().unwrap_or(0));
+            let kept = self.seen.get(&pid).copied().unwrap_or(0);
+            let (since, restarted) = watch::cursor_from(asked, kept, watch::newest());
             let (list, lost, newest) = watch::since(since, pid);
             self.seen.insert(pid, newest);
             let scope = match w {
                 Some(w) => format!(" in {:?}", w.title),
                 None => " in the watched programs".to_string(),
             };
-            if self.part {
-                changes_part(&list, lost, &scope)
+            let stalled = watch::stalled();
+            let told = if self.part {
+                changes_part(&list, lost, &scope, stalled)
             } else {
-                changes_text(&list, since, newest, lost, &scope)
-            }
+                changes_text(&list, since, newest, lost, &scope, stalled)
+            };
+            format!("{}{told}", restarted.unwrap_or_default())
         };
+        out.push_str(&revoked);
         if pid.is_none() {
+            for (exe, why) in watch::troubles() {
+                out.push_str(&format!("\n({})", not_watched(&exe, Some(why))));
+            }
             if let Some(helper) = self.helper.as_mut() {
                 // The agent's `since` counts in this ring; the helper keeps
                 // its own place in its own.
@@ -2434,22 +3229,42 @@ impl Desktop {
 
     /// The helper's side of an unnamed wait, see [`PEEK`]: without `after`
     /// it marks where the wait begins, with it it says what changed since
-    /// and whether the text or quiet waited for holds here. With `commit`
-    /// the changes count as told, as `desktop_changes` counts them.
-    fn peek(&mut self, args: &Value) -> Value {
-        watch::flush();
+    /// and whether the text or quiet waited for holds here. With `commit`,
+    /// at the wait's end, the changes count as told, as `desktop_changes`
+    /// counts them, those from before the wait that were not told yet
+    /// among them. The app is asked whether each program may still be
+    /// looked at where the wait begins and where it ends, not on every
+    /// look between.
+    fn peek<A: FnMut(Value) -> Result<Value, String>>(
+        &mut self,
+        args: &Value,
+        app: &mut A,
+    ) -> Value {
         let Some(after) = args["after"].as_u64() else {
-            return json!({ "newest": watch::newest(), "started_ms": watch::now_ms() });
+            let note = self.regrant(None, app);
+            watch::flush();
+            return json!({
+                "newest": watch::newest(),
+                "started_ms": watch::now_ms(),
+                "note": note,
+            });
         };
         let started = args["started_ms"].as_u64().unwrap_or(0);
-        let (seen, _, newest) = if args["commit"] == true {
-            let read = watch::since(after, None);
-            self.seen.insert(None, read.2);
-            read
+        let (seen, said, revoked) = if args["commit"] == true {
+            let revoked = self.regrant(None, app);
+            watch::flush();
+            let from = self.seen.get(&None).copied().unwrap_or(0).min(after);
+            let (all, lost, newest) = watch::since(from, None);
+            self.seen.insert(None, newest);
+            let (before, during) = watch::split_at(all, after);
+            let mut said = watch::meanwhile_text(&before, &during, lost, watch::stalled(), true);
+            said.push_str(&revoked);
+            (during, said, !revoked.is_empty())
         } else {
-            watch::peek(after, None)
+            watch::flush();
+            (watch::peek(after, None).0, String::new(), false)
         };
-        let now = watch::now_ms();
+        let (now, stalled) = (watch::now_ms(), watch::stalled());
         let text = Until {
             text: args["text"].as_str().map(String::from),
             ..Until::default()
@@ -2457,23 +3272,38 @@ impl Desktop {
         let hit = text
             .text
             .is_some()
-            .then(|| verdict(&text, &[], &seen, started, now))
+            .then(|| verdict(&text, &[], &seen, started, now, stalled))
             .flatten();
         let quiet = args["quiet_ms"].as_u64().map(|q| {
             let quiet = Until {
                 quiet_ms: Some(q),
                 ..Until::default()
             };
-            verdict(&quiet, &[], &seen, started, now).is_some()
+            verdict(&quiet, &[], &seen, started, now, stalled).is_some()
         });
         let skip = seen.len().saturating_sub(watch::MOST_LINES);
         let lines: Vec<String> = seen[skip..].iter().map(watch::line).collect();
-        json!({ "newest": newest, "hit": hit, "quiet": quiet, "lines": lines })
+        json!({
+            "newest": watch::newest(),
+            "hit": hit,
+            "quiet": quiet,
+            "lines": lines,
+            "said": said,
+            "revoked": revoked,
+        })
     }
 
     /// Waits until what `args` asks for holds, in `w`'s program or in any
-    /// watched, and says which held and what changed meanwhile.
-    fn wait(&mut self, args: &Value, w: Option<&Window>) -> Result<String, String> {
+    /// watched, and says which held and what changed meanwhile. It reads
+    /// from the session's place, not from its own start, so what changed
+    /// between the last `desktop_changes` and the wait is told too, apart,
+    /// and only what came after its start decides what it found.
+    fn wait<A: FnMut(Value) -> Result<Value, String>>(
+        &mut self,
+        args: &Value,
+        w: Option<&Window>,
+        app: &mut A,
+    ) -> Result<String, String> {
         let s = |k: &str| {
             args.get(k)
                 .and_then(Value::as_str)
@@ -2492,15 +3322,22 @@ impl Desktop {
         }
         let pid = w.map(|w| w.pid);
         let needs_watch = until.text.is_some() || until.quiet_ms.is_some();
+        if let Some(w) = w.filter(|w| needs_watch && !watch::following(w.pid)) {
+            // Waiting blind would end as "it did not come" or "quiet".
+            return Err(not_watched(&w.exe, watch::trouble(w.pid)));
+        }
+        // What may no longer be looked at is dropped before the wait and
+        // again before its changes are told.
+        let mut note = self.regrant(pid, app);
         // Windows' titles reach this session from any program, but what
         // changes inside one that runs as administrator only the helper
         // sees, so an unnamed wait asks it too while it runs.
-        let mut note = String::new();
         let mut theirs: Option<(Value, Peeked)> = None;
         if needs_watch && pid.is_none() && self.helper.is_some() {
-            match self.ask_helper(PEEK, &json!({})) {
+            match self.ask_helper(PEEK, &json!({}), app) {
                 Ok(content) => {
                     let mark = content.first().cloned().unwrap_or_default();
+                    note.push_str(mark["note"].as_str().unwrap_or_default());
                     let ask = json!({
                         "after": mark["newest"],
                         "started_ms": mark["started_ms"],
@@ -2514,7 +3351,7 @@ impl Desktop {
                     };
                     theirs = Some((ask, unheard));
                 }
-                Err(why) => note = helper_note(&why),
+                Err(why) => note.push_str(&helper_note(&why)),
             }
         }
         if needs_watch && pid.is_none() && !watch::any_followed() && theirs.is_none() {
@@ -2534,13 +3371,17 @@ impl Desktop {
             ..Until::default()
         };
         let mut polled = Instant::now();
-        let most = wait_limit(
-            args.get("timeout_ms").and_then(Value::as_u64),
-            std::env::var(WAIT_ENV).ok().as_deref(),
+        let most = loop_limit(
+            wait_limit(
+                args.get("timeout_ms").and_then(Value::as_u64),
+                std::env::var(WAIT_ENV).ok().as_deref(),
+            ),
+            theirs.is_some(),
         );
         let titled = until.appears.is_some() || until.gone.is_some();
         watch::flush();
         let (mark, started, begun) = (watch::newest(), watch::now_ms(), Instant::now());
+        let from = self.seen.get(&pid).copied().unwrap_or(0).min(mark);
         let met = loop {
             let titles: Vec<String> = if titled {
                 wait_titles(list_windows(), pid)
@@ -2549,29 +3390,29 @@ impl Desktop {
             };
             // A look only: what the agent is told comes after the loop.
             let (seen, _, newest) = watch::peek(mark, pid);
-            let now = watch::now_ms();
+            let (now, stalled) = (watch::now_ms(), watch::stalled());
             if theirs.is_some() && polled.elapsed() >= HELPER_POLL {
                 polled = Instant::now();
                 let ask = theirs.as_ref().map(|(a, _)| a.clone()).unwrap_or_default();
-                match self.ask_helper(PEEK, &ask) {
+                match self.ask_helper(PEEK, &ask, app) {
                     Ok(content) => {
                         if let (Some((_, p)), Some(c)) = (theirs.as_mut(), content.first()) {
                             *p = peeked(c);
                         }
                     }
                     Err(why) => {
-                        note = helper_note(&why);
+                        note.push_str(&helper_note(&why));
                         theirs = None;
                     }
                 }
             }
             let holds = match &theirs {
-                None => verdict(&until, &titles, &seen, started, now),
+                None => verdict(&until, &titles, &seen, started, now, stalled),
                 Some((_, p)) => joined_verdict(
-                    verdict(&here, &titles, &seen, started, now),
+                    verdict(&here, &titles, &seen, started, now, stalled),
                     here_quiet
                         .quiet_ms
-                        .and_then(|_| verdict(&here_quiet, &[], &seen, started, now)),
+                        .and_then(|_| verdict(&here_quiet, &[], &seen, started, now, stalled)),
                     p,
                 ),
             };
@@ -2584,39 +3425,39 @@ impl Desktop {
             }
             watch::wait_for_change(newest, left.min(Duration::from_millis(150)));
         };
-        let (seen, _, newest) = watch::since(mark, pid);
+        let revoked = self.regrant(pid, app);
+        let mut cut = !revoked.is_empty();
+        let (all, lost, newest) = watch::since(from, pid);
         self.seen.insert(pid, newest);
+        let (before, during) = watch::split_at(all, mark);
         let took = begun.elapsed().as_secs_f32();
-        let mut meanwhile = String::new();
-        if seen.is_empty() {
-            meanwhile.push_str(" Nothing changed meanwhile.");
-        } else {
-            meanwhile.push_str(" Meanwhile:");
-            let skip = seen.len().saturating_sub(watch::MOST_LINES);
-            for c in &seen[skip..] {
-                meanwhile.push('\n');
-                meanwhile.push_str(&watch::line(c));
-            }
-        }
+        let mut meanwhile =
+            watch::meanwhile_text(&before, &during, lost, watch::stalled(), false);
         if let Some((mut ask, _)) = theirs {
             ask["commit"] = json!(true);
-            match self.ask_helper(PEEK, &ask) {
+            match self.ask_helper(PEEK, &ask, app) {
                 Ok(content) => {
-                    let lines = content.first().map(peeked).unwrap_or_default().lines;
-                    if !lines.is_empty() {
-                        meanwhile.push_str(
-                            "\nMeanwhile in programs that run as administrator, counted apart:",
-                        );
-                        for l in lines {
-                            meanwhile.push('\n');
-                            meanwhile.push_str(&l);
-                        }
+                    let p = content.first().map(peeked).unwrap_or_default();
+                    if !p.said.is_empty() {
+                        meanwhile
+                            .push_str("\nIn programs that run as administrator, counted apart:");
+                        meanwhile.push_str(&p.said);
                     }
+                    cut |= p.revoked;
                 }
-                Err(why) => note = helper_note(&why),
+                Err(why) => note.push_str(&helper_note(&why)),
             }
         }
+        meanwhile.push_str(&revoked);
         meanwhile.push_str(&note);
+        if cut {
+            // What the wait found may have come from the program dropped,
+            // so it is not told.
+            return Err(format!(
+                "The wait ended after {took:.1} s without an answer: a program it watched may \
+                 no longer be looked at.{meanwhile}"
+            ));
+        }
         match met {
             Some(v) => Ok(format!("Done after {took:.1} s: {v}.{meanwhile}")),
             // An error, so the agent does not take the silence for a yes
@@ -2630,10 +3471,56 @@ impl Desktop {
         }
     }
 
+    /// Notes that the app let this session into `w`'s program, to look or
+    /// to `operate`.
+    fn let_in(&mut self, w: &Window, operate: bool) {
+        *self.granted.entry(w.pid).or_default() |= operate;
+    }
+
+    /// Keeps what the app answered a question about `w`'s program: a yes
+    /// lets the session in, a no takes it for not let in any more.
+    fn heard(&mut self, w: &Window, operate: bool, answer: Result<(), String>) -> Result<(), String> {
+        match &answer {
+            Ok(()) => self.let_in(w, operate),
+            Err(_) => {
+                self.granted.remove(&w.pid);
+            }
+        }
+        answer
+    }
+
+    /// Asks the app before anything of `w` is read, when the session was
+    /// not let into its program that far yet. `what` is in the agent's own
+    /// words, since the element it names is not looked for until the
+    /// human says yes: otherwise "nothing has a name like that" against a
+    /// question would tell what a program holds that nobody allowed.
+    /// Gives `what` back when it was asked, for [`looked`]. The action
+    /// itself is asked for after the read, with what was found.
+    fn ask_first<A: FnMut(Value) -> Result<Value, String>>(
+        &mut self,
+        app: &mut A,
+        w: &Window,
+        root: &Window,
+        operate: bool,
+        what: String,
+        reason: &str,
+    ) -> Result<Option<String>, String> {
+        if self.granted.get(&w.pid).is_some_and(|o| *o || !operate) {
+            return Ok(None);
+        }
+        let action = if operate { "operate" } else { "see" };
+        let answer = allow(app, root, action, &what, false, None, reason);
+        self.heard(w, operate, answer)?;
+        Ok(Some(what))
+    }
+
     fn snapshot(&mut self, w: &Window) -> Result<String, String> {
         let com = self.com()?;
-        let root = unsafe { com.uia.ElementFromHandleBuildCache(hwnd(w.hwnd), &com.tree) }
-            .map_err(|e| format!("UI Automation could not read {:?}: {}", w.title, win_err(e)))?;
+        let (uia, tree, id) = (Sent(com.uia.clone()), Sent(com.tree.clone()), w.hwnd);
+        let root = timed(TREE_WAIT, &w.title, move || {
+            unsafe { uia.get().ElementFromHandleBuildCache(hwnd(id), tree.get()) }.map(Sent)
+        })?;
+        let root = root.get();
         let origin = window_rect(w.hwnd);
         let mut nodes = Vec::new();
         let mut elements = Vec::new();
@@ -2709,49 +3596,46 @@ impl Desktop {
     /// Every element in `w`, each with what an action needs to know.
     fn all(&mut self, w: &Window) -> Result<Vec<Aim>, String> {
         let com = self.com()?;
-        unsafe {
-            let root = com.uia.ElementFromHandle(hwnd(w.hwnd)).map_err(|e| {
-                format!("UI Automation could not read {:?}: {}", w.title, win_err(e))
-            })?;
-            let every = com.uia.CreateTrueCondition().map_err(win_err)?;
-            let found = root
-                .FindAllBuildCache(TreeScope_Descendants, &every, &com.one)
-                .map_err(win_err)?;
+        let (uia, one, id) = (Sent(com.uia.clone()), Sent(com.one.clone()), w.hwnd);
+        let found = timed(TREE_WAIT, &w.title, move || unsafe {
+            let uia = uia.get();
+            let root = uia.ElementFromHandle(hwnd(id))?;
+            let every = uia.CreateTrueCondition()?;
+            let found = root.FindAllBuildCache(TreeScope_Descendants, &every, one.get())?;
             let n = found.Length().unwrap_or(0);
-            Ok((0..n)
-                .filter_map(|i| found.GetElement(i).ok())
-                .map(aim_of)
-                .collect())
-        }
+            let elements: Vec<IUIAutomationElement> =
+                (0..n).filter_map(|i| found.GetElement(i).ok()).collect();
+            Ok(Sent(elements))
+        })?;
+        Ok(found.0.into_iter().map(aim_of).collect())
     }
 
-    /// What `w` says, when it is a dialog: a small one's text, and whether
-    /// it is a standard file dialog. A window that is not a dialog says
-    /// nothing here; its title speaks for it.
+    /// What `w` says, when it is a dialog: a small one's text and buttons,
+    /// and whether it is a standard file dialog. A window that is not a
+    /// dialog says nothing here; its title speaks for it.
     fn said(&mut self, w: &Window) -> Said {
         if !is_dialog(w) {
             return Said::default();
         }
-        let Ok(all) = self.all(w) else {
-            return Said::default();
-        };
-        let file_dialog = all.iter().any(|a| file_name_field(a.control, &a.name));
-        let texts = if all.len() < SMALL_DIALOG {
-            all.into_iter()
-                .filter(|a| a.control == "Text" && !a.name.trim().is_empty())
-                .map(|a| a.name)
-                .collect()
-        } else {
-            Vec::new()
-        };
-        Said { texts, file_dialog }
+        match self.all(w) {
+            Ok(all) => {
+                let elements: Vec<(&str, &str)> =
+                    all.iter().map(|a| (a.control, a.name.as_str())).collect();
+                said_from(&elements)
+            }
+            // A dialog that will not be read is not taken for harmless.
+            Err(_) => Said {
+                unread: true,
+                ..Said::default()
+            },
+        }
     }
 
-    /// The name of what has the keyboard, when it is in `w`, and its
-    /// middle on the screen, where a key pressed now lands.
-    fn focused(&mut self, w: &Window) -> (String, Option<(i32, i32)>) {
+    /// What has the keyboard, when it is in `w`: where a key pressed now
+    /// lands.
+    fn focused(&mut self, w: &Window) -> Focused {
         let Ok(com) = self.com() else {
-            return (String::new(), None);
+            return Focused::default();
         };
         let el = unsafe { com.uia.GetFocusedElementBuildCache(&com.one) }
             .ok()
@@ -2759,15 +3643,21 @@ impl Desktop {
             // read live; a cached read of it always fails.
             .filter(|el| unsafe { el.CurrentProcessId() }.ok() == Some(w.pid as i32));
         let Some(el) = el else {
-            return (String::new(), None);
+            return Focused::default();
         };
         unsafe {
-            let name = el.CachedName().map(|b| b.to_string()).unwrap_or_default();
-            let at = el
-                .CachedBoundingRectangle()
-                .ok()
-                .and_then(|r| centre(r.left, r.top, r.right, r.bottom));
-            (name, at)
+            Focused {
+                control: control_name(el.CachedControlType().map_or(0, |c| c.0)),
+                name: el.CachedName().map(|b| b.to_string()).unwrap_or_default(),
+                automation_id: el
+                    .CachedAutomationId()
+                    .map(|b| b.to_string())
+                    .unwrap_or_default(),
+                at: el
+                    .CachedBoundingRectangle()
+                    .ok()
+                    .and_then(|r| centre(r.left, r.top, r.right, r.bottom)),
+            }
         }
     }
 
@@ -2780,8 +3670,35 @@ impl Desktop {
     ) -> Result<String, String> {
         let thing = aim.what();
         let plain = button == "left" && !double;
-        let mut rect = aim.rect;
         let only_expands = aim.expand && !aim.invoke && !aim.toggle && !aim.select;
+        let expands = click_way(plain, only_expands, true) == ClickWay::Expand;
+        if !expands {
+            // First, so a minimized window is back on screen before its
+            // element is asked where it is.
+            bring_forward(w)?;
+        }
+        // Read anew: the rectangle in `aim` is from before the human was
+        // asked, who may have taken a minute and a half, and the window
+        // may have moved, scrolled or redrawn since. A click at the old
+        // place would land on whatever is there now.
+        let mut rect = RECT::default();
+        if !expands {
+            let now = read_on_the_side(&aim.el, |el| unsafe {
+                Ok((
+                    el.CurrentBoundingRectangle()?,
+                    el.CurrentIsOffscreen()?.as_bool(),
+                ))
+            });
+            let Some((r, offscreen)) = now else {
+                return Err(format!(
+                    "{thing} is gone from the window or the program does not answer, so \
+                     nothing was clicked; take a new desktop_snapshot"
+                ));
+            };
+            // One scrolled out of view may still say where it would be,
+            // behind something else of the program.
+            rect = if offscreen { RECT::default() } else { r };
+        }
         if click_way(plain, only_expands, has_place(rect)) == ClickWay::Nowhere {
             // Brought into view where the program can, so the click still
             // lands on the element and not on a guess.
@@ -2789,6 +3706,7 @@ impl Desktop {
                 rect = r;
             }
         }
+        let moved = !expands && has_place(aim.rect) && rect != aim.rect;
         let point = match click_way(plain, only_expands, has_place(rect)) {
             ClickWay::Expand => {
                 let expanded = aim.expanded;
@@ -2832,7 +3750,12 @@ impl Desktop {
                 "{thing} has no place on screen, so nothing was clicked"
             ));
         };
-        bring_forward(w)?;
+        if !mouse_let_go() {
+            return Err(format!(
+                "the user is holding a mouse button (dragging something), and a click now \
+                 would drop it, so {thing} was not clicked; try again in a moment"
+            ));
+        }
         let desk = unsafe {
             [
                 GetSystemMetrics(SM_XVIRTUALSCREEN),
@@ -2883,11 +3806,16 @@ impl Desktop {
             return Err(BLOCKED.into());
         }
         Ok(format!(
-            "Clicked {thing} with a real {}{} click at {},{} in the window.",
+            "Clicked {thing} with a real {}{} click at {},{} in the window{}.",
             if double { "double " } else { "" },
             button,
             x - o.left,
-            y - o.top
+            y - o.top,
+            if moved {
+                ", where it had moved to since it was asked about"
+            } else {
+                ""
+            }
         ))
     }
 
@@ -2928,7 +3856,7 @@ impl Desktop {
                 }
             } else {
                 self.focus(w, aim)?;
-                send_strokes(&text_strokes(typed))?;
+                type_keys(w.pid, typed)?;
                 // The program takes typed keys in its own time.
                 thread::sleep(Duration::from_millis(120));
                 format!(
@@ -2951,7 +3879,10 @@ impl Desktop {
                 self.focus(w, aim)
                     .map_err(|e| format!("{said}, but Enter was not pressed: {e}"))?;
             }
-            send_strokes(&chord_strokes(&[], VK_RETURN))?;
+            // Reading the value back took a while, and Enter in a window
+            // that came to the front meanwhile confirms whatever it asks.
+            send_strokes(w.pid, &chord_strokes(&[], VK_RETURN))
+                .map_err(|e| format!("{said}, but Enter was not pressed: {e}"))?;
             said.push_str(" and pressed Enter");
         }
         said.push('.');
@@ -2962,13 +3893,21 @@ impl Desktop {
     /// Puts the keyboard in `aim`, its window in front, or says why not.
     fn focus(&mut self, w: &Window, aim: &Aim) -> Result<(), String> {
         bring_forward(w)?;
-        unsafe { aim.el.SetFocus() }.map_err(|e| {
-            format!(
-                "{} would not take the keyboard ({}), so nothing was typed",
+        // On the side: a program that is busy or showing a modal dialog
+        // holds the call, and with it this server's one thread.
+        match on_the_side(&aim.el, |el| unsafe { el.SetFocus() }) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(format!(
+                "{} did not take the keyboard within {} seconds (the program is not \
+                 answering), so nothing was typed",
                 aim.what(),
-                win_err(e)
-            )
-        })
+                PATTERN_WAIT.as_secs()
+            )),
+            Err(e) => Err(format!(
+                "{} would not take the keyboard ({e}), so nothing was typed",
+                aim.what()
+            )),
+        }
     }
 
     /// The text of `aim`, or of the window, through UI Automation's text
@@ -3028,44 +3967,86 @@ impl Desktop {
 
     /// The text of `aim`, or of what has the keyboard in `w`, by selecting
     /// all and copying it, for lists, grids and panes that UI Automation
-    /// can not read. The clipboard's text is put back after.
-    fn copy_text(&mut self, w: &Window, aim: Option<&Aim>) -> Result<String, String> {
+    /// can not read. `kept` is what the clipboard held, put back after;
+    /// the answer says whether it could be. `may_click` lets an element
+    /// that will not take the keyboard through UI Automation be clicked
+    /// into, which the human was asked about.
+    fn copy_text(
+        &mut self,
+        w: &Window,
+        aim: Option<&Aim>,
+        may_click: bool,
+        kept: &Kept,
+    ) -> Result<(String, bool), String> {
+        let thing = aim.map_or_else(|| format!("{:?}", w.title), Aim::what);
         match aim {
             // An output pane may not take the keyboard through UI
             // Automation, but does from a click into it.
-            Some(a) => {
-                if self.focus(w, a).is_err() {
+            Some(a) => match self.focus(w, a) {
+                Ok(()) => {}
+                Err(_) if may_click => {
                     self.click(w, a, "left", false)?;
                 }
-            }
+                Err(why) => {
+                    return Err(format!(
+                        "{why}, and desktop_text does not click a {} to give it the keyboard, \
+                         since that click would do what it says; desktop_snapshot or \
+                         desktop_screenshot of it is what is left",
+                        a.control
+                    ))
+                }
+            },
             None => bring_forward(w)?,
         }
-        let kept = clip_text();
         let before = unsafe { GetClipboardSequenceNumber() };
-        send_strokes(&chord_strokes(&[VK_CONTROL], b'A' as u16))?;
+        send_strokes(w.pid, &chord_strokes(&[VK_CONTROL], b'A' as u16))?;
         thread::sleep(Duration::from_millis(80));
-        send_strokes(&chord_strokes(&[VK_CONTROL], b'C' as u16))?;
+        send_strokes(w.pid, &chord_strokes(&[VK_CONTROL], b'C' as u16))?;
         let begun = Instant::now();
         while unsafe { GetClipboardSequenceNumber() } == before && begun.elapsed() < COPY_WAIT {
             thread::sleep(Duration::from_millis(30));
         }
-        if unsafe { GetClipboardSequenceNumber() } == before {
+        let changed = unsafe { GetClipboardSequenceNumber() };
+        if changed == before {
             return Err(format!(
-                "nothing was copied from {}: it may not take Control+A and Control+C; \
-                 desktop_screenshot of it is what is left",
-                aim.map_or_else(|| format!("{:?}", w.title), Aim::what)
+                "nothing was copied from {thing}: it may not take Control+A and Control+C; \
+                 desktop_screenshot of it is what is left"
+            ));
+        }
+        // The clipboard changed, but the human may be the one who copied
+        // something in that second and a half. Only what the program
+        // itself put there is read, and anything else is left alone: it
+        // is theirs, and newer than what was kept.
+        let owner = unsafe { GetClipboardOwner() }.ok().map(|h| {
+            let mut pid = 0;
+            unsafe { GetWindowThreadProcessId(h, Some(&mut pid)) };
+            pid
+        });
+        if covered(owner.is_some(), owner.unwrap_or(0), w.pid) {
+            return Err(format!(
+                "the clipboard changed, but Windows does not name {} as the one that put it \
+                 there (the user may have copied something meanwhile), so nothing was read \
+                 and the clipboard was left as it is now; desktop_snapshot or \
+                 desktop_screenshot of {thing} is what is left",
+                program_of(w)
             ));
         }
         let copied = clip_text();
+        if unsafe { GetClipboardSequenceNumber() } != changed {
+            return Err(
+                "the clipboard changed again while it was read, so what was read is not \
+                 given and the clipboard was left as it is now; try again"
+                    .into(),
+            );
+        }
         // The read leaves the clipboard as it found it, or empty when it
         // held no text, rather than holding what was copied.
-        match kept {
-            Some(t) => set_clip_text(&t),
-            None => clear_clip(),
+        let put_back = put_back(kept);
+        match copied.filter(|t| !t.trim().is_empty()) {
+            Some(text) => Ok((text, put_back)),
+            None if put_back => Err("the copy held no text".into()),
+            None => Err(format!("the copy held no text.{NOT_PUT_BACK}")),
         }
-        copied
-            .filter(|t| !t.trim().is_empty())
-            .ok_or_else(|| "the copy held no text".to_string())
     }
 
     /// The window as a PNG, cut to `crop` (on screen) when given, and
@@ -3106,17 +4087,6 @@ impl Desktop {
     }
 }
 
-/// What came of an action on `w`, told by the watcher from change `mark`
-/// on, or by the windows that are new since `before` when it has nothing.
-/// Whether acting on `names` (an element, a key) in `w` looks risky: by
-/// them, the title, and for a small dialog, what its text says.
-fn looks_risky_in(w: &Window, said: &Said, names: &[&str]) -> bool {
-    let mut texts: Vec<&str> = names.to_vec();
-    texts.push(&w.title);
-    texts.extend(said.texts.iter().map(String::as_str));
-    looks_risky(&texts)
-}
-
 /// An operate action in parts, for the patterns the human pre-approved.
 fn act_of(kind: Kind, w: &Window, said: &Said, control: &str, name: &str, key: &str) -> Act {
     Act {
@@ -3129,6 +4099,8 @@ fn act_of(kind: Kind, w: &Window, said: &Said, control: &str, name: &str, key: &
     }
 }
 
+/// What came of an action on `w`, told by the watcher from change `mark`
+/// on, or by the windows that are new since `before` when it has nothing.
 fn came_of(before: &[Window], w: &Window, mark: u64) -> String {
     if watch::following(w.pid) {
         watch::flush();
@@ -3302,10 +4274,37 @@ fn walk(
     }
 }
 
+/// Whether window `h` at `at` shows whole on the screen: it is the window
+/// in front, and at none of a grid of points over it is there a window of
+/// another process. The error says what is in the way.
+unsafe fn shows_whole(h: HWND, at: RECT) -> Result<(), String> {
+    if GetForegroundWindow() != h {
+        return Err("it is not the window in front".into());
+    }
+    let mut pid = 0;
+    GetWindowThreadProcessId(h, Some(&mut pid));
+    for (x, y) in probe_points(at) {
+        let under = WindowFromPoint(POINT { x, y });
+        let top = GetAncestor(under, GA_ROOT);
+        let mut theirs = 0;
+        GetWindowThreadProcessId(top, Some(&mut theirs));
+        if covered(!under.is_invalid(), theirs, pid) {
+            return Err(if under.is_invalid() {
+                "part of it is off the screen".to_string()
+            } else {
+                let c = info(top.0 as isize);
+                format!("{:?} ({}) covers part of it", c.title, c.exe)
+            });
+        }
+    }
+    Ok(())
+}
+
 /// The window's pixels, as Windows draws it even when covered: 32 bit BGR
 /// rows, top first. A window Windows will not draw for this process (one
 /// run as administrator) is copied off the screen at `at` instead, which
-/// the second value says.
+/// the second value says, and only when [`shows_whole`] finds nothing of
+/// another program over it.
 unsafe fn print(h: HWND, at: RECT) -> Result<(Vec<u8>, bool), String> {
     let (width, height) = (at.right - at.left, at.bottom - at.top);
     let screen = GetDC(None);
@@ -3329,7 +4328,11 @@ unsafe fn print(h: HWND, at: RECT) -> Result<(Vec<u8>, bool), String> {
             // 2 is PW_RENDERFULLCONTENT, which draws what DirectX and
             // composition put in the window too; the crate has no name for it.
             let drawn = PrintWindow(h, dc, PRINT_WINDOW_FLAGS(2)).as_bool();
+            // The screen there shows whatever is on top, and the human
+            // let the session see this one program.
+            let whole = if drawn { Ok(()) } else { shows_whole(h, at) };
             let copied = !drawn
+                && whole.is_ok()
                 && BitBlt(
                     dc,
                     0,
@@ -3346,10 +4349,14 @@ unsafe fn print(h: HWND, at: RECT) -> Result<(Vec<u8>, bool), String> {
             let pixels = std::slice::from_raw_parts(bits as *const u8, len).to_vec();
             SelectObject(dc, old);
             let _ = DeleteObject(dib.into());
-            if drawn || copied {
-                Ok((pixels, copied))
-            } else {
-                Err("Windows could not draw the window".to_string())
+            match whole {
+                Ok(()) if drawn || copied => Ok((pixels, copied)),
+                Ok(()) => Err("Windows could not draw the window".to_string()),
+                Err(why) => Err(format!(
+                    "Windows would not draw this window for the agent, and it can not be \
+                     copied off the screen either: {why}, and the copy would show other \
+                     programs. desktop_snapshot still reads the window"
+                )),
             }
         }
         Err(e) => Err(win_err(e)),
@@ -3564,6 +4571,51 @@ mod tests {
         assert!(looks_risky(&["", "Set/Reset"]));
         assert!(!looks_risky(&["OK", "Cancel", "Watch Tab 1"]));
         assert!(!looks_risky(&[]));
+        for risky in [
+            "Remove",
+            "Erase all",
+            "Format",
+            "Upload to device",
+            "Send",
+            "Stop",
+            "Save",
+            "Apply",
+            "Discard changes",
+            "Uninstall",
+            "Overwrite",
+            "Gem",
+            "Fjern",
+            "Slet alt",
+            "Overskriv",
+            "Send nu",
+            "Nulstil",
+        ] {
+            assert!(looks_risky(&[risky]), "{risky}");
+        }
+        // The access key's mark hides no word, wherever it stands.
+        assert!(looks_risky(&["&Save"]));
+        assert!(looks_risky(&["Sa&ve"]));
+        assert!(looks_risky(&["De&lete"]));
+        assert!(looks_risky(&["_Apply"]));
+        // A word that only holds one of the short ones is not it.
+        for harmless in [
+            "Sender",
+            "Information",
+            "Stopwatch",
+            "Saved searches",
+            "Appliance",
+            "Gemt",
+            "Fjernskrivebord",
+            "Formatted text",
+        ] {
+            assert!(!looks_risky(&[harmless]), "{harmless}");
+        }
+        // The long ones count inside a word too, as they did.
+        assert!(looks_risky(&["Removed items"]));
+        assert_eq!(risky_word("btnSendNow", &[]), Some("send"));
+        assert_eq!(risky_word("Save As", &["save", "gem"]), None);
+        assert_eq!(risky_word("Save and apply", &["save", "gem"]), Some("apply"));
+        assert_eq!(words("btnSaveAll_2 &Now"), ["btn", "save", "all", "2", "now"]);
     }
 
     #[test]
@@ -3619,31 +4671,218 @@ mod tests {
         // A file dialog still confirms nothing by Enter, but Delete in its
         // file list is risky all the same.
         let k = |s: &str| parse_key(s).unwrap();
-        assert!(!risky_key(&k("Enter"), enter_confirms(true, true)));
-        assert!(risky_key(&k("Enter"), enter_confirms(true, false)));
-        assert!(risky_key(&k("Delete"), enter_confirms(true, true)));
+        assert!(key_risk(&k("Enter"), true, true, "Edit").is_none());
+        assert!(key_risk(&k("Enter"), true, false, "Edit").is_some());
+        assert!(key_risk(&k("Delete"), true, true, "List").is_some());
+    }
+
+    /// A scene with nothing risky in it but what the test puts there.
+    fn scene<'a>(title: &'a str, dialog: bool, said: &'a Said, target: Target<'a>) -> Scene<'a> {
+        Scene {
+            title,
+            dialog,
+            said,
+            target,
+        }
+    }
+
+    fn target<'a>(control: &'a str, name: &'a str, automation_id: &'a str) -> Target<'a> {
+        Target {
+            control,
+            name,
+            automation_id,
+        }
     }
 
     #[test]
     fn typing_a_path_into_a_file_dialog_is_not_risky_by_itself() {
-        let save = win(5, "Export", "SysmacStudio.exe");
         let said = Said {
-            texts: Vec::new(),
             file_dialog: true,
+            ..Said::default()
         };
-        assert!(!looks_risky_in(&save, &said, &["File name:"]));
-        let picks_file = said.file_dialog && file_name_field("ComboBox", "File name:");
-        assert!(!enter_confirms(true, picks_file));
+        let name_box = target("ComboBox", "File name:", "1148");
+        let typing = Doing::Type { submit: true };
+        assert_eq!(risk(typing, &scene("Export", true, &said, name_box)), None);
+        // A file dialog calling itself Save is no reason either, on its
+        // title or its button, but a click on that button is.
+        assert_eq!(risk(typing, &scene("Save As", true, &said, name_box)), None);
+        assert_eq!(risk(typing, &scene("Gem som", true, &said, name_box)), None);
+        let save = target("Button", "&Save", "1");
+        assert!(risk(Doing::Click, &scene("Save As", true, &said, save)).is_some());
+        // Its title is still judged by every other word.
+        let over = scene("Overwrite project", true, &said, name_box);
+        assert!(risk(typing, &over).is_some());
         // In any other field of it, Enter confirms as in any dialog.
-        let other = said.file_dialog && file_name_field("Edit", "Search");
-        assert!(enter_confirms(true, other));
+        let search = target("Edit", "Search", "");
+        assert!(risk(typing, &scene("Export", true, &said, search)).is_some());
+        let no_enter = Doing::Type { submit: false };
+        assert_eq!(risk(no_enter, &scene("Export", true, &said, search)), None);
         // A dialog that asks about a transfer is risky whatever is clicked.
-        let ask = win(6, "Sysmac Studio", "SysmacStudio.exe");
         let said = Said {
             texts: vec!["Transfer to the Controller?".into()],
-            file_dialog: false,
+            ..Said::default()
         };
-        assert!(looks_risky_in(&ask, &said, &["Yes"]));
+        let yes = target("Button", "Yes", "6");
+        let why = risk(Doing::Click, &scene("Sysmac Studio", true, &said, yes));
+        assert!(why.is_some_and(|w| w.contains("transfer")));
+    }
+
+    #[test]
+    fn nothing_risky_is_found_where_nothing_is() {
+        let said = Said::default();
+        let ok = target("Button", "OK", "btnOk");
+        assert_eq!(risk(Doing::Click, &scene("Watch", false, &said, ok)), None);
+        let field = target("Edit", "Name", "txtName");
+        let typing = Doing::Type { submit: true };
+        assert_eq!(risk(typing, &scene("Watch", false, &said, field)), None);
+        let k = parse_key("Down").unwrap();
+        let down = Doing::Press {
+            chord: &k,
+            key: "Down",
+        };
+        assert_eq!(risk(down, &scene("Watch", true, &said, field)), None);
+    }
+
+    #[test]
+    fn an_element_is_judged_by_its_automation_id_too() {
+        // The agent may aim by the id, and a program in another language
+        // keeps its ids.
+        let said = Said::default();
+        let by_id = target("Button", "Ja", "btnDeleteAll");
+        let why = risk(Doing::Click, &scene("Projekt", false, &said, by_id));
+        assert!(why.is_some_and(|w| w.contains("automation id")));
+        let saves = target("Button", "", "SaveButton");
+        assert!(risk(Doing::Click, &scene("Projekt", false, &said, saves)).is_some());
+        let plain = target("Button", "Ja", "btnYes");
+        assert_eq!(risk(Doing::Click, &scene("Projekt", false, &said, plain)), None);
+    }
+
+    #[test]
+    fn a_small_dialog_is_judged_by_its_buttons_and_a_large_one_by_its_title() {
+        // "Do you want to keep your changes?" says nothing risky, but
+        // what it offers does, whichever button is clicked.
+        let small = said_from(&[
+            ("Text", "Do you want to keep your changes?"),
+            ("Button", "&Save"),
+            ("Button", "Do&n't Save"),
+            ("Button", "Cancel"),
+        ]);
+        assert_eq!(small.buttons.len(), 3);
+        assert_eq!(small.texts, vec!["Do you want to keep your changes?"]);
+        let cancel = target("Button", "Cancel", "2");
+        let why = risk(Doing::Click, &scene("Editor", true, &small, cancel));
+        assert!(why.is_some_and(|w| w.contains("button")));
+        // A large one is not read for text or buttons, only told apart
+        // as a file dialog.
+        let mut many: Vec<(&str, &str)> = vec![("Button", "Delete"); SMALL_DIALOG];
+        many.push(("Edit", "File name:"));
+        let large = said_from(&many);
+        assert!(large.buttons.is_empty() && large.texts.is_empty());
+        assert!(large.file_dialog);
+        let plain = said_from(&vec![("Button", "Delete"); SMALL_DIALOG]);
+        assert_eq!(risk(Doing::Click, &scene("Options", true, &plain, cancel)), None);
+        // Its title and the element aimed at are judged all the same.
+        assert!(risk(Doing::Click, &scene("Reset options", true, &plain, cancel)).is_some());
+        let apply = target("Button", "Apply", "");
+        assert!(risk(Doing::Click, &scene("Options", true, &plain, apply)).is_some());
+    }
+
+    #[test]
+    fn a_dialog_that_could_not_be_read_is_not_taken_for_harmless() {
+        let unread = Said {
+            unread: true,
+            ..Said::default()
+        };
+        let ok = target("Button", "OK", "1");
+        assert!(risk(Doing::Click, &scene("Studio", true, &unread, ok)).is_some());
+    }
+
+    #[test]
+    fn line_breaks_and_tabs_are_not_typed_as_keys_outside_a_document() {
+        // Typed as keys, a line break is Enter and a tab leaves the field.
+        let no = typed_refusal("MyVar\n", true, "Edit").unwrap();
+        assert!(no.contains("a line break") && no.contains("submit"), "{no}");
+        assert!(typed_refusal("a\tb", true, "Custom")
+            .unwrap()
+            .contains("a tab"));
+        assert!(typed_refusal("a\tb\r\nc", true, "Pane")
+            .unwrap()
+            .contains("line breaks and tabs"));
+        // A document keeps them as text, and so does a value that is set.
+        assert_eq!(typed_refusal("a\n\tb", true, "Document"), None);
+        assert_eq!(typed_refusal("a\n\tb", false, "Edit"), None);
+        assert_eq!(typed_refusal("plain text", true, "Edit"), None);
+    }
+
+    #[test]
+    fn typing_that_stopped_says_how_far_it_got() {
+        let said = typed_short(40, 95, "\"Update\" (updater.exe) took the front");
+        assert!(said.contains("after 40 of 95 characters"), "{said}");
+        assert!(said.contains("updater.exe"), "{said}");
+        assert!(said.contains("Enter was not pressed"), "{said}");
+    }
+
+    #[test]
+    fn reading_clicks_only_into_what_holds_text() {
+        assert!(click_to_read("Pane", false, false));
+        assert!(click_to_read("Document", false, false));
+        assert!(click_to_read("DataGrid", false, false));
+        assert!(!click_to_read("Button", true, false));
+        assert!(!click_to_read("Button", false, false));
+        assert!(!click_to_read("MenuItem", false, false));
+        assert!(!click_to_read("Hyperlink", false, false));
+        assert!(!click_to_read("CheckBox", false, true));
+        // A pane that says it can be invoked is not only a pane.
+        assert!(!click_to_read("Pane", true, false));
+        assert!(!click_to_read("Custom", false, true));
+    }
+
+    #[test]
+    fn only_plain_text_on_the_clipboard_can_be_put_back() {
+        let f = |id: u32, name: &str| (id, name.to_string());
+        assert_eq!(clip_other(&[]), None);
+        let text = [f(13, ""), f(16, ""), f(1, ""), f(7, "")];
+        assert_eq!(clip_other(&text), None);
+        // A password manager's marks go with the text and are kept.
+        let secret = [
+            f(13, ""),
+            f(49500, "ExcludeClipboardContentFromMonitorProcessing"),
+            f(49501, "CanIncludeInClipboardHistory"),
+            f(49502, "CanUploadToCloudClipboard"),
+        ];
+        assert_eq!(clip_other(&secret), None);
+        assert_eq!(clip_other(&[f(8, ""), f(17, "")]).unwrap(), "a picture");
+        assert_eq!(clip_other(&[f(15, "")]).unwrap(), "files");
+        let rich = [f(13, ""), f(49400, "HTML Format")];
+        assert!(clip_other(&rich).unwrap().contains("HTML Format"));
+        assert!(clip_other(&[f(0x0200, "")]).unwrap().contains("format 512"));
+    }
+
+    #[test]
+    fn the_first_question_is_in_the_agent_s_own_words() {
+        assert_eq!(wanted(&json!({ "ref": "e12" })), "element e12");
+        assert_eq!(
+            wanted(&json!({ "name": "Transfer" })),
+            "the element named \"Transfer\""
+        );
+        assert_eq!(wanted(&json!({})), "what has the keyboard");
+    }
+
+    #[test]
+    fn a_window_is_looked_at_all_over_for_what_covers_it() {
+        let r = RECT {
+            left: 100,
+            top: 200,
+            right: 600,
+            bottom: 300,
+        };
+        let points = probe_points(r);
+        assert_eq!(points.len(), 25);
+        assert_eq!(points[0], (150, 210));
+        assert_eq!(points[24], (550, 290));
+        assert!(points
+            .iter()
+            .all(|(x, y)| (100..600).contains(x) && (200..300).contains(y)));
     }
 
     #[test]
@@ -3652,6 +4891,7 @@ mod tests {
         let said = Said {
             texts: vec!["Replace?".into()],
             file_dialog: true,
+            ..Said::default()
         };
         let act = act_of(Kind::Press, &w, &said, "", "File name:", "Enter");
         assert_eq!(
@@ -3824,20 +5064,22 @@ mod tests {
         let mut d = win(2, "Confirm", "a.exe");
         d.owner = Some(1);
         let open = |_: &Window| Reach::Open;
-        let t = windows_text(&[win(1, "Main", "a.exe"), d.clone()], open);
+        let all = |_: &Window| true;
+        let t = windows_text(&[win(1, "Main", "a.exe"), d.clone()], open, all);
         assert!(t.contains("- id=1 \"Main\" a.exe pid 7\n"), "{t}");
         assert!(
             t.ends_with("- id=2 \"Confirm\" a.exe pid 7 (dialog of id=1)"),
             "{t}"
         );
-        assert!(windows_text(&[], open).contains("No windows"));
-        let admin = windows_text(&[win(1, "Main", "a.exe"), d], |w| {
+        assert!(windows_text(&[], open, all).contains("No windows"));
+        let above = |w: &Window| {
             if w.hwnd == 2 {
                 Reach::Above
             } else {
                 Reach::Open
             }
-        });
+        };
+        let admin = windows_text(&[win(1, "Main", "a.exe"), d], above, all);
         assert!(admin.contains("- id=1 \"Main\" a.exe pid 7\n"), "{admin}");
         assert!(
             admin.contains("(dialog of id=1) (as administrator)\n"),
@@ -3845,19 +5087,35 @@ mod tests {
         );
         assert!(!admin.contains("Out of reach means"), "{admin}");
         assert!(admin.ends_with("let the helper run as administrator."));
-        let unsure = windows_text(&[win(3, "Service", "?")], |_| Reach::Unsure);
+        let unsure = windows_text(&[win(3, "Service", "?")], |_| Reach::Unsure, all);
         assert!(
             unsure.contains("\"Service\" ? pid 7 (out of reach)\n"),
             "{unsure}"
         );
         assert!(!unsure.contains("(as administrator)"), "{unsure}");
         assert!(unsure.contains("Out of reach means"), "{unsure}");
-        let system = windows_text(&[win(4, "Svc", "svc.exe")], |_| Reach::Beyond);
+        let system = windows_text(&[win(4, "Svc", "svc.exe")], |_| Reach::Beyond, all);
         assert!(
             system.ends_with("(above administrator, beyond reach)"),
             "{system}"
         );
         assert!(!system.contains("helper"), "{system}");
+    }
+
+    #[test]
+    fn the_window_list_cuts_the_titles_of_programs_not_let_into() {
+        let mail = win(1, "Re: the offer we must not lose, from the board - Mail", "mail.exe");
+        let mut ours = win(2, "A project with a long name that is ours to see - Studio", "s.exe");
+        ours.pid = 9;
+        let t = windows_text(&[mail, ours], |_| Reach::Open, |w| w.pid == 9);
+        assert!(
+            t.contains("- id=1 \"Re: the offer we must not lose, from ...\" mail.exe"),
+            "{t}"
+        );
+        assert!(
+            t.contains("\"A project with a long name that is ours to see - Studio\""),
+            "{t}"
+        );
     }
 
     #[test]
@@ -3899,9 +5157,60 @@ mod tests {
                 hit: Some("\"Done\" appeared".into()),
                 quiet: Some(false),
                 lines: vec!["a".into(), "b".into()],
+                said: String::new(),
+                revoked: false,
             }
         );
+        let end = peeked(&json!({ "said": "\nBefore the wait:\nx", "revoked": true }));
+        assert_eq!(end.said, "\nBefore the wait:\nx");
+        assert!(end.revoked);
         assert_eq!(peeked(&json!({})), Peeked::default());
+    }
+
+    #[test]
+    fn a_watched_program_is_asked_about_again_once_its_yes_is_old() {
+        let program = |pid: u32| Window {
+            pid,
+            ..win(pid as isize, "w", "app.exe")
+        };
+        let now = Instant::now() + GRANT_HOLDS * 4;
+        let mut still = HashMap::new();
+        still.insert(1, now - Duration::from_secs(1));
+        still.insert(2, now - GRANT_HOLDS);
+        let followed = || vec![program(1), program(2), program(3)];
+        let pids = |list: Vec<Window>| list.iter().map(|w| w.pid).collect::<Vec<_>>();
+        // A fresh yes holds, an old one and one never given do not.
+        assert_eq!(pids(to_ask_again(followed(), &still, None, now)), [2, 3]);
+        // A named program is asked about alone.
+        assert_eq!(pids(to_ask_again(followed(), &still, Some(3), now)), [3]);
+        assert!(to_ask_again(followed(), &still, Some(1), now).is_empty());
+        // A wait loop inside the hold asks nothing more.
+        still.insert(2, now);
+        still.insert(3, now);
+        assert!(to_ask_again(followed(), &still, None, now).is_empty());
+    }
+
+    #[test]
+    fn a_wait_with_the_helper_stays_inside_its_limit() {
+        let s = Duration::from_secs;
+        assert_eq!(loop_limit(s(60), false), s(60));
+        // The last look and the reading of the helper's changes may each
+        // take the helper's limit, and still the wait ends in time.
+        assert_eq!(loop_limit(s(60), true) + PEEK_LIMIT * 2, s(60));
+        assert_eq!(loop_limit(s(10), true), s(10) - PEEK_LIMIT * 2);
+        // Too short to spare that: half of it, never nothing.
+        assert_eq!(loop_limit(s(2), true), s(1));
+        // Far inside the helper's own limit for a call that operates.
+        assert!(PEEK_LIMIT * 10 < crate::desktop_helper::SILENCE);
+    }
+
+    #[test]
+    fn a_program_not_watched_is_never_said_to_be_unchanged() {
+        let said = not_watched("app.exe", Some("Windows would not hook it".into()));
+        assert!(said.starts_with("app.exe is not watched"), "{said}");
+        assert!(said.contains("Windows would not hook it"), "{said}");
+        assert!(!said.contains("Nothing changed"), "{said}");
+        assert!(not_watched("app.exe", None).contains("in time"));
     }
 
     #[test]
@@ -4068,19 +5377,79 @@ mod tests {
     #[test]
     fn keys_that_commit_or_destroy_are_risky() {
         let k = |s| parse_key(s).unwrap();
-        assert!(risky_key(&k("Delete"), false));
-        assert!(risky_key(&k("Shift+Del"), false));
-        assert!(risky_key(&k("Control+S"), false));
-        assert!(risky_key(&k("Control+Shift+s"), false));
-        assert!(risky_key(&k("Alt+F4"), false));
-        assert!(risky_key(&k("Enter"), true));
-        assert!(!risky_key(&k("Enter"), false));
-        assert!(!risky_key(&k("s"), false));
-        assert!(!risky_key(&k("F4"), false));
-        assert!(!risky_key(&k("F5"), true));
-        assert!(!risky_key(&k("Escape"), true));
+        // In a window that is no dialog, with the keyboard in a field.
+        let plain = |s| key_risk(&k(s), false, false, "Edit").is_some();
+        assert!(plain("Delete"));
+        assert!(plain("Shift+Del"));
+        assert!(plain("Control+S"));
+        assert!(plain("Control+Shift+s"));
+        assert!(plain("Alt+F4"));
+        assert!(!plain("Enter"));
+        assert!(!plain("s"));
+        assert!(!plain("F4"));
+        assert!(!plain("Space"));
+        // Alt and a letter only opens a menu there.
+        assert!(!plain("Alt+f"));
+        // In a dialog, with the keyboard in a field.
+        let field = |s| key_risk(&k(s), true, false, "Edit").is_some();
+        assert!(field("Enter"));
+        assert!(!field("F5"));
+        assert!(!field("Escape"));
+        assert!(!field("y"));
+        assert!(!field("Shift+y"));
+        assert!(!field("Space"));
         // The key's own name is among the texts judged too.
         assert!(looks_risky(&["", "Delete"]));
+    }
+
+    #[test]
+    fn keys_that_press_a_button_nobody_named_are_risky() {
+        let k = |s| parse_key(s).unwrap();
+        let on = |s, focus| key_risk(&k(s), true, false, focus).is_some();
+        // Space presses the button that has the keyboard, as Enter
+        // presses the default one.
+        assert!(on("Space", "Button"));
+        assert!(on("Space", "SplitButton"));
+        assert!(!on("Space", "Edit"));
+        assert!(!on("Space", "CheckBox"));
+        assert!(!on("Control+Space", "Button"));
+        // A button's access key: Alt with its letter from anywhere in the
+        // dialog, the letter alone when the keyboard is not in a field.
+        assert!(on("Alt+y", "Edit"));
+        assert!(on("Alt+1", "Edit"));
+        assert!(on("y", "Button"));
+        assert!(on("Shift+y", "CheckBox"));
+        assert!(on("y", ""));
+        assert!(on("ø", "Button"));
+        assert!(!on("y", "Edit"));
+        assert!(!on("y", "ComboBox"));
+        // In a list a letter searches.
+        assert!(!on("y", "ListItem"));
+        assert!(!on("Control+y", "Button"));
+        assert!(!on("Control+Alt+y", "Edit"));
+        // A file dialog's buttons are pressed by theirs as any other's.
+        assert!(key_risk(&k("Alt+s"), true, true, "Edit").is_some());
+        // Outside a dialog a button's access key is Alt with it, which
+        // opens a menu or presses what the window's own name speaks for.
+        assert!(key_risk(&k("y"), false, false, "Button").is_none());
+        // In an open menu a letter picks an item, dialog or not.
+        assert!(key_risk(&k("t"), false, false, "MenuItem").is_some());
+        assert!(key_risk(&k("t"), false, false, "Menu").is_some());
+        assert!(key_risk(&k("Down"), false, false, "MenuItem").is_none());
+        // Through the whole decision, with why.
+        let said = Said::default();
+        let chord = k("Space");
+        let space = Doing::Press {
+            chord: &chord,
+            key: "Space",
+        };
+        let ok = target("Button", "OK", "1");
+        let why = risk(space, &scene("Studio", true, &said, ok)).unwrap();
+        assert!(why.contains("Space presses the button"), "{why}");
+        assert_eq!(risk(space, &scene("Studio", false, &said, ok)), None);
+        // Outside a dialog the button's own name still speaks.
+        let del = target("Button", "Delete rung", "");
+        assert!(risk(space, &scene("Studio", false, &said, del)).is_some());
     }
 
     #[test]

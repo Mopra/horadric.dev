@@ -585,12 +585,27 @@ impl Helper {
         app: &mut A,
         settle: Duration,
     ) -> Result<Result<Vec<Value>, String>, String> {
+        self.call_within(name, args, app, settle, SILENCE)
+    }
+
+    /// As [`Helper::call`], for a call the helper answers at once (a look
+    /// at its own ring), which gives it `silence` and not the long limit
+    /// of a call that operates: a wait must not last minutes on a helper
+    /// that hangs.
+    pub fn call_within<A: FnMut(Value) -> Result<Value, String>>(
+        &mut self,
+        name: &str,
+        args: &Value,
+        app: &mut A,
+        settle: Duration,
+        silence: Duration,
+    ) -> Result<Result<Vec<Value>, String>, String> {
         let lost = |e: std::io::Error| format!("lost the helper: {e}");
         writeln!(self.writer, "{}", request_line(name, args, settle)).map_err(lost)?;
         loop {
             // The clock runs only while the helper has the call: the app's
             // questions to the human are waited for here, not there.
-            let line = match self.lines.recv_timeout(SILENCE) {
+            let line = match self.lines.recv_timeout(silence) {
                 Ok(Ok(line)) if !line.is_empty() => line,
                 Ok(Ok(_)) | Err(RecvTimeoutError::Disconnected) => {
                     return Err("the helper ended".into())
@@ -600,7 +615,7 @@ impl Helper {
                     self.stop();
                     return Err(format!(
                         "the helper did not answer in {} s, so it was stopped",
-                        SILENCE.as_secs()
+                        silence.as_secs()
                     ));
                 }
             };
