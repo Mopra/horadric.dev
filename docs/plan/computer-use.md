@@ -77,7 +77,10 @@ connects it to the child session.
 Horadric's helper inside the desk. It has no window.
 
 - It runs only in a session that is not the console's and that
-  `desk::SESSION_FILE` names (it waits a few seconds for the file).
+  `desk::SESSION_FILE` names (it waits a few seconds for the file). The
+  file counts only when it was written since Windows started, so one
+  left by a crash does not make an ordinary Remote Desktop login the
+  desk.
 - It serves the screen share's protocol for its own session on
   `desk::port`, with a token in `desk::TOKEN_FILE`: frames and input.
 - `GET /apps`: the windows open on the desk, and the apps the human has
@@ -86,10 +89,19 @@ Horadric's helper inside the desk. It has no window.
   (`horadric_core::desk_apps`) answers for an app that can not run
   twice: Chrome open at the human's becomes Edge, classic Outlook
   becomes the new Outlook, and so on. An app with no twin is refused
-  with the reason.
+  with the reason. The rule holds for a path in every form that names
+  a known app (no `.exe`, quotes, a shortcut, its `shell:AppsFolder`
+  id), and a page (a web or `file:` address, an `.html`, a `.pdf`)
+  always opens in Edge, never in the default browser. An app that
+  shares something else with the human's session comes with a note:
+  Notepad opens with their unsaved tabs.
+- While the window is closed `/apps` and `/launch` answer that the desk
+  is closed and do nothing.
 - At start it stops the autostart programs that came up in its session
   (the Run keys and the Startup folder), since the desk is a workplace
-  and not a second copy of the human's tray.
+  and not a second copy of the human's tray. It stops for good at the
+  first start asked of it and at the first key or mouse input on the
+  desk, and never stops an app of the twin table.
 - A full Horadric that autostarts inside the desk exits quietly.
 
 ### The tools (`desk_` in `horadric mcp`)
@@ -103,7 +115,9 @@ For sessions Horadric started, beside `browser_` and `remote_`:
 - `desk_apps`, `desk_open`: what is open, and starting an app.
 
 They work only while the desk is open: the human opening it is the
-permission. With it closed a tool says so and does nothing.
+permission. With it closed a tool says so and does nothing, also while
+the session is still signed in and its hand still answers: a tool asks
+for `desk::SESSION_FILE` before it reaches for the hand.
 
 ## Later
 
