@@ -111,6 +111,7 @@ use crate::console::{self, Console, Launch};
 use crate::contextpanel::{self, ContextPanel};
 use crate::dialog::{self, Dialog, Tone};
 use crate::dropdown::{self, Dropdown, Whose};
+use crate::gaps;
 use crate::glide::Glides;
 use crate::glyphs::{self, Font};
 use crate::hotkey::{self, Action, Chord, Press};
@@ -431,6 +432,9 @@ pub(crate) enum Input {
     /// The wheel turned this many notches over the window with this key,
     /// outside anything that scrolls by itself: its column scrolls.
     Scroll(String, i32),
+    /// The wheel turned this many notches over a gap between the windows
+    /// in the columns, at this x on screen: the column there scrolls.
+    ScrollAt(i32, i32),
     /// Tile clicked: show this session's terminal, resume it, or collapse it.
     Expand(String),
     /// A tile's lamp clicked: park this session's pane off the stage, or
@@ -766,6 +770,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     }
     window::register_class()?;
     usage::register_class()?;
+    gaps::register_class()?;
     dropdown::register_class()?;
     crate::suggest::register_class()?;
     settings::register_class()?;
@@ -1047,6 +1052,10 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         saved.dictation_model.as_deref(),
         saved.dictation_language.as_deref(),
     ));
+    // Made before every tile, so each one comes above it.
+    let gaps = gaps::create()
+        .inspect_err(|e| eprintln!("horadric: cannot create the gaps window: {e}"))
+        .ok();
     let usage_window = match UsageWindow::create(
         Rc::clone(&shared),
         saved.usage_window.as_ref().is_some_and(|p| p.collapsed),
@@ -1133,6 +1142,8 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             glides: RefCell::default(),
             glided: Cell::new(None),
             column_bounds: HashMap::new(),
+            gaps,
+            gap_bands: Vec::new(),
             clipped: RefCell::default(),
             arranged: false,
             carried: None,
@@ -4065,6 +4076,10 @@ struct App {
     /// handle, as last arranged: the column's, or for the windows below a
     /// pinned one, from the pin's bottom down.
     column_bounds: HashMap<isize, (i32, i32)>,
+    /// The window that catches the cursor between the windows in the
+    /// columns, and the bands on screen it covers as last arranged.
+    gaps: Option<HWND>,
+    gap_bands: Vec<RECT>,
     /// The cut each window in the columns has now, by its handle, with the
     /// width it was made for, so a frame that changes neither sets none.
     clipped: RefCell<Clipped>,
@@ -9411,6 +9426,9 @@ impl App {
         for c in &self.clusters {
             c.set_shown(shown);
         }
+        if let Some(g) = self.gaps {
+            gaps::cover(g, &self.gap_bands, shown);
+        }
     }
 
     fn fit_stage(&mut self) {
@@ -10194,6 +10212,11 @@ impl App {
                         relayout = true;
                     }
                 }
+                Input::ScrollAt(x, notches) => {
+                    if self.scroll_column_at(x, notches) {
+                        relayout = true;
+                    }
+                }
                 Input::Expand(id) => self.reveal(&id, true),
                 Input::Park(id) => self.park(&id),
                 Input::StageActive => {
@@ -10541,6 +10564,9 @@ impl App {
 
     /// Brings every tile window above the other windows.
     fn raise(&mut self) {
+        if let Some(g) = self.gaps {
+            gaps::raise(g);
+        }
         if let Some(u) = &self.usage_window {
             u.raise();
         }
@@ -10682,6 +10708,7 @@ impl App {
         let shown = self.columns.shown(g.fits, is_present);
         let bottom = g.top + g.height;
         let mut bounds = HashMap::new();
+        let mut bands = Vec::new();
         let mut scrolls = Vec::new();
         let mut seen = HashSet::new();
         for (i, (model, keys)) in shown.iter().enumerate() {
@@ -10698,6 +10725,7 @@ impl App {
             let (filled, room, below) =
                 columns::fill_pinned(&items, g.top, g.height, g.gap, g.min_files, scroll, pinned);
             scrolls.push((*model, scroll.clamp(0, room)));
+            let mut stood = Vec::with_capacity(tiles.len());
             for (n, (t, f)) in tiles.iter().zip(filled).enumerate() {
                 let id = t.hwnd().0 as isize;
                 seen.insert(id);
@@ -10705,15 +10733,20 @@ impl App {
                 // The one being dragged is where the cursor holds it, whole.
                 if t.key().is_some() && t.key() == self.carried.as_deref() {
                     clip_window(&mut self.clipped.borrow_mut(), t.hwnd(), None);
+                    stood.push((f.y, f.y + t.height()));
                     continue;
                 }
                 t.place(x, f, &mut self.glides.borrow_mut(), animate, self.arranged);
+                // After placing, which sizes a cluster's files tile.
+                stood.push((f.y, f.y + t.height()));
                 clip_window(
                     &mut self.clipped.borrow_mut(),
                     t.hwnd(),
                     bounds.get(&id).copied(),
                 );
             }
+            let next = (i + 1 < shown.len()).then(|| g.x(i + 1));
+            bands.extend(gap_bands(&stood, pinned, &g, x, next, below));
         }
         if shown.is_empty() {
             if let Some(s) = self.start_window.as_deref() {
@@ -10733,6 +10766,10 @@ impl App {
             self.columns.cols[model].scroll = scroll;
         }
         self.column_bounds = bounds;
+        if let Some(gw) = self.gaps {
+            gaps::cover(gw, &bands, !self.tiles_away);
+        }
+        self.gap_bands = bands;
         // A handle Windows gives a new window must not inherit a cut.
         self.clipped.borrow_mut().retain(|id, _| seen.contains(id));
         crate::render::retain_cuts(|id| seen.contains(&id));
@@ -10882,6 +10919,26 @@ impl App {
         let Some(&(model, _)) = shown.iter().find(|(_, keys)| keys.iter().any(|k| k == key)) else {
             return false;
         };
+        self.scroll_model(&g, model, notches)
+    }
+
+    /// Scrolls the column nearest this x on screen by the wheel's notches.
+    /// False when that changed nothing.
+    fn scroll_column_at(&mut self, x: i32, notches: i32) -> bool {
+        let Some(g) = self.grid() else {
+            return false;
+        };
+        let present = self.present();
+        let shown = self.columns.shown(g.fits, |k| present.contains(k));
+        if shown.is_empty() {
+            return false;
+        }
+        let lefts: Vec<i32> = (0..shown.len()).map(|i| g.x(i)).collect();
+        let col = columns::drop_column(&lefts, g.width, g.gap, x, false);
+        self.scroll_model(&g, shown[col].0, notches)
+    }
+
+    fn scroll_model(&mut self, g: &Grid, model: usize, notches: i32) -> bool {
         let c = &mut self.columns.cols[model];
         let was = c.scroll;
         c.scroll = (c.scroll - notches * g.step).max(0);
@@ -11058,6 +11115,43 @@ impl Tile<'_> {
             appear::begin(hwnd, appear::CLUSTER, rise);
         }
     }
+}
+
+/// The bands on screen between the windows of the column at `x`, given top
+/// to bottom as (top, bottom) with the first `pinned` held at the top and
+/// the rest scrolling from `below` down, and beside them the strip over to
+/// `next`, the next column's left edge.
+fn gap_bands(
+    stood: &[(i32, i32)],
+    pinned: usize,
+    g: &Grid,
+    x: i32,
+    next: Option<i32>,
+    below: i32,
+) -> Vec<RECT> {
+    let bottom = g.top + g.height;
+    let (held, rest) = stood.split_at(pinned.min(stood.len()));
+    // The scrolling part counts as one window under the pinned ones, so
+    // the gap between them is caught but no scrolled window above `below`
+    // makes a band over a pinned one.
+    let mut outline = held.to_vec();
+    outline.extend(columns::span(rest, below, bottom));
+    let mut ys = columns::gaps(&outline, g.top, bottom);
+    ys.extend(columns::gaps(rest, below, bottom));
+    let band = |left: i32, right: i32, (top, bottom): (i32, i32)| RECT {
+        left,
+        top,
+        right,
+        bottom,
+    };
+    let right = x + g.width;
+    let mut out: Vec<RECT> = ys.into_iter().map(|y| band(x, right, y)).collect();
+    if let (Some(next), Some(y)) = (next, columns::span(&outline, g.top, bottom)) {
+        if next > right {
+            out.push(band(right, next, y));
+        }
+    }
+    out
 }
 
 /// The cut of each window in the columns by its handle, with the width it
@@ -11304,6 +11398,56 @@ fn spelled_as(key: &str, canonical: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn grid() -> Grid {
+        Grid {
+            left: 12,
+            right: 1000,
+            top: 12,
+            height: 588,
+            width: 300,
+            gap: 12,
+            min_files: 100,
+            fits: 3,
+            step: 40,
+        }
+    }
+
+    fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+        RECT {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
+    #[test]
+    fn the_gaps_of_a_column_are_caught_and_the_strip_to_the_next() {
+        let g = grid();
+        let stood = [(12, 100), (112, 300)];
+        assert_eq!(
+            gap_bands(&stood, 0, &g, 12, Some(324), 12),
+            vec![rect(12, 100, 312, 112), rect(312, 12, 324, 300)]
+        );
+        // The last column has nothing beside it to reach.
+        assert_eq!(
+            gap_bands(&stood, 0, &g, 12, None, 12),
+            vec![rect(12, 100, 312, 112)]
+        );
+    }
+
+    #[test]
+    fn no_gap_is_caught_over_a_pinned_window() {
+        let g = grid();
+        // Pinned 12 to 100, the rest scrolled up under it from 112, one
+        // window wholly above that and its gap with it.
+        let stood = [(12, 100), (-50, 60), (72, 200), (212, 400)];
+        assert_eq!(
+            gap_bands(&stood, 1, &g, 12, None, 112),
+            vec![rect(12, 100, 312, 112), rect(12, 200, 312, 212)]
+        );
+    }
 
     #[test]
     fn a_folder_on_disk_keeps_its_case_and_only_for_its_own_key() {
