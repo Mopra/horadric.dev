@@ -1366,33 +1366,37 @@ impl Cluster {
                 };
                 if let Some(shown) = over_tasks {
                     let total = self.items().map_or(0, |i| i.len());
-                    let scroll = {
+                    let moved = {
                         let mut t = self.tasks.borrow_mut();
-                        let max = total.saturating_sub(shown) as i32;
-                        let scroll = (t.scroll as i32 - notches).clamp(0, max) as usize;
-                        std::mem::replace(&mut t.scroll, scroll) != scroll
+                        let to = list_wheel(t.scroll, total, shown, notches);
+                        if let Some(to) = to {
+                            t.scroll = to;
+                        }
+                        to.is_some()
                     };
-                    if scroll {
+                    if moved {
                         self.fit();
-                    }
-                    return Some(LRESULT(0));
-                }
-                let shown = match &self.layout.borrow().files {
-                    Some(fl) if fl.body().contains(x, y) => fl.rows.len(),
-                    // Anywhere else scrolls the column, when it holds more
-                    // than fits.
-                    _ => {
-                        app::push(Input::Scroll(self.key.clone(), notches));
                         return Some(LRESULT(0));
                     }
-                };
-                let mut f = self.files.borrow_mut();
-                let max = f.rows.len().saturating_sub(shown) as i32;
-                let scroll = (f.scroll as i32 - notches * WHEEL_ROWS).clamp(0, max) as usize;
-                if scroll != f.scroll {
-                    f.scroll = scroll;
-                    self.invalidate();
                 }
+                let over_files = match &self.layout.borrow().files {
+                    Some(fl) if fl.body().contains(x, y) => Some(fl.rows.len()),
+                    _ => None,
+                };
+                if let Some(shown) = over_files {
+                    let mut f = self.files.borrow_mut();
+                    let to = list_wheel(f.scroll, f.rows.len(), shown, notches * WHEEL_ROWS);
+                    if let Some(to) = to {
+                        f.scroll = to;
+                        drop(f);
+                        self.invalidate();
+                        return Some(LRESULT(0));
+                    }
+                }
+                // A list that cannot move that way, or anywhere else, scrolls
+                // the column: a short quest list under the cursor used to
+                // stop a scroll through the projects dead.
+                app::push(Input::Scroll(self.key.clone(), notches));
                 Some(LRESULT(0))
             }
             // The style alone does not stop a click from making the cluster
@@ -2061,8 +2065,32 @@ fn cloaked(hwnd: HWND) -> bool {
     }
 }
 
+/// Where a list of `total` rows, `shown` of them at a time and scrolled
+/// `scroll` rows down, goes when the wheel turns `rows` (up positive), or
+/// `None` when it cannot move that way, so the wheel is left to the column.
+fn list_wheel(scroll: usize, total: usize, shown: usize, rows: i32) -> Option<usize> {
+    let max = total.saturating_sub(shown) as i32;
+    let to = (scroll as i32 - rows).clamp(0, max) as usize;
+    (to != scroll).then_some(to)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_list_that_all_fits_leaves_the_wheel_to_the_column() {
+        assert_eq!(list_wheel(0, 4, 6, -1), None);
+        assert_eq!(list_wheel(0, 4, 6, 1), None);
+    }
+
+    #[test]
+    fn a_long_list_scrolls_until_its_end_then_lets_go() {
+        assert_eq!(list_wheel(0, 10, 4, -1), Some(1));
+        assert_eq!(list_wheel(5, 10, 4, -3), Some(6));
+        assert_eq!(list_wheel(6, 10, 4, -1), None);
+        assert_eq!(list_wheel(0, 10, 4, 1), None);
+        assert_eq!(list_wheel(2, 10, 4, 3), Some(0));
+    }
+
     use super::*;
     use horadric_core::session::ACTIVITY_SPAN;
 
