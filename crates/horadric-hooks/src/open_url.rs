@@ -103,7 +103,14 @@ mod tests {
 
     #[test]
     fn pane_refuses_what_is_not_one() {
-        for bad in ["", "43118", "43118:key", "43118::id", "x:key:id", "43118:key:"] {
+        for bad in [
+            "",
+            "43118",
+            "43118:key",
+            "43118::id",
+            "x:key:id",
+            "43118:key:",
+        ] {
             assert_eq!(Pane::parse(bad), None, "{bad}");
         }
     }

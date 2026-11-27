@@ -1,0 +1,460 @@
+//! The administrators' list of desktop programs on disk: where it is, who
+//! may have written it, and how it is written. See
+//! [`horadric_core::takeover_programs`] for what it holds.
+//!
+//! It lives in `%ProgramData%\Horadric`, a folder only administrators can
+//! write. Every user may make folders in `%ProgramData%`, so the folder
+//! proves nothing by being there: before a word of the list is believed,
+//! the folder and the file are each opened and their owner and access list
+//! read off the open handle, and anything a program that is not elevated
+//! could have written is refused with the reason.
+//!
+//! This one file is compiled into two crates, by path: the app reads the
+//! list here, and so do the elevated helper and the `takeover` command in
+//! the binary. The check must not exist twice.
+
+// Each of the two crates uses only its part of this.
+#![allow(dead_code)]
+
+use std::fs::{File, OpenOptions};
+use std::io::{Read as _, Write as _};
+use std::os::windows::ffi::OsStrExt;
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+use std::os::windows::io::{AsRawHandle, FromRawHandle as _};
+use std::path::{Path, PathBuf};
+
+use horadric_core::takeover_programs::{self as listed, List};
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, HANDLE};
+use windows::Win32::Security::{
+    GetKernelObjectSecurity, GetTokenInformation, SetFileSecurityW, TokenElevation,
+    DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+    PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_ELEVATION, TOKEN_QUERY,
+};
+use windows::Win32::Storage::FileSystem::{
+    CreateDirectoryW, CreateFileW, FILE_APPEND_DATA, FILE_FLAGS_AND_ATTRIBUTES,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_READ, OPEN_ALWAYS, READ_CONTROL, SYNCHRONIZE,
+};
+use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows::Win32::UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
+
+/// Lets a folder be opened as a file is, for its access list.
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+/// Opens a link itself, not what it points at.
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+
+/// The administrators' folder. Asked of Windows, never of the environment:
+/// the session that starts the elevated helper sets the helper's
+/// environment, and must not get to say where its list is.
+pub fn folder() -> Option<PathBuf> {
+    unsafe {
+        let path = SHGetKnownFolderPath(&FOLDERID_ProgramData, KF_FLAG_DEFAULT, None).ok()?;
+        let text = path.to_string().ok();
+        CoTaskMemFree(Some(path.0 as *const _));
+        Some(PathBuf::from(text?).join(listed::ADMIN_FOLDER))
+    }
+}
+
+/// The administrators' list, as it is written.
+pub fn file() -> Option<PathBuf> {
+    folder().map(|f| f.join(listed::FILE))
+}
+
+/// The elevated helper's log, as it is written.
+pub fn log_file() -> Option<PathBuf> {
+    folder().map(|f| f.join(listed::ADMIN_LOG_FILE))
+}
+
+/// Where a file of the administrators' folder is read: under the name it
+/// had before the tools were renamed while nothing has the new one yet.
+/// Only an elevated process can rename here, so until one next writes
+/// ([`write`], [`log`]) the old file is the one there is.
+fn read_at(new: &str, old: &str) -> Option<PathBuf> {
+    let (new, old) = folder().map(|f| (f.join(new), f.join(old)))?;
+    Some(if listed::moves(new.exists(), old.exists()) {
+        old
+    } else {
+        new
+    })
+}
+
+/// The administrators' list where [`read`] finds it, to show and to watch
+/// for changes.
+pub fn file_read() -> Option<PathBuf> {
+    read_at(listed::FILE, listed::OLD_FILE)
+}
+
+/// The elevated helper's log where it is to be read.
+pub fn log_file_read() -> Option<PathBuf> {
+    read_at(listed::ADMIN_LOG_FILE, listed::OLD_ADMIN_LOG_FILE)
+}
+
+/// What reading the administrators' list came to.
+#[derive(Debug, PartialEq)]
+pub enum Read {
+    /// There is none, which is an empty list.
+    Missing,
+    /// It is there but not used, and why: a user could have written it,
+    /// or it does not read or parse.
+    Refused(String),
+    List(List),
+}
+
+/// Whether this process runs as administrator.
+pub fn elevated() -> bool {
+    unsafe {
+        let mut token = HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
+            return false;
+        }
+        let mut elevation = TOKEN_ELEVATION::default();
+        let mut len = 0;
+        let read = GetTokenInformation(
+            token,
+            TokenElevation,
+            Some(&mut elevation as *mut _ as *mut _),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut len,
+        );
+        let _ = CloseHandle(token);
+        read.is_ok() && elevation.TokenIsElevated != 0
+    }
+}
+
+/// The owner and access list of an open file or folder, read off the
+/// handle so they are those of what is then read, not of whatever has
+/// that name a moment later.
+fn descriptor_of(open: &File) -> Result<listed::Descriptor, String> {
+    let handle = HANDLE(open.as_raw_handle());
+    let what = OWNER_SECURITY_INFORMATION.0 | DACL_SECURITY_INFORMATION.0;
+    unsafe {
+        let mut len = 0u32;
+        let _ = GetKernelObjectSecurity(handle, what, None, 0, &mut len);
+        if len == 0 {
+            return Err("Windows would not say who may write it".into());
+        }
+        // In u64s, so the descriptor is aligned as Windows wants it.
+        let mut buf = vec![0u64; (len as usize).div_ceil(8)];
+        let sd = PSECURITY_DESCRIPTOR(buf.as_mut_ptr().cast());
+        GetKernelObjectSecurity(handle, what, Some(sd), len, &mut len)
+            .map_err(|e| format!("Windows would not say who may write it: {e}"))?;
+        let bytes = std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), len as usize);
+        listed::parse_descriptor(bytes)
+    }
+}
+
+/// Opens `path`, a folder or a file, only if nobody but administrators
+/// could have written it. None when it is not there.
+fn guarded(path: &Path, is_folder: bool) -> Result<Option<File>, String> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    options.custom_flags(if is_folder {
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT
+    } else {
+        FILE_FLAG_OPEN_REPARSE_POINT
+    });
+    match options.open(path) {
+        Ok(open) => checked(open, is_folder).map(Some),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("it can not be opened: {e}")),
+    }
+}
+
+/// `open`, a folder or a file opened without following a link, only if it
+/// is no link and nobody but administrators could have written it.
+fn checked(open: File, is_folder: bool) -> Result<File, String> {
+    let meta = open
+        .metadata()
+        .map_err(|e| format!("it can not be read: {e}"))?;
+    if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err("it is a link to somewhere else".into());
+    }
+    if meta.is_dir() != is_folder {
+        return Err(if is_folder {
+            "it is a file where a folder belongs".into()
+        } else {
+            "it is a folder where a file belongs".into()
+        });
+    }
+    listed::admins_only(&descriptor_of(&open)?)?;
+    Ok(open)
+}
+
+/// Reads the administrators' list, refusing it unless the folder and the
+/// file are both the administrators' alone.
+pub fn read() -> Read {
+    let Some(folder) = folder() else {
+        return Read::Missing;
+    };
+    let refused = |what: &Path, why: String| {
+        Read::Refused(listed::unsafe_text(&what.display().to_string(), &why))
+    };
+    match guarded(&folder, true) {
+        Ok(Some(_)) => {}
+        Ok(None) => return Read::Missing,
+        Err(why) => return refused(&folder, why),
+    }
+    // The old name is read when the new is absent, through the same
+    // check of who could have written it.
+    let found = listed::read_first(listed::FILE, listed::OLD_FILE, |name| {
+        guarded(&folder.join(name), false)
+    });
+    let (file, mut open) = match found {
+        Ok(Some((name, open))) => (folder.join(name), open),
+        Ok(None) => return Read::Missing,
+        Err((name, why)) => return refused(&folder.join(name), why),
+    };
+    let mut text = String::new();
+    if let Err(e) = open.read_to_string(&mut text) {
+        return Read::Refused(format!("{} can not be read: {e}", file.display()));
+    }
+    match listed::parse(&text) {
+        Ok(list) => Read::List(list),
+        Err(why) => Read::Refused(format!(
+            "{} does not parse, so nothing on it is allowed: {why}",
+            file.display()
+        )),
+    }
+}
+
+fn wide(path: &Path) -> Vec<u16> {
+    path.as_os_str().encode_wide().chain(Some(0)).collect()
+}
+
+/// Makes the administrators' folder with its access list from the start,
+/// so there is no moment it stands open. One that is there already is
+/// left as it is: [`guarded`] says whether it will do.
+fn make_folder(folder: &Path) -> Result<(), String> {
+    let descriptor = listed::admin_descriptor(true);
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.as_ptr() as *mut _,
+        bInheritHandle: false.into(),
+    };
+    match unsafe { CreateDirectoryW(PCWSTR(wide(folder).as_ptr()), Some(&attributes)) } {
+        Ok(()) => Ok(()),
+        Err(e) if e.code() == ERROR_ALREADY_EXISTS.to_hresult() => Ok(()),
+        Err(e) => Err(format!("{} can not be made: {e}", folder.display())),
+    }
+}
+
+/// Makes a file in the administrators' folder the administrators' own.
+/// The owner Windows gives by default may be the administrator's own
+/// account, which on most machines is the session's account too, and an
+/// owner can always rewrite the access list: so the group is named.
+fn secure(file: &Path) -> Result<(), String> {
+    let descriptor = listed::admin_descriptor(false);
+    let what = OWNER_SECURITY_INFORMATION
+        | DACL_SECURITY_INFORMATION
+        | PROTECTED_DACL_SECURITY_INFORMATION;
+    let secured = unsafe {
+        SetFileSecurityW(
+            PCWSTR(wide(file).as_ptr()),
+            what,
+            PSECURITY_DESCRIPTOR(descriptor.as_ptr() as *mut _),
+        )
+    };
+    match secured.as_bool() {
+        true => Ok(()),
+        false => Err(windows::core::Error::from_thread().to_string()),
+    }
+}
+
+/// Writes the administrators' list. Only an elevated process gets through
+/// this; it never tries to become one. A folder a user made first is
+/// refused rather than mended, since what is in it is not known.
+pub fn write(list: &List) -> Result<PathBuf, String> {
+    if !elevated() {
+        return Err(NOT_ELEVATED.into());
+    }
+    let (folder, file) = folder()
+        .zip(file())
+        .ok_or("Windows would not say where %ProgramData% is")?;
+    make_folder(&folder)?;
+    let unsafe_folder = |why: String| {
+        format!(
+            "{} is not the administrators' alone: {why}. Delete the folder from this elevated \
+             shell (it may have been made by a program that is not elevated) and run this again",
+            folder.display()
+        )
+    };
+    guarded(&folder, true)
+        .map_err(unsafe_folder)?
+        .ok_or_else(|| format!("{} is gone again", folder.display()))?;
+    // Inside a folder only administrators write, so nothing can have put
+    // a link in the way of these two names.
+    let part = folder.join(format!("{}.part", listed::FILE));
+    let said = |e: std::io::Error| format!("{}: {e}", file.display());
+    std::fs::write(&part, listed::render(list)).map_err(said)?;
+    if let Err(why) = secure(&part) {
+        let _ = std::fs::remove_file(&part);
+        return Err(format!(
+            "{} could not be made the administrators' alone: {why}",
+            file.display()
+        ));
+    }
+    std::fs::rename(&part, &file).map_err(said)?;
+    match read() {
+        Read::List(_) => {
+            // What the old file held was read into `list` by whoever
+            // changed it, and is in the new one now: this is its rename.
+            let _ = std::fs::remove_file(folder.join(listed::OLD_FILE));
+            Ok(file)
+        }
+        Read::Missing => Err(format!("{} is gone again", file.display())),
+        Read::Refused(why) => Err(format!("written, but {why}")),
+    }
+}
+
+/// Said by a command that changes the administrators' list from a shell
+/// that is not elevated.
+pub const NOT_ELEVATED: &str = "this changes the administrators' list of desktop programs, which \
+only an elevated shell can write. Open a terminal with \"Run as administrator\" and run it there. \
+Horadric never asks Windows for that itself";
+
+/// Adds a line to the elevated helper's log, when the folder is the
+/// administrators' alone. An elevated process must not write where a
+/// user's program could have put a link to some other file. Said why not
+/// otherwise, for the caller to drop: a log that can not be written must
+/// not stop what the human said yes to.
+pub fn log(line: &str) -> Result<(), String> {
+    if !elevated() {
+        return Err("only an elevated process writes the helper's log".into());
+    }
+    let (folder, file) = folder()
+        .zip(log_file())
+        .ok_or("Windows would not say where %ProgramData% is")?;
+    make_folder(&folder)?;
+    let unsafe_folder = |why: String| {
+        format!(
+            "{} is not the administrators' alone: {why}",
+            folder.display()
+        )
+    };
+    guarded(&folder, true)
+        .map_err(unsafe_folder)?
+        .ok_or_else(|| format!("{} is gone again", folder.display()))?;
+    // Inside a folder only administrators write, nothing but an
+    // administrator can have put a link under these names.
+    let old = folder.join(listed::OLD_ADMIN_LOG_FILE);
+    if listed::moves(file.exists(), old.exists()) {
+        let _ = std::fs::rename(&old, &file);
+    }
+    horadric_core::screen_share::roll(&file);
+    let said = |why: String| format!("{}: {why}", file.display());
+    let mut open = open_log(&file).map_err(said)?;
+    open.write_all(line.as_bytes())
+        .map_err(|e| said(e.to_string()))
+}
+
+/// Opens the helper's log to add to it, making it with the
+/// administrators' access list from the start when it is not there, so
+/// there is no moment it stands open or owned by the account that made it.
+/// A link in its place is opened as the link and refused.
+fn open_log(file: &Path) -> Result<File, String> {
+    let descriptor = listed::admin_descriptor(false);
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.as_ptr() as *mut _,
+        bInheritHandle: false.into(),
+    };
+    // Appending only, and enough to read its attributes and access list
+    // off the handle for the check.
+    let access = FILE_APPEND_DATA.0 | FILE_READ_ATTRIBUTES.0 | READ_CONTROL.0 | SYNCHRONIZE.0;
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide(file).as_ptr()),
+            access,
+            FILE_SHARE_READ,
+            Some(&attributes),
+            OPEN_ALWAYS,
+            FILE_FLAGS_AND_ATTRIBUTES(FILE_FLAG_OPEN_REPARSE_POINT),
+            None,
+        )
+    }
+    .map_err(|e| format!("it can not be opened: {e}"))?;
+    checked(unsafe { File::from_raw_handle(handle.0) }, false)
+}
+
+/// What reading the elevated helper's log came to.
+#[derive(Debug, PartialEq)]
+pub enum Log {
+    /// There is none yet.
+    Missing,
+    /// The folder and the file are the administrators' alone, so what it
+    /// says only an administrator or the helper wrote.
+    Trusted(String),
+    /// It is there, but a program that is not elevated could have written
+    /// it, and why. What it says is read anyway, as a record and no proof.
+    Untrusted { why: String, text: String },
+}
+
+/// Reads the elevated helper's log through the same check of who could
+/// have written it as the administrators' list, and where it was found.
+pub fn read_log() -> Result<(PathBuf, Log), String> {
+    let (folder, file) = folder()
+        .zip(log_file_read())
+        .ok_or("Windows would not say where %ProgramData% is")?;
+    // Read by name, as any program of the user may: it is shown, not
+    // believed.
+    let untrusted = |what: &Path, file: &Path, why: String| Log::Untrusted {
+        why: format!("{} is not the administrators' alone: {why}", what.display()),
+        text: std::fs::read_to_string(file).unwrap_or_default(),
+    };
+    match guarded(&folder, true) {
+        Ok(Some(_)) => {}
+        Ok(None) => return Ok((file, Log::Missing)),
+        Err(why) => {
+            let log = untrusted(&folder, &file, why);
+            return Ok((file, log));
+        }
+    }
+    let found = listed::read_first(listed::ADMIN_LOG_FILE, listed::OLD_ADMIN_LOG_FILE, |name| {
+        guarded(&folder.join(name), false)
+    });
+    match found {
+        Ok(None) => Ok((file, Log::Missing)),
+        Err((name, why)) => {
+            let file = folder.join(name);
+            let log = untrusted(&file, &file, why);
+            Ok((file, log))
+        }
+        Ok(Some((name, mut open))) => {
+            let mut text = String::new();
+            open.read_to_string(&mut text)
+                .map_err(|e| format!("{} can not be read: {e}", folder.join(name).display()))?;
+            Ok((folder.join(name), Log::Trusted(text)))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Against real descriptors, as Windows hands them out: a file of
+    /// Windows' own is the administrators' alone, and one this test just
+    /// made belongs to whoever runs it.
+    #[test]
+    fn a_real_file_is_judged_by_its_owner_and_access_list() {
+        let windows = PathBuf::from(std::env::var_os("SystemRoot").expect("on Windows"));
+        let own = windows.join("System32").join("kernel32.dll");
+        assert!(matches!(guarded(&own, false), Ok(Some(_))), "{own:?}");
+        assert!(guarded(&own, true).is_err(), "a file is no folder");
+        let mine = std::env::temp_dir().join(format!(
+            "horadric-takeover-admin-test-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&mine, "{}").unwrap();
+        let judged = guarded(&mine, false);
+        let _ = std::fs::remove_file(&mine);
+        // Unless the tests themselves run as administrator, from a folder
+        // only administrators write.
+        if !elevated() {
+            assert!(judged.is_err(), "a user's own file passed");
+        }
+        assert!(matches!(guarded(&mine, false), Ok(None)));
+    }
+}

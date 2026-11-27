@@ -209,6 +209,23 @@ pub fn known_process(process: &str) -> bool {
     APPS.iter().any(|a| a.processes.contains(&name.as_str()))
 }
 
+/// Why what was asked for is not started on the desk when it is one of
+/// Horadric's own programs, by name or by path in any form: a Horadric
+/// on the desk asks its questions there, where the agent's hand is, so
+/// a session could be driven to answer its own. None for anything else.
+/// Takeover's lists leave out the same programs for the same reason.
+pub fn own_refusal(asked: &str) -> Option<String> {
+    let name = process_name(&clean(asked));
+    // Whatever follows the first dot is an ending Windows may add back.
+    let stem = name.split('.').next().unwrap_or(&name).trim();
+    let own = stem == "horadric" || stem == "horadricw" || stem.starts_with("horadric-");
+    own.then(|| {
+        "Horadric itself is not started on the agent's desk: a Horadric there could be driven \
+         to answer its own questions"
+            .to_string()
+    })
+}
+
 /// One thing to try starting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Choice {
@@ -229,6 +246,9 @@ pub struct Choice {
 /// has the processes `human` running: the choices in order, of which the
 /// first installed one is started. An error is a refusal in plain words.
 pub fn plan(asked: &str, args: &[String], human: &[String]) -> Result<Vec<Choice>, String> {
+    if let Some(why) = own_refusal(asked) {
+        return Err(why);
+    }
     let name = plain(asked);
     let simple = |c: char| c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | '+' | ' ');
     if name.is_empty() || !name.chars().all(simple) {
@@ -304,7 +324,11 @@ pub fn clean(path: &str) -> String {
 /// The file name a path ends in and its extension, both lower case. The
 /// extension is empty when there is none.
 fn file_name(path: &str) -> (String, String) {
-    let name = path.rsplit(['\\', '/']).next().unwrap_or(path).to_lowercase();
+    let name = path
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(path)
+        .to_lowercase();
     let ext = match name.rsplit_once('.') {
         Some((stem, ext)) if !stem.is_empty() => ext.to_string(),
         _ => String::new(),
@@ -649,10 +673,31 @@ pub fn same_line(line: &str) -> String {
 pub fn shared(process: &str) -> bool {
     matches!(
         process_name(process).as_str(),
-        "cmd" | "powershell" | "pwsh" | "wscript" | "cscript" | "mshta" | "rundll32"
-            | "regsvr32" | "msiexec" | "conhost" | "node" | "bun" | "deno" | "python"
-            | "pythonw" | "py" | "pyw" | "java" | "javaw" | "dotnet" | "ruby" | "perl"
-            | "bash" | "sh" | "wsl"
+        "cmd"
+            | "powershell"
+            | "pwsh"
+            | "wscript"
+            | "cscript"
+            | "mshta"
+            | "rundll32"
+            | "regsvr32"
+            | "msiexec"
+            | "conhost"
+            | "node"
+            | "bun"
+            | "deno"
+            | "python"
+            | "pythonw"
+            | "py"
+            | "pyw"
+            | "java"
+            | "javaw"
+            | "dotnet"
+            | "ruby"
+            | "perl"
+            | "bash"
+            | "sh"
+            | "wsl"
     )
 }
 
@@ -712,9 +757,7 @@ pub fn autostart(value: &str, env: &dyn Fn(&str) -> Option<String>) -> Option<Au
             let end = lower
                 .match_indices(".exe")
                 .map(|(i, _)| i + 4)
-                .find(|end| {
-                    (lower[*end..].chars().next()).is_none_or(|c| c.is_whitespace())
-                })?;
+                .find(|end| (lower[*end..].chars().next()).is_none_or(|c| c.is_whitespace()))?;
             value.split_at(end)
         }
     };
@@ -774,6 +817,31 @@ mod tests {
             if app.twice == Twice::Fine {
                 assert!(!app.ways.is_empty(), "{}", app.label);
             }
+        }
+    }
+
+    #[test]
+    fn horadric_itself_is_never_started_on_the_desk() {
+        for own in [
+            "horadric",
+            "Horadric.exe",
+            "horadricw",
+            "HORADRICW.EXE",
+            "horadric-host-0.42.2.exe",
+            r"C:\Users\a\AppData\Local\Horadric\horadric.exe",
+            r#""C:\Program Files\Horadric\horadricw.exe""#,
+            "C:/x/horadric.exe.",
+            r"..\target\debug\horadric",
+            "horadric.com",
+        ] {
+            let why = own_refusal(own).unwrap_or_else(|| panic!("{own} was let through"));
+            assert!(why.contains("answer its own questions"), "{why}");
+            assert_eq!(plan(own, &[], &[]), Err(why), "{own}");
+        }
+        // A folder of that name, or a name that only begins alike, is
+        // another program.
+        for other in [r"C:\horadric\notepad.exe", "horadrically.exe", "msedge", ""] {
+            assert_eq!(own_refusal(other), None, "{other}");
         }
     }
 
@@ -920,7 +988,10 @@ mod tests {
             started_json("msedge", Some("chrome"), Some("because"), None),
             r#"{"started":"msedge","instead_of":"chrome","why":"because"}"#
         );
-        assert_eq!(started_json("code", None, None, None), r#"{"started":"code"}"#);
+        assert_eq!(
+            started_json("code", None, None, None),
+            r#"{"started":"code"}"#
+        );
         assert_eq!(
             started_json("notepad", None, None, Some("mind the tabs")),
             r#"{"started":"notepad","note":"mind the tabs"}"#
@@ -1066,14 +1137,19 @@ mod tests {
             assert!(chrome(path), "{path}");
         }
         let app = |path: &str| app_of(&clean(path)).map(|a| a.names[0]);
-        assert_eq!(app(r"shell:AppsFolder\Microsoft.Office.OUTLOOK.EXE.15"), Some("outlook"));
+        assert_eq!(
+            app(r"shell:AppsFolder\Microsoft.Office.OUTLOOK.EXE.15"),
+            Some("outlook")
+        );
         assert_eq!(
             app(r"shell:AppsFolder\5319275A.WhatsAppDesktop_cv1g1gvanyjgm!App"),
             Some("whatsapp")
         );
         // A packaged way of the table is an id too.
         assert_eq!(
-            app(r"shell:appsfolder\microsoft.outlookforwindows_8wekyb3d8bbwe!microsoft.outlookforwindows"),
+            app(
+                r"shell:appsfolder\microsoft.outlookforwindows_8wekyb3d8bbwe!microsoft.outlookforwindows"
+            ),
             Some("olk")
         );
         assert_eq!(app(r"C:\x\OUTLOOK.EXE"), Some("outlook"));
@@ -1138,7 +1214,10 @@ mod tests {
     #[test]
     fn an_internet_shortcut_holds_its_address() {
         let text = "[{000214A0}]\r\nProp3=19,2\r\n[InternetShortcut]\r\nIDList=\r\nurl = https://example.com/?a=b \r\n";
-        assert_eq!(address_in(text).as_deref(), Some("https://example.com/?a=b"));
+        assert_eq!(
+            address_in(text).as_deref(),
+            Some("https://example.com/?a=b")
+        );
         assert_eq!(address_in("[InternetShortcut]\nURL=\n"), None);
         assert_eq!(address_in("no address here"), None);
     }
@@ -1151,7 +1230,10 @@ mod tests {
             ["--profile-directory=Profile 1", "--app-id=abc"]
         );
         assert_eq!(split(r#""a b" """#), ["a b", ""]);
-        assert_eq!(split(r#""say \"hi\"" C:\plain\"#), [r#"say "hi""#, "C:\\plain\\"]);
+        assert_eq!(
+            split(r#""say \"hi\"" C:\plain\"#),
+            [r#"say "hi""#, "C:\\plain\\"]
+        );
         assert_eq!(split(r#""C:\dir with space\\""#), ["C:\\dir with space\\"]);
         assert!(split("  ").is_empty());
         for args in [
@@ -1197,8 +1279,12 @@ mod tests {
         assert!(stops(r"C:\Program Files (x86)\Steam\Steam.exe"));
         assert!(!stops(r"C:\Program Files (x86)\Steam\other.exe"));
         // The browsers keep Run values, and are never the sweep's.
-        assert!(!stops(r"C:\Program Files\Google\Chrome\Application\chrome.exe"));
-        assert!(!stops(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"));
+        assert!(!stops(
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        ));
+        assert!(!stops(
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+        ));
         assert!(!stops(r"C:\Windows\System32\cmd.exe"));
 
         let with = |process: &str, line: Option<&str>| {
@@ -1211,12 +1297,18 @@ mod tests {
         assert!(with(pwsh, Some(same)));
         let other = r#""C:\Program Files\PowerShell\7\pwsh.exe" -File C:\work\build.ps1"#;
         assert!(!with(pwsh, Some(other)));
-        assert!(!with(pwsh, Some(r#""C:\Program Files\PowerShell\7\pwsh.exe""#)));
+        assert!(!with(
+            pwsh,
+            Some(r#""C:\Program Files\PowerShell\7\pwsh.exe""#)
+        ));
         assert!(!with(pwsh, None));
         let node = r"C:\Program Files\nodejs\node.exe";
         let same = r#""C:\Program Files\nodejs\node.exe" C:\apps\notify\app.js"#;
         assert!(with(node, Some(same)));
-        assert!(!with(node, Some(r#""C:\Program Files\nodejs\node.exe" server.js"#)));
+        assert!(!with(
+            node,
+            Some(r#""C:\Program Files\nodejs\node.exe" server.js"#)
+        ));
         assert!(!with(node, None));
         assert!(shared("PYTHONW.EXE") && shared(r"C:\x\rundll32.exe") && !shared("steam.exe"));
     }

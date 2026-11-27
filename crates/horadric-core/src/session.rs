@@ -1397,7 +1397,13 @@ mod tests {
             ..ev("SessionEnd")
         };
         // Never completed, so nothing else would end the list.
-        for new in [from("startup"), from("clear"), from("resume"), ended("clear"), ended("other")] {
+        for new in [
+            from("startup"),
+            from("clear"),
+            from("resume"),
+            ended("clear"),
+            ended("other"),
+        ] {
             let mut s = Session::new("g1", "x", "");
             s.apply(&ev("UserPromptSubmit"), now());
             s.apply(&task("1"), now());
@@ -1469,7 +1475,6 @@ mod tests {
         // A subagent may run at an effort of its own.
         s.apply(&hook(r#"{"session_id":"c1","hook_event_name":"PreToolUse","agent_id":"a1","effort":{"level":"max"}}"#), now());
         assert_eq!(s.status.as_ref().unwrap().effort.as_deref(), Some("low"));
-
     }
 
     #[test]

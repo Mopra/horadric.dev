@@ -14,14 +14,21 @@
 //! leave each other, to every session, Horadric's or not. What a lore tool
 //! showed a session of Horadric's is passed on to the app, which lights it
 //! in the project's Arcane Sanctuary.
+//!
+//! The desktop tools, for programs on the user's Windows desktop, are in
+//! `takeover`: they work here in this process and ask the app only whether
+//! the human allows them.
 
 use std::cell::OnceCell;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use horadric_core::glow::{self, Touch};
+use horadric_core::takeover_programs::{Mode, OFF};
 use horadric_core::vault::web::page::{self, FIND, FOCUS, INTO_VIEW, POINT, RECT, SELECT};
 use horadric_hooks::{
     client, BROWSER_PATH, COMMAND_HEADER, GLOW_PATH, OWNER_ENV, SECRET_KEY_ENV, SESSION_ENV,
@@ -32,12 +39,73 @@ use serde_json::{json, Value};
 #[path = "mcp_forge.rs"]
 mod forge;
 
+#[cfg(windows)]
+use crate::takeover::Takeover;
+
 /// What this server speaks when the client does not say.
 const PROTOCOL: &str = "2025-06-18";
 
 /// How long the app may take: a page that is slow to load. A little more
 /// than the listener waits, so its timeout is the one heard.
 const APP_WAIT: Duration = Duration::from_secs(100);
+
+/// How long the app may take to say whether takeover is on. Short, since
+/// the client waits for the tool list behind it, and no answer reads as on.
+const MODE_WAIT: Duration = Duration::from_secs(2);
+
+/// How often a session's server asks whether the human turned takeover on
+/// or off since the tools were last listed, to tell the client the list
+/// changed. A round trip to the app on this machine, ten seconds apart.
+const MODE_EVERY: Duration = Duration::from_secs(10);
+
+/// Said when listing the windows and the app did not say in time whether
+/// takeover is on: the one call no later question guards, so it is not
+/// answered on a guess.
+const MODE_UNKNOWN: &str = "Horadric did not say in time whether takeover is on, so no windows \
+    were listed. Try again in a moment.";
+
+/// A mode as it is kept between threads: none listed yet, off, ask.
+fn mode_byte(mode: Option<Mode>) -> u8 {
+    match mode {
+        None => 0,
+        Some(Mode::Off) => 1,
+        Some(Mode::Ask) => 2,
+    }
+}
+
+/// Writes one message to the client, whole: the mode's watcher writes
+/// beside the answers.
+fn send(line: &str) -> Result<(), String> {
+    let mut out = std::io::stdout().lock();
+    writeln!(out, "{line}").map_err(|e| e.to_string())?;
+    out.flush().map_err(|e| e.to_string())
+}
+
+/// Tells the client the tool list changed whenever the human turns
+/// takeover on or off after the tools were listed, so the takeover tools
+/// leave a running session's list, and come back, without its restart.
+/// Calls are refused by the app while off either way: this only keeps the
+/// list true.
+fn watch_mode(port: u16, session: String, listed: Arc<AtomicU8>) {
+    thread::spawn(move || loop {
+        thread::sleep(MODE_EVERY);
+        let was = listed.load(Ordering::Acquire);
+        if was == 0 {
+            continue;
+        }
+        let asked = json!({ "op": "desktop.mode" });
+        let said = ask_app_within(port, Some(&session), &asked, MODE_WAIT).ok();
+        let now = mode_byte(Mode::known(said.as_ref().and_then(|a| a["mode"].as_str())));
+        if now == 0 || now == was {
+            continue;
+        }
+        listed.store(now, Ordering::Release);
+        let note = json!({ "jsonrpc": "2.0", "method": "notifications/tools/list_changed" });
+        if send(&note.to_string()).is_err() {
+            return;
+        }
+    });
+}
 
 /// Said of a call that failed after it reached the page, so the agent looks
 /// before it makes the call again and does not act twice.
@@ -48,7 +116,7 @@ const MAY_HAVE_RUN: &str = "It may still have run in the page: look (browser_sna
 const HAS_LORE: bool = cfg!(not(target_os = "macos"));
 
 /// The most text a tool answers with, so one call can not fill the context.
-const MOST_TEXT: usize = 60_000;
+pub(crate) const MOST_TEXT: usize = 60_000;
 
 /// The tallest full page screenshot, in CSS pixels.
 const TALLEST: f64 = 12_000.0;
@@ -60,6 +128,11 @@ pub fn run() -> Result<(), String> {
         .and_then(|p| p.parse().ok())
         .unwrap_or_else(horadric_hooks::port);
     let ours = session.clone();
+    let asker = session.clone();
+    let listed = Arc::new(AtomicU8::new(0));
+    if let (true, Some(s)) = (cfg!(windows), &session) {
+        watch_mode(owner, s.clone(), Arc::clone(&listed));
+    }
     // Asked once, and only when a lore tool named files: the server's
     // folder does not change.
     let top: OnceCell<Option<PathBuf>> = OnceCell::new();
@@ -67,13 +140,20 @@ pub fn run() -> Result<(), String> {
         // A Linux node has no stage, so no browser pane: only the lore.
         browser: cfg!(any(windows, target_os = "macos")) && session.is_some(),
         app: move |body: Value| ask_app(owner, session.as_deref(), &body),
+        mode: Box::new(move || {
+            let asked = json!({ "op": "desktop.mode" });
+            let said = ask_app_within(owner, asker.as_deref(), &asked, MODE_WAIT).ok();
+            Mode::known(said.as_ref().and_then(|a| a["mode"].as_str()))
+        }),
+        listed,
         settle: Duration::from_millis(400),
         #[cfg(not(target_os = "macos"))]
         lore: crate::lore::tool,
         #[cfg(target_os = "macos")]
         lore: |_, _| None,
+        #[cfg(windows)]
+        takeover: Takeover::default(),
     };
-    let mut out = std::io::stdout().lock();
     for line in std::io::stdin().lock().lines() {
         let line = line.map_err(|e| e.to_string())?;
         if line.trim().is_empty() {
@@ -87,8 +167,7 @@ pub fn run() -> Result<(), String> {
             })),
         };
         if let Some(a) = answer {
-            writeln!(out, "{a}").map_err(|e| e.to_string())?;
-            out.flush().map_err(|e| e.to_string())?;
+            send(&a.to_string())?;
             if let (Some(s), Ok(msg)) = (&ours, serde_json::from_str::<Value>(&line)) {
                 let is_file = |p: &str| {
                     let top =
@@ -161,10 +240,39 @@ fn shown(msg: &Value, answer: &Value, is_file: impl Fn(&str) -> bool) -> Vec<Str
     out
 }
 
+/// What a session Horadric started is told of its browser, and on Windows
+/// of its desktop.
+/// Why a session Horadric did not start can not use these tools.
+const NOT_STARTED: &str =
+    "this session was not started by Horadric, so it has no browser and no desktop tools";
+
 /// One call to the app, and what it answered, or why not.
 pub(crate) fn ask_app(port: u16, session: Option<&str>, body: &Value) -> Result<Value, String> {
-    let session =
-        session.ok_or("this session was not started by Horadric, so it has no browser")?;
+    ask_app_within(port, session, body, APP_WAIT)
+}
+
+/// What the agent hears when the listener gave up waiting on the app. A
+/// takeover op is asked before the engine acts, so nothing was done; a
+/// browser call may have run in the page.
+fn timed_out(body: &Value) -> String {
+    let op = body.get("op").and_then(Value::as_str).unwrap_or_default();
+    if op.starts_with("desktop.") {
+        "Horadric did not answer this takeover call in time, so nothing was done. Look \
+         (takeover_windows or takeover_snapshot) before you call again."
+            .into()
+    } else {
+        format!("the browser did not answer in time. {MAY_HAVE_RUN}")
+    }
+}
+
+/// [`ask_app`] with its own limit on how long the app may take.
+fn ask_app_within(
+    port: u16,
+    session: Option<&str>,
+    body: &Value,
+    wait: Duration,
+) -> Result<Value, String> {
+    let session = session.ok_or(NOT_STARTED)?;
     let headers = [(COMMAND_HEADER, "browser"), (SESSION_HEADER, session)];
     // The session's key goes with every call, so the app knows the call is
     // this session's and not another program's naming it.
@@ -172,7 +280,7 @@ pub(crate) fn ask_app(port: u16, session: Option<&str>, body: &Value) -> Result<
     if let (Some(o), Ok(key)) = (body.as_object_mut(), std::env::var(SECRET_KEY_ENV)) {
         o.entry("key").or_insert(json!(key));
     }
-    let (status, text) = client::ask(port, BROWSER_PATH, &headers, &body.to_string(), APP_WAIT)
+    let (status, text) = client::ask(port, BROWSER_PATH, &headers, &body.to_string(), wait)
         .map_err(|e| {
             if client::sent(&e) {
                 format!("the answer was lost ({e}), but the call reached Horadric. {MAY_HAVE_RUN}")
@@ -182,11 +290,7 @@ pub(crate) fn ask_app(port: u16, session: Option<&str>, body: &Value) -> Result<
         })?;
     match status {
         200 => {}
-        504 => {
-            return Err(format!(
-                "the browser did not answer in time. {MAY_HAVE_RUN}"
-            ))
-        }
+        504 => return Err(timed_out(&body)),
         s => return Err(format!("Horadric refused the call ({s})")),
     }
     let answer: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
@@ -206,6 +310,17 @@ struct Server<A> {
     settle: Duration,
     /// Answers a lore tool, None for any other.
     lore: fn(&str, &Value) -> Option<Result<String, String>>,
+    /// Whether the human has takeover on, asked of the app when the tools
+    /// are listed and the windows asked for. None when the app does not
+    /// answer in time.
+    mode: Box<dyn FnMut() -> Option<Mode>>,
+    /// The mode the tools were last listed under, for the watcher that
+    /// tells the client when it changes (see [`mode_byte`]).
+    listed: Arc<AtomicU8>,
+    /// The desktop programs the agent reads and operates, its UI
+    /// Automation set up on first use.
+    #[cfg(windows)]
+    takeover: Takeover,
 }
 
 impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
@@ -220,7 +335,9 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
                     .get("protocolVersion")
                     .and_then(Value::as_str)
                     .unwrap_or(PROTOCOL),
-                "capabilities": { "tools": {} },
+                // The list changes when the human turns takeover on or
+                // off, and the client is told (see `watch_mode`).
+                "capabilities": { "tools": { "listChanged": true } },
                 "serverInfo": { "name": "horadric", "version": env!("CARGO_PKG_VERSION") },
                 "instructions": match (self.browser, HAS_LORE) {
                     (true, true) => format!("{}
@@ -232,7 +349,16 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
                 },
             })),
             "ping" => Ok(json!({})),
-            "tools/list" if self.browser => Ok(json!({ "tools": tool_list() })),
+            "tools/list" if self.browser => {
+                // Off keeps the takeover tools out of every session's
+                // context, which is most of what this list weighs.
+                // An app that does not say in time hides nothing: every
+                // call still asks it, and it refuses while off.
+                let mode = (self.mode)();
+                self.listed.store(mode_byte(mode), Ordering::Release);
+                let takeover = cfg!(windows) && mode.unwrap_or(Mode::Ask) == Mode::Ask;
+                Ok(json!({ "tools": tool_list(takeover) }))
+            }
             "tools/list" => Ok(json!({ "tools": lore_tools() })),
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
@@ -354,6 +480,27 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
                 let params = args.get("params").cloned().unwrap_or(json!({}));
                 Ok(vec![text(cap(pretty(&self.devtools(method, params)?)))])
             }
+            // The lore is served to any session, but the desktop only to
+            // one Horadric started, which has an app to ask the human.
+            n if is_takeover(n) && !self.browser => Err(NOT_STARTED.into()),
+            // Every other takeover tool asks the app before it reads, and
+            // hears there that takeover is off. Listing the windows asks
+            // nothing, so it is asked here: off shows no titles either,
+            // and nor does an app that did not say. Opening a program
+            // that is already open answers with its windows unasked, so it
+            // is held to the same.
+            n if is_takeover(n) && (n.ends_with("_windows") || n.ends_with("_open")) => {
+                match (self.mode)() {
+                    Some(Mode::Off) => Err(OFF.into()),
+                    None => Err(MODE_UNKNOWN.into()),
+                    #[cfg(windows)]
+                    Some(Mode::Ask) => self.takeover.tool(n, args, &mut self.app, self.settle),
+                    #[cfg(not(windows))]
+                    Some(Mode::Ask) => Err(format!("there is no tool {name}")),
+                }
+            }
+            #[cfg(windows)]
+            n if is_takeover(n) => self.takeover.tool(n, args, &mut self.app, self.settle),
             _ => Err(format!("there is no tool {name}")),
         }
     }
@@ -796,9 +943,21 @@ fn char_key(key: &str, shift: bool) -> Option<(String, String, u32, String)> {
 
 /// Every tool the server lists to a Horadric session, for `horadric
 /// quest start` to weigh, which a node has no quests for.
-pub(crate) fn tool_list() -> Value {
+pub(crate) fn tool_list(takeover: bool) -> Value {
+    #[cfg(windows)]
+    let takeover = if takeover {
+        takeover_tools()
+    } else {
+        Vec::new()
+    };
+    #[cfg(not(windows))]
+    let takeover: Vec<Value> = {
+        let _ = takeover;
+        Vec::new()
+    };
     json!(tools()
         .into_iter()
+        .chain(takeover)
         .chain(forge::tools())
         .chain(crate::remote::tools())
         .chain(crate::desk::tools())
@@ -819,7 +978,7 @@ fn tools() -> Vec<Value> {
         }
         base
     };
-    vec![
+    let list = vec![
         tool(
             "browser_open",
             "Open this project's browser pane in Horadric, and a tab of your own in it, at url when given. It is a real browser (Edge WebView2 on Windows, WebKit on the Mac) beside the user's terminals, logged in wherever the user logged in. Open it when a task needs a web page; it stays open until closed. Use it in place of Playwright, Puppeteer, a Chrome DevTools MCP or a Chrome or headless browser of your own.",
@@ -993,6 +1152,249 @@ fn tools() -> Vec<Value> {
             }),
             &["method"],
         ),
+    ];
+    list
+}
+
+/// Whether `name` is a takeover tool, by either family of names: the
+/// listed `takeover_` ones, and the `desktop_` ones they were first shipped
+/// as, which prompts and saved runewords still call. The engine goes by
+/// the verb after the prefix, so both reach the same code.
+fn is_takeover(name: &str) -> bool {
+    ["takeover_", "desktop_"]
+        .iter()
+        .any(|family| name.starts_with(family))
+}
+
+/// The takeover tools, for programs on the user's own Windows desktop.
+#[cfg(windows)]
+fn takeover_tools() -> Vec<Value> {
+    let window = || {
+        json!({
+            "anyOf": [{ "type": "string" }, { "type": "number" }],
+            "description": "The window: its id from takeover_windows, or part of its title",
+        })
+    };
+    let risky = || {
+        json!({
+            "type": "boolean",
+            "description": "Set it for anything that changes the controlled machine or the \
+                project: writing a value to a running PLC, changing its mode, transferring, \
+                deleting, saving over a file. The user is then asked to confirm.",
+        })
+    };
+    let reason = || {
+        json!({
+            "type": "string",
+            "description": "One short sentence, in the user's language, saying what you are \
+                about to do and why; it is shown to the human in Horadric's thinking box.",
+        })
+    };
+    let element = |verb: &str| {
+        json!({
+            "window": window(),
+            "reason": reason(),
+            "ref": { "type": "string", "description": "A ref from takeover_snapshot of this window, like e12" },
+            "name": { "type": "string", "description": format!("Or the element to {verb}: its name or automation id, else part of the name, then of the id") },
+            "risky": risky(),
+        })
+    };
+    let with = |mut base: Value, more: Value| {
+        if let (Some(b), Value::Object(m)) = (base.as_object_mut(), more) {
+            b.extend(m);
+        }
+        base
+    };
+    vec![
+        tool(
+            "takeover_windows",
+            "The windows on the user's desktop, frontmost first: id, title (cut at 40 \
+             characters until the user lets you into the program), program and process id. \
+             Dialogs say whose they are.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            "takeover_open",
+            "Start a program on the user's own desktop when the one you need there is not open \
+             (asked to look through Slack, and Slack is not running). Give app, a name like \
+             slack, outlook, notepad or edge, found the way the Run box and the Start menu find \
+             it, or path: a program's .exe, a shortcut to one, or shell:AppsFolder\\<id> for a \
+             Store app. One already open is not started again: the answer lists its windows. \
+             Otherwise the user is asked once whether this session may operate it, and the \
+             answer names its window, which you may then operate without that question again \
+             (risky actions are still asked). It is never started as administrator: one that \
+             only runs so is refused, so ask the user to start it.",
+            json!({
+                "app": { "type": "string", "description": "The program's name, like slack, outlook or notepad" },
+                "path": { "type": "string", "description": "Or its .exe, a shortcut (.lnk) to it, or shell:AppsFolder\\<id>" },
+                "args": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "What to start it with, like a file for it to open",
+                },
+                "risky": risky(),
+                "reason": reason(),
+            }),
+            &[],
+        ),
+        tool(
+            "takeover_snapshot",
+            "A window's controls as text, through UI Automation: each button, field, list, tree \
+             item and label with its type, name, value, automation id, whether it is enabled, \
+             where it is in the window and what it can do (invoke, toggle, select, expand, \
+             value), and a ref like e12 for takeover_click, takeover_type and \
+             takeover_screenshot. Take a new one after the window changes; refs from an old \
+             one go stale.",
+            json!({ "window": window(), "reason": reason() }),
+            &["window"],
+        ),
+        tool(
+            "takeover_screenshot",
+            "A picture of a window, mostly even when it is covered (one Windows will not draw \
+             for you must be in front and uncovered). For what a snapshot can not tell: a \
+             chart, a ladder diagram, colours.",
+            json!({
+                "window": window(),
+                "ref": { "type": "string", "description": "Only this element, a ref from takeover_snapshot" },
+                "reason": reason(),
+            }),
+            &["window"],
+        ),
+        tool(
+            "takeover_click",
+            "Click an element of a window with a real mouse click at its middle. The window \
+             comes forward and an element out of view is scrolled into it where the program \
+             can; one that is gone, off screen or covered by another program is not clicked, \
+             nor is anything while the user holds a mouse button. An element whose one action \
+             is expanding (a combo box, a tree node that can not be selected) is expanded or \
+             collapsed through UI Automation instead. The user's pointer is put back, and the \
+             keyboard goes back to the window they had in front (the answer says so); a \
+             dialog the click opened waits behind it for the next call.",
+            with(
+                element("click"),
+                json!({
+                    "button": { "type": "string", "enum": ["left", "right", "middle"] },
+                    "double": { "type": "boolean", "description": "A double click" },
+                }),
+            ),
+            &["window"],
+        ),
+        tool(
+            "takeover_type",
+            "Type text into a field. One that takes a value has it set, replacing what was \
+             there; any other gets the keyboard and the text at its caret, where a line break \
+             or tab is refused except in a document (use submit or takeover_press) and typing \
+             stops if another program takes the front. The answer says what the field \
+             holds, read back before Enter; when that is not what was typed, Enter is not \
+             pressed. The keyboard then goes back to the user's window.",
+            with(
+                element("type into"),
+                json!({
+                    "text": { "type": "string" },
+                    "submit": { "type": "boolean", "description": "Press Enter after" },
+                }),
+            ),
+            &["window", "text"],
+        ),
+        tool(
+            "takeover_text",
+            "Read the text of a list, grid, output pane or editor that takeover_snapshot can not \
+             read, by ref or by name, or of what has the keyboard in the window when neither is \
+             given. It reads UI Automation's text, then the element's value; only where \
+             neither answers it selects all and copies (Control+A, Control+C), which counts as \
+             operating, may click into a pane (never a button) to give it the keyboard, and \
+             puts the clipboard's text back. That is refused while the clipboard holds more \
+             than plain text (a picture, files), which it would destroy. For build output, \
+             logs and tables.",
+            element("read the text of"),
+            &["window"],
+        ),
+        tool(
+            "takeover_press",
+            "Press a key in a window, with modifiers joined by +: Enter, Escape, Tab, F5, \
+             Down, Control+S, Shift+Tab, Alt+F4, a. Chords with the Windows key are refused. \
+             The window comes forward, the key goes to whatever in it has the keyboard, and \
+             the keyboard then goes back to the user's window.",
+            json!({
+                "window": window(),
+                "key": { "type": "string" },
+                "risky": risky(),
+                "reason": reason(),
+            }),
+            &["window", "key"],
+        ),
+        tool(
+            "takeover_changes",
+            "What changed in the desktop programs this session works with since your last \
+             takeover_changes: windows and dialogs shown and closed, a window coming to the \
+             front, menus, and fields, labels, boxes and items whose value, name or state \
+             changed, one short line each, newest last. Horadric watches a program from the \
+             first time this session looks at it or operates it. Far cheaper than a snapshot \
+             or a picture: ask this first to learn what happened after you or the user acted, \
+             or while a program works, and take a takeover_snapshot only when you need refs to \
+             act.",
+            json!({
+                "window": {
+                    "anyOf": [{ "type": "string" }, { "type": "number" }],
+                    "description": "Only this program's changes: its window's id from \
+                        takeover_windows, or part of its title. Without it, every program \
+                        watched",
+                },
+                "since": {
+                    "type": "integer",
+                    "description": "The changes after this number (each answer says where it \
+                        ended), instead of after your last takeover_changes. Programs that run \
+                        as administrator are counted apart and always go on from your last \
+                        takeover_changes",
+                },
+                "reason": reason(),
+            }),
+            &[],
+        ),
+        tool(
+            "takeover_wait",
+            "Wait until something happens in a desktop program, instead of taking snapshots or \
+             screenshots in a loop, then say what held and every change seen meanwhile. Give \
+             one or more of appears, gone, text and quiet_ms: it returns as soon as any of them \
+             holds, or after timeout_ms. quiet_ms waits until a program has finished loading, \
+             building or transferring: nothing in it changed for that long.",
+            json!({
+                "window": {
+                    "anyOf": [{ "type": "string" }, { "type": "number" }],
+                    "description": "The window to watch: its id from takeover_windows, or part \
+                        of its title. Without it, every program this session watches already",
+                },
+                "appears": {
+                    "type": "string",
+                    "description": "A window whose title contains this is open (a dialog, \
+                        a program starting), in the named window's program, or anywhere \
+                        without one",
+                },
+                "gone": {
+                    "type": "string",
+                    "description": "No window whose title contains this is open any more, \
+                        in the named window's program, or anywhere without one",
+                },
+                "text": {
+                    "type": "string",
+                    "description": "A field, label or item came to have a name or value \
+                        containing this, or a window such a title",
+                },
+                "quiet_ms": {
+                    "type": "integer",
+                    "description": "Nothing changed in the window for this many milliseconds",
+                },
+                "timeout_ms": {
+                    "type": "integer",
+                    "description": "How long to wait at most: 10000 when not given (or what \
+                        HORADRIC_DESKTOP_WAIT_MS says), 60000 at most. A wait that times out \
+                        is an error: look at the window before waiting again",
+                },
+                "reason": reason(),
+            }),
+            &[],
+        ),
     ]
 }
 
@@ -1071,21 +1473,27 @@ const NOTHING: &str = "This session was not started by Horadric, so it has no br
 pub(crate) const LORE: &str = "Horadric keeps notes shared by every session of this project, the lore. Before you explore a part of the code, ask lore_recall about it (words or files): another session may already have found out what you need. When you find out something the next session would otherwise have to find out again, leave it with lore_note, naming its files and, in backticks, the functions and types it is about. A note marked maybe stale is a lead, not a fact: check it, and when it is wrong or outdated leave the right one with replaces. It also keeps an index of the project's code: ask lore_find where a name is defined, lore_calls who calls it, and lore_outline what a file holds, before you grep or read whole files. Every line a Read returns stays in your context window for the rest of the session, and whole files are most of what fills it: outline a file first, then Read the lines you need with offset and limit, and send a search that would read many files to a subagent, whose window dies with it.";
 
 /// What a session Horadric started is told: the browser, and on Windows
-/// the agent's desk, which exists only there.
+/// the agent's desk and takeover, which exist only there.
 pub(crate) fn instructions() -> String {
     if cfg!(windows) {
-        format!("{INSTRUCTIONS} {DESK}")
+        format!("{INSTRUCTIONS} {DESK} {TAKEOVER}")
     } else {
         INSTRUCTIONS.to_string()
     }
 }
 
-const DESK: &str = "When a task needs a desktop app, the mouse or the keyboard outside a web page, use the desk_ tools: they drive the agent's desk, a Windows desktop of the user's own account that the user watches in a window while they keep working in their own session. They work once the user has opened the agent's desk from Horadric's tray menu, and say so when it is closed.";
+/// The one story of the two ways to a desktop app, the desk first: it is
+/// in every session's context, so each sentence is a rule a session broke
+/// or would break without it.
+const DESK: &str = "For a desktop app, the mouse or the keyboard outside a web page there are two families of tools, never mixed: a point read off one family's screenshot is no coordinate for the other. The desk_ tools are the default: they drive the agent's desk, a Windows desktop of the user's own account that the user watches in a window while they keep working in their own session. A closed desk opens itself at the first desk_ call, which may then take up to a minute or more. The desk has the user's files and logins, so stop and ask before a step that costs money, deletes something or cannot be undone.";
 
 const INSTRUCTIONS: &str = "Horadric gives this session a browser, and it is the one to use: a pane on the Horadric stage beside the user's terminals, one per project with tabs, shared by the project's sessions. You work in a tab of your own: the first page you open becomes yours (the tab shown when it is blank, else a new one), and your calls stay in it whichever tab the user shows. A page the user is on is theirs: you can read it and act on it while it is shown, but opening a page never takes it. A popup your click opens becomes yours until it closes. The user sees the page you drive. Whenever a task needs the web (trying a page you built, testing a local server, reading docs, a login, a screenshot of a page), use these tools rather than Playwright, Puppeteer, the Chrome DevTools MCP, Claude in Chrome, or starting Chrome, Edge or a headless browser yourself, unless the user asks for one of those. When a task means changing a setting in a web service's dashboard (sign-in methods in Clerk, an environment variable in Vercel, a DNS record, an OAuth app), do it yourself in this browser rather than writing the user a list of steps: they are usually logged in already. Stop and ask only when a login needs their password or a code, or before a step that costs money, deletes something or cannot be undone. Open it with browser_open or browser_navigate, read it with browser_snapshot, act with browser_click, browser_type, browser_select (for a dropdown) and browser_press, and look \
 with browser_screenshot. Refs from browser_snapshot are surer than guessed selectors. Close your tab with \
 browser_close when you are done, unless the user is using it. It keeps one login profile with \
 the user's own use of it, so take care on sites where they are logged in.";
+
+/// What a Windows session is told of takeover, after the desk.
+const TAKEOVER: &str = "The takeover_ tools (not listed while the user has takeover off) operate a program on the user's own desktop and take their mouse and keyboard while they act: only for a program that is open there or works only there (it runs as administrator, or is bound to hardware or a licence). When the program you need there is not open, takeover_open starts it, with the user's approval. A closed desk is never a reason to take over: say the desk is closed and ask. The user approves each program once per session and confirms each risky action, so give every takeover call but takeover_windows a reason: one short sentence, in the user's language, saying what you are about to do and why. Read with takeover_snapshot and act by its refs or by name, which are surer than points; ask takeover_changes what changed and wait with takeover_wait rather than taking snapshots again and again.";
 
 #[cfg(test)]
 mod tests {
@@ -1112,6 +1520,10 @@ mod tests {
             app,
             settle: Duration::ZERO,
             lore: |name, _| (name == "lore_recall").then(|| Ok("#1 a note".into())),
+            mode: Box::new(|| Some(Mode::Ask)),
+            listed: Arc::new(AtomicU8::new(0)),
+            #[cfg(windows)]
+            takeover: Takeover::default(),
         };
         (s, calls)
     }
@@ -1236,6 +1648,10 @@ B.";
         assert_eq!(names, want);
         let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" });
         assert_eq!(s.handle(&init).unwrap()["result"]["instructions"], said);
+        // The lore needs no Horadric, the desktop does.
+        let a = s.handle(&call("takeover_windows", json!({}))).unwrap();
+        assert_eq!(a["result"]["isError"], true);
+        assert_eq!(a["result"]["content"][0]["text"], NOT_STARTED);
     }
 
     #[test]
@@ -1258,6 +1674,8 @@ B.";
         assert!(tools().len() >= 15);
         for t in &[
             tools(),
+            #[cfg(windows)]
+            takeover_tools(),
             forge::tools(),
             crate::remote::tools(),
             crate::desk::tools(),
@@ -1267,9 +1685,16 @@ B.";
         {
             let name = t["name"].as_str().unwrap();
             assert!(
-                ["browser_", "forge_", "remote_", "desk_", "lore_"]
-                    .iter()
-                    .any(|p| name.starts_with(p)),
+                [
+                    "browser_",
+                    "takeover_",
+                    "forge_",
+                    "remote_",
+                    "desk_",
+                    "lore_"
+                ]
+                .iter()
+                .any(|p| name.starts_with(p)),
                 "{t}"
             );
             assert!(!t["description"].as_str().unwrap().is_empty(), "{t}");
@@ -1283,6 +1708,239 @@ B.";
                 );
             }
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_takeover_tools_are_offered_with_the_browser() {
+        let (mut s, _) = server(|_| Ok(json!({})));
+        let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
+        let tools = s.handle(&list).unwrap()["result"]["tools"].clone();
+        let named = |n: &str| {
+            tools
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == n)
+                .cloned()
+                .unwrap_or_else(|| panic!("no {n}"))
+        };
+        for n in [
+            "takeover_windows",
+            "takeover_open",
+            "takeover_snapshot",
+            "takeover_screenshot",
+            "takeover_click",
+            "takeover_type",
+            "takeover_press",
+            "takeover_text",
+            "takeover_changes",
+            "takeover_wait",
+        ] {
+            named(n);
+        }
+        assert_eq!(named("takeover_open")["inputSchema"]["required"], json!([]));
+        for k in ["app", "path", "args", "reason"] {
+            assert!(
+                !named("takeover_open")["inputSchema"]["properties"][k].is_null(),
+                "{k}"
+            );
+        }
+        assert_eq!(
+            named("takeover_changes")["inputSchema"]["required"],
+            json!([])
+        );
+        assert_eq!(named("takeover_wait")["inputSchema"]["required"], json!([]));
+        for k in [
+            "appears",
+            "gone",
+            "text",
+            "quiet_ms",
+            "timeout_ms",
+            "window",
+        ] {
+            assert!(
+                !named("takeover_wait")["inputSchema"]["properties"][k].is_null(),
+                "{k}"
+            );
+        }
+        assert!(named("takeover_changes")["description"]
+            .as_str()
+            .unwrap()
+            .contains("only when you need refs"));
+        assert_eq!(
+            named("takeover_type")["inputSchema"]["required"],
+            json!(["window", "text"])
+        );
+        for n in ["takeover_click", "takeover_type", "takeover_press"] {
+            let risky = &named(n)["inputSchema"]["properties"]["risky"];
+            assert_eq!(risky["type"], "boolean", "{n}");
+            assert!(
+                risky["description"].as_str().unwrap().contains("PLC"),
+                "{n}"
+            );
+        }
+        for n in [
+            "takeover_open",
+            "takeover_snapshot",
+            "takeover_screenshot",
+            "takeover_click",
+            "takeover_type",
+            "takeover_press",
+            "takeover_changes",
+            "takeover_wait",
+        ] {
+            let reason = &named(n)["inputSchema"]["properties"]["reason"];
+            assert_eq!(reason["type"], "string", "{n}");
+            assert!(
+                reason["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("thinking box"),
+                "{n}"
+            );
+        }
+        assert!(named("takeover_windows")["inputSchema"]["properties"]["reason"].is_null());
+        let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" });
+        let said = s.handle(&init).unwrap()["result"]["instructions"].clone();
+        let said = said.as_str().unwrap();
+        for part in [
+            "takeover_snapshot",
+            "give every takeover call",
+            "takeover_changes what changed",
+            "takeover_wait",
+            "takeover_open starts it",
+            // The one story: the desk first, and a closed desk is no
+            // reason to take the human's own mouse.
+            "The desk_ tools are the default",
+            "A closed desk is never a reason to take over",
+            "never mixed",
+            "costs money, deletes something or cannot be undone. The takeover_",
+        ] {
+            assert!(said.contains(part), "{part}");
+        }
+        assert!(
+            !said.contains("do the same"),
+            "the two no longer read as equals"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_takeover_wait_for_nothing_asks_nothing() {
+        let (mut s, calls) = server(|_| Ok(json!({ "allowed": true })));
+        let a = s.handle(&call("takeover_wait", json!({}))).unwrap();
+        assert_eq!(a["result"]["isError"], true);
+        assert!(a["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("say what to wait for"));
+        assert!(calls.borrow().is_empty());
+    }
+
+    /// The names the tools were first shipped under are in prompts and
+    /// saved runewords, so they are answered, by the same engine, and
+    /// listed nowhere.
+    #[cfg(windows)]
+    #[test]
+    fn the_old_desktop_names_are_answered_but_not_listed() {
+        let (mut s, calls) = server(|_| Ok(json!({ "allowed": true })));
+        let mut said = |name: String, args: Value| {
+            let a = s.handle(&call(&name, args)).unwrap();
+            assert_eq!(a["result"]["isError"], true, "{name}");
+            a["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        for verb in ["snapshot", "screenshot", "click", "type", "press", "text"] {
+            let old = said(format!("desktop_{verb}"), json!({}));
+            assert!(old.contains("say which window"), "{verb}: {old}");
+            assert_eq!(old, said(format!("takeover_{verb}"), json!({})), "{verb}");
+        }
+        let waited = said("desktop_wait".into(), json!({}));
+        assert!(waited.contains("say what to wait for"), "{waited}");
+        // A name of neither family is not the engine's.
+        let other = said("desk_snapshot".into(), json!({}));
+        assert!(other.contains("there is no tool"), "{other}");
+        assert!(calls.borrow().is_empty());
+        let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
+        let listed = s.handle(&list).unwrap()["result"]["tools"].to_string();
+        assert!(listed.contains("\"takeover_click\""));
+        assert!(
+            !listed.contains("desktop_"),
+            "an old name is listed or named"
+        );
+    }
+
+    /// Off, the tools are not listed, which is most of the list's weight,
+    /// and the one tool that asks the app nothing is refused here.
+    #[cfg(windows)]
+    #[test]
+    fn takeover_off_lists_no_takeover_tool_and_shows_no_windows() {
+        let (mut s, calls) = server(|_| Err(OFF.into()));
+        let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
+        let on = s.handle(&list).unwrap()["result"]["tools"].to_string();
+        s.mode = Box::new(|| Some(Mode::Off));
+        let off = s.handle(&list).unwrap()["result"]["tools"].to_string();
+        assert!(on.contains("\"takeover_click\"") && !off.contains("takeover_"));
+        assert!(off.contains("\"desk_click\"") && off.contains("\"browser_click\""));
+        assert!(on.len() - off.len() > 6000, "{}", on.len() - off.len());
+        for name in ["takeover_windows", "desktop_windows", "takeover_open"] {
+            let a = s.handle(&call(name, json!({ "app": "notepad" }))).unwrap();
+            assert_eq!(a["result"]["isError"], true);
+            assert_eq!(a["result"]["content"][0]["text"], OFF);
+        }
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_takeover_timeout_is_not_told_as_the_browser_s() {
+        let allow = json!({ "op": "desktop.allow" });
+        let said = timed_out(&allow);
+        assert!(said.contains("takeover") && said.contains("nothing was done"));
+        assert!(!said.contains("browser"));
+        assert!(timed_out(&json!({ "op": "navigate" })).contains("browser"));
+    }
+
+    /// An app that does not say whether takeover is on keeps the tools
+    /// listed, since every call asks it again, but lists no windows, the
+    /// one call nothing later guards.
+    #[cfg(windows)]
+    #[test]
+    fn an_unknown_mode_lists_the_tools_but_no_windows() {
+        let (mut s, calls) = server(|_| Err("no".into()));
+        s.mode = Box::new(|| None);
+        let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
+        let tools = s.handle(&list).unwrap()["result"]["tools"].to_string();
+        assert!(tools.contains("\"takeover_click\""));
+        for name in ["takeover_windows", "desktop_windows"] {
+            let a = s.handle(&call(name, json!({}))).unwrap();
+            assert_eq!(a["result"]["isError"], true);
+            assert_eq!(a["result"]["content"][0]["text"], MODE_UNKNOWN);
+        }
+        assert!(calls.borrow().is_empty());
+        // The list says it changes, so a running session hears of off.
+        let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" });
+        let a = s.handle(&init).unwrap();
+        assert_eq!(a["result"]["capabilities"]["tools"]["listChanged"], true);
+        assert_eq!(s.listed.load(Ordering::Acquire), mode_byte(None));
+        assert_eq!(Mode::known(Some("ask")), Some(Mode::Ask));
+        assert_eq!(Mode::known(Some("on")), None);
+        assert_eq!(Mode::known(None), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_takeover_call_without_a_window_asks_nothing() {
+        let (mut s, calls) = server(|_| Ok(json!({ "allowed": true })));
+        let a = s.handle(&call("takeover_snapshot", json!({}))).unwrap();
+        assert_eq!(a["result"]["isError"], true);
+        assert!(a["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("say which window"));
+        assert!(calls.borrow().is_empty());
     }
 
     #[test]

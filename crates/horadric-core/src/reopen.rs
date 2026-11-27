@@ -90,6 +90,7 @@ mod tests {
                 loot: Default::default(),
                 runeword: None,
                 chat: true,
+                created: None,
             },
             project: project.into(),
             at: 0,
