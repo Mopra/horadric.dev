@@ -17,6 +17,7 @@
 //! only collapses the sessions back into their tiles; the agents keep
 //! running.
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::rc::Rc;
@@ -151,6 +152,9 @@ pub struct TerminalWindow {
     /// The project key of the sessions shown, and its name.
     project: RefCell<String>,
     project_name: RefCell<String>,
+    /// The project's folder, for where its name in the caption says it
+    /// is. A brother's is told at hover time, so a rename shows at once.
+    dir: RefCell<Option<std::path::PathBuf>>,
     /// In grid order. Boxed on purpose: each pane's window procedure holds
     /// a raw pointer to it, so it must not move.
     #[allow(clippy::vec_box)]
@@ -232,6 +236,7 @@ impl TerminalWindow {
             shared,
             icon: Cell::new(0),
             project: RefCell::new(String::new()),
+            dir: RefCell::new(None),
             project_name: RefCell::new(String::new()),
             panes: RefCell::new(Vec::new()),
             grid: RefCell::new(Vec::new()),
@@ -309,6 +314,11 @@ impl TerminalWindow {
         if let Some(p) = self.panes.borrow().iter().find(|p| p.serial() == serial) {
             p.set_name(name);
         }
+    }
+
+    /// Gives the folder of the project shown, for hovering its name.
+    pub fn set_dir(&self, dir: Option<std::path::PathBuf>) {
+        *self.dir.borrow_mut() = dir;
     }
 
     /// Shows these sessions of a project, in this order, each with its
@@ -1243,6 +1253,24 @@ impl TerminalWindow {
         }
     }
 
+    /// Where the project is, when the screen point `lparam` is on its
+    /// name in the caption.
+    fn place_at(&self, lparam: LPARAM) -> Option<Cow<'static, str>> {
+        let mut p = POINT {
+            x: (lparam.0 & 0xffff) as i16 as i32,
+            y: ((lparam.0 >> 16) & 0xffff) as i16 as i32,
+        };
+        unsafe {
+            let _ = ScreenToClient(self.hwnd, &mut p);
+        }
+        self.with_caption_r(|c| c.on_name(p.x, p.y))
+            .filter(|&on| on)
+            .and_then(|_| {
+                crate::project::whereabouts(&self.project.borrow(), self.dir.borrow().as_deref())
+            })
+            .map(Cow::Owned)
+    }
+
     fn with_caption_r<T>(&self, f: impl FnOnce(&Caption) -> T) -> Option<T> {
         self.caption.borrow().as_ref().map(|c| f(c))
     }
@@ -1676,7 +1704,8 @@ impl TerminalWindow {
                     Some(CaptionHit::Portal) => self.with_caption_r(|c| c.portal().tip()),
                     k => k.and_then(|k| tip::caption(k, zoomed)),
                 };
-                tip::over(&self.shared, self.hwnd, line);
+                let line = line.map(Cow::Borrowed).or_else(|| self.place_at(lparam));
+                tip::over_line(&self.shared, self.hwnd, line);
                 self.with_caption(|c| {
                     c.set_hot(key);
                     if c.pressed().is_some() && c.pressed() != key {

@@ -456,6 +456,7 @@ mod tests {
                 gradients: &gradients,
                 shades: &shades,
                 emit: None,
+                trimmed: None,
             };
             rt.BeginDraw();
             rt.Clear(Some(&color(theme::plate_bottom())));

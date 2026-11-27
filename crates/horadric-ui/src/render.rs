@@ -15,7 +15,7 @@
 //! latched down.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::mem::ManuallyDrop;
 use std::time::{Duration, SystemTime};
 
@@ -819,7 +819,24 @@ pub struct Target {
     kept_light: RefCell<Option<shine::Kept>>,
     /// The retinue's stones, made as its portraits first need them.
     stones: RefCell<Stones>,
+    /// Which titles the last frame cut short, for hovering them to read
+    /// the rest.
+    trimmed: RefCell<Trimmed>,
 }
+
+/// A title a cluster draws in a row of its own, by what the row shows
+/// rather than where: a scroll or a tile moving on before the next frame
+/// must not lend one row's cut to another.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Titled {
+    /// A tile's session name, by the session's id.
+    Tile(String),
+    /// A quest's title in the log.
+    Quest(String),
+}
+
+/// Which of a cluster's titles were drawn cut short.
+type Trimmed = HashSet<Titled>;
 
 /// Gradient brushes by their stops. A gradient is a texture on the GPU, and
 /// making dozens a frame cost more than all the rest of the drawing. The
@@ -915,6 +932,7 @@ impl Target {
             still_light: crate::light::Light::default(),
             kept_light: RefCell::new(None),
             stones: RefCell::default(),
+            trimmed: RefCell::default(),
         })
     }
 
@@ -1218,7 +1236,13 @@ impl Target {
             gradients: &self.gradients,
             shades: &self.shades,
             emit: None,
+            trimmed: Some(&self.trimmed),
         }
+    }
+
+    /// Whether the last frame drew `which` cut short.
+    pub fn trimmed(&self, which: &Titled) -> bool {
+        self.trimmed.borrow().contains(which)
     }
 }
 
@@ -1365,6 +1389,8 @@ struct Painter<'a> {
     /// Where light that holds still goes, while the kept layer is drawn:
     /// it is bloomed into the layer once the rest is.
     emit: Option<&'a RefCell<Vec<shine::Emitter>>>,
+    /// Where a window's painter notes the titles it cut short.
+    trimmed: Option<&'a RefCell<Trimmed>>,
 }
 
 impl Painter<'_> {
@@ -1378,6 +1404,10 @@ impl Painter<'_> {
 
     /// Everything that holds still between frames.
     unsafe fn still(&self, gpu: &Gpu, m: &Metrics, scene: &Scene) {
+        // The titles cut are this drawing's, not those of rows long gone.
+        if let Some(t) = self.trimmed {
+            t.borrow_mut().clear();
+        }
         self.plate(m, scene.layout.size);
         self.wash(scene);
         if scene.on_stage || scene.brother.is_some() {
@@ -3727,6 +3757,11 @@ impl Painter<'_> {
         };
         let ink = ink.fade(presence);
         self.text(&gpu.name, ink, s.label(), name_rect);
+        // One on its way out has no place of its own to hover.
+        if i != usize::MAX {
+            let full = self.measure(gpu, &gpu.name, s.label());
+            self.note_trim(Titled::Tile(s.id.clone()), full, name_rect.w);
+        }
         let age_c = match phase {
             Phase::Waiting(_) => c,
             _ => theme::text_dim(),
@@ -4251,8 +4286,10 @@ impl Painter<'_> {
             };
             let title_r = Rect::new(title_x, r.y, right - word_w - 8.0 - title_x, r.h);
             self.text(&gpu.body, ink.fade(shown), &row.title, title_r);
+            let full = self.measure(gpu, &gpu.body, &row.title);
+            self.note_trim(Titled::Quest(row.title.clone()), full, title_r.w);
             if strike > 0.0 {
-                let long = self.measure(gpu, &gpu.body, &row.title).min(title_r.w);
+                let long = full.min(title_r.w);
                 let y = (r.y + r.h / 2.0).round() + 0.5;
                 self.brush.SetColor(&color(theme::done().fade(0.9 * shown)));
                 self.rt.DrawLine(
@@ -4465,9 +4502,24 @@ impl Painter<'_> {
         );
     }
 
+    /// Notes whether title `which`, `full` DIPs wide and drawn in `room`,
+    /// was cut short.
+    fn note_trim(&self, which: Titled, full: f32, room: f32) {
+        if let Some(t) = self.trimmed.filter(|_| crate::tip::cut(full, room)) {
+            t.borrow_mut().insert(which);
+        }
+    }
+
     /// How wide a line of text is.
     unsafe fn measure(&self, gpu: &Gpu, fmt: &IDWriteTextFormat, s: &str) -> f32 {
-        let wide: Vec<u16> = s.encode_utf16().collect();
+        line_width(gpu, fmt, s)
+    }
+}
+
+/// How wide a line of text is in `fmt`, uncut.
+pub fn line_width(gpu: &Gpu, fmt: &IDWriteTextFormat, s: &str) -> f32 {
+    let wide: Vec<u16> = s.encode_utf16().collect();
+    unsafe {
         gpu.dw
             .CreateTextLayout(&wide, fmt, 10_000.0, 100.0)
             .and_then(|l| {

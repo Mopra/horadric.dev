@@ -131,6 +131,18 @@ pub fn project_name(key: &str) -> String {
         .to_string()
 }
 
+/// Where the project keyed `key` is, for hovering its title: `dir`, its
+/// folder here, or the brother it lives on.
+#[cfg(windows)]
+pub fn whereabouts(key: &str, dir: Option<&Path>) -> Option<String> {
+    let brother = afar::split_key(key).map(|(b, project)| (brother_name(b), project));
+    let dir = dir.map(|d| d.to_string_lossy());
+    crate::tip::whereabouts(
+        dir.as_deref(),
+        brother.as_ref().map(|(b, p)| (b.as_str(), *p)),
+    )
+}
+
 /// One spelling for a folder, so the same folder always gives the same key.
 pub(crate) fn normalise(dir: &str) -> String {
     dir.replace('\\', "/")

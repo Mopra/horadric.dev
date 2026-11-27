@@ -60,7 +60,8 @@ use crate::layout::{self, ClusterLayout, Hit, Metrics};
 use crate::motion;
 pub use crate::project::{folder_key, project_key, project_name};
 use crate::render::{
-    FilesScene, Flight, Gpu, Scene, Target, TaskRow, TasksScene, TomeScene, TomeStone, TRACE_BARS,
+    FilesScene, Flight, Gpu, Scene, Target, TaskRow, TasksScene, Titled, TomeScene, TomeStone,
+    TRACE_BARS,
 };
 use crate::theme;
 use crate::tip;
@@ -1671,29 +1672,51 @@ impl Cluster {
                 .stones()
                 .and_then(|s| s.into_iter().nth(i))
                 .map(|s| Cow::Owned(s.tip)),
-            Hit::Task(i) => self
-                .item_at(i)
-                .map(|item| Cow::Owned(tip::quest(&item.title, item.why.as_deref()))),
+            Hit::Task(i) => self.item_at(i).map(|item| {
+                let cut = self.trimmed(&Titled::Quest(item.title.clone()));
+                let title = cut.then_some(item.title.as_str());
+                Cow::Owned(tip::quest(title, item.why.as_deref()))
+            }),
             Hit::Tile(i) | Hit::Band(i) => {
                 let now = std::time::SystemTime::now();
-                let hirelings = self
-                    .sessions()
-                    .into_iter()
-                    .nth(i)
+                let session = self.sessions().into_iter().nth(i);
+                let hirelings = session
+                    .as_ref()
                     .map(|s| s.band.list(now))
                     .filter(|l| !l.is_empty());
-                match hirelings {
-                    Some(l) => tip::cluster(hot).map(|t| Cow::Owned(format!("{l}\n\n{t}"))),
-                    None => tip::cluster(hot).map(Cow::Borrowed),
-                }
+                // The name is told only on the tile itself: the band under
+                // it has a line of its own.
+                let name = session
+                    .as_ref()
+                    .filter(|s| hot == Hit::Tile(i) && self.trimmed(&Titled::Tile(s.id.clone())))
+                    .map(|s| s.label().to_string());
+                tip::cluster(hot).map(|t| match (&name, &hirelings) {
+                    (None, None) => Cow::Borrowed(t),
+                    _ => Cow::Owned(tip::headed(
+                        name.as_deref(),
+                        &tip::headed(hirelings.as_deref(), t),
+                    )),
+                })
             }
+            Hit::Header => tip::cluster(hot).map(|t| {
+                let place = crate::project::whereabouts(&self.key, self.dir.as_deref());
+                Cow::Owned(tip::headed(place.as_deref(), t))
+            }),
             _ => tip::cluster(hot).map(Cow::Borrowed),
         };
-        tip::over_line(&self.shared, self.hwnd, line);
+        tip::over_item(&self.shared, self.hwnd, tip::hash(hot), line);
         let old = self.hot.replace(hot);
         if old != hot && (old.lights() || hot.lights()) {
             self.invalidate();
         }
+    }
+
+    /// Whether the last frame drew `which` cut short.
+    fn trimmed(&self, which: &Titled) -> bool {
+        self.target
+            .borrow()
+            .as_ref()
+            .is_some_and(|t| t.trimmed(which))
     }
 
     fn press(&self, pressed: Option<Hit>) {

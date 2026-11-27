@@ -134,6 +134,15 @@ impl Caption {
         layout::caption_hit(&self.layout(), x as f32 / s, y as f32 / s)
     }
 
+    /// Whether a point in the stage's client pixels is on the project's
+    /// name.
+    pub fn on_name(&self, x: i32, y: i32) -> bool {
+        let s = self.scale();
+        let gpu = &self.shared.gpu;
+        let name_w = crate::render::line_width(gpu, &gpu.name, &self.project.borrow()).ceil();
+        layout::on_caption_name(&self.layout(), name_w, x as f32 / s, y as f32 / s)
+    }
+
     /// Along the top of a stage `width` pixels wide whose plate is
     /// `plate_h` tall.
     pub fn place(&self, width: i32, height: i32, plate_h: i32) {

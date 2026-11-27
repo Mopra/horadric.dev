@@ -384,6 +384,7 @@ impl Shading {
             gradients: &self.gradients,
             shades: &self.shades,
             emit: None,
+            trimmed: None,
         }
     }
 
