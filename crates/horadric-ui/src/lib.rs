@@ -251,6 +251,8 @@ mod town_settings;
 // and browser pane.
 #[cfg(windows)]
 mod favicon;
+#[cfg(windows)]
+mod finder;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod store;
 #[cfg(windows)]

@@ -756,6 +756,9 @@ pub struct UsageLayout {
     /// The section round the settings. None when folded.
     pub settings_box: Option<Rect>,
     pub settings: Vec<SettingRow>,
+    /// The field that searches every conversation, at the bottom. It stays
+    /// when folded: finding an old conversation is no less wanted then.
+    pub search: Rect,
 }
 
 /// One setting: a list opens from its row, a scale has a slider under its
@@ -790,6 +793,7 @@ pub fn usage(m: &Metrics, limits: usize, scales: &[bool], collapsed: bool) -> Us
         lock: Rect::default(),
         settings_box: None,
         settings: Vec::new(),
+        search: Rect::default(),
     };
     for _ in 0..rows {
         l.limits.push(Rect::new(m.pad, y, full, m.limit_row_h));
@@ -825,8 +829,22 @@ pub fn usage(m: &Metrics, limits: usize, scales: &[bool], collapsed: bool) -> Us
         y += inner;
         l.settings_box = Some(Rect::new(m.pad, top, full, y - top));
     }
+    y += m.gap;
+    l.search = Rect::new(m.pad, y, full, m.setting_row_h);
+    y += m.setting_row_h;
     l.size.1 = y + m.pad;
     l
+}
+
+/// Where the text goes in the usage window's search field, after the
+/// magnifier.
+pub fn search_inner(field: &Rect) -> Rect {
+    Rect::new(
+        field.x + 30.0,
+        field.y + 6.0,
+        field.w - 40.0,
+        field.h - 12.0,
+    )
 }
 
 /// Where stop `i` of `n` sits along a slider's track.
@@ -855,12 +873,17 @@ pub enum UsageHit {
     /// The padlock, which pins and unpins the window.
     Lock,
     Setting(usize),
+    /// The field that searches every conversation.
+    Search,
     Nothing,
 }
 
 pub fn usage_hit(l: &UsageLayout, x: f32, y: f32) -> UsageHit {
     if l.lock.contains(x, y) {
         return UsageHit::Lock;
+    }
+    if l.search.contains(x, y) {
+        return UsageHit::Search;
     }
     if l.limits_box.contains(x, y) {
         return UsageHit::Limits;
@@ -936,6 +959,46 @@ pub fn suggest(m: &Metrics, width: f32, rows: usize) -> SuggestLayout {
 
 pub fn suggest_hit(l: &SuggestLayout, x: f32, y: f32) -> Option<usize> {
     l.rows.iter().position(|r| r.contains(x, y))
+}
+
+/// A conversation in the search's list: its title and where and when on
+/// one line, the words it was found by on the next.
+pub const FINDER_ROW_H: f32 = 48.0;
+
+/// The geometry of the conversations the usage window's search found:
+/// one row per conversation shown, or a line saying why there are none.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FinderLayout {
+    pub size: (f32, f32),
+    pub rows: Vec<Rect>,
+    /// Where "Searching" or "No conversations found" goes while there
+    /// are no rows.
+    pub note: Rect,
+}
+
+/// Lays out `rows` conversations `width` wide, or the note when none.
+pub fn finder(m: &Metrics, width: f32, rows: usize) -> FinderLayout {
+    let pad = m.menu_pad;
+    let full = width - 2.0 * pad;
+    let rows: Vec<Rect> = (0..rows)
+        .map(|i| Rect::new(pad, pad + i as f32 * FINDER_ROW_H, full, FINDER_ROW_H))
+        .collect();
+    let note = Rect::new(pad, pad, full, m.menu_row_h + 8.0);
+    let bottom = rows.last().map_or(note.bottom(), |r| r.bottom());
+    FinderLayout {
+        size: (width, bottom + pad),
+        rows,
+        note,
+    }
+}
+
+pub fn finder_hit(l: &FinderLayout, x: f32, y: f32) -> Option<usize> {
+    l.rows.iter().position(|r| r.contains(x, y))
+}
+
+/// How many rows of the search's list fit in `room` DIPs, at least one.
+pub fn finder_fits(m: &Metrics, room: f32) -> usize {
+    (((room - 2.0 * m.menu_pad) / FINDER_ROW_H).floor() as usize).max(1)
 }
 
 /// The geometry of the Settings window: a title bar with its cross, the
@@ -2640,7 +2703,7 @@ mod tests {
             .limits
             .iter()
             .all(|r| r.y >= limits.y && r.bottom() <= limits.bottom()));
-        assert_eq!(l.size.1, settings.bottom() + m.pad);
+        assert_eq!(l.search.y, settings.bottom() + m.gap);
         for pair in l.settings.windows(2) {
             assert_eq!(pair[0].rect.bottom(), pair[1].rect.y);
         }
@@ -2653,6 +2716,45 @@ mod tests {
         let r = l.limits[1];
         assert_eq!(usage_hit(&l, r.x + 5.0, r.y + 5.0), UsageHit::Limits);
         assert_eq!(usage_hit(&l, 1.0, 1.0), UsageHit::Nothing);
+    }
+
+    #[test]
+    fn the_search_field_ends_the_usage_window_folded_or_not() {
+        let m = Metrics::default();
+        for collapsed in [false, true] {
+            let l = usage(&m, 2, &SCALES, collapsed);
+            let above = l.settings_box.unwrap_or(l.limits_box);
+            assert_eq!(l.search.y, above.bottom() + m.gap);
+            assert_eq!(l.size.1, l.search.bottom() + m.pad);
+            let (x, y) = (l.search.x + 40.0, l.search.y + 10.0);
+            assert_eq!(usage_hit(&l, x, y), UsageHit::Search);
+            let inner = search_inner(&l.search);
+            assert!(inner.x > l.search.x && inner.right() < l.search.right());
+            assert!(inner.y > l.search.y && inner.bottom() < l.search.bottom());
+        }
+    }
+
+    #[test]
+    fn the_search_list_stacks_its_rows_or_holds_a_note() {
+        let m = Metrics::default();
+        let l = finder(&m, 500.0, 3);
+        assert_eq!(l.rows.len(), 3);
+        assert_eq!(l.rows[1].y, l.rows[0].bottom());
+        assert_eq!(l.size, (500.0, l.rows[2].bottom() + m.menu_pad));
+        let r = l.rows[2];
+        assert_eq!(finder_hit(&l, r.x + 5.0, r.y + 5.0), Some(2));
+        assert_eq!(finder_hit(&l, 1.0, 1.0), None);
+        let empty = finder(&m, 500.0, 0);
+        assert!(empty.rows.is_empty());
+        assert_eq!(empty.size.1, empty.note.bottom() + m.menu_pad);
+    }
+
+    #[test]
+    fn as_many_search_rows_fit_as_the_room_takes_and_never_none() {
+        let m = Metrics::default();
+        let room = 2.0 * m.menu_pad + 4.5 * FINDER_ROW_H;
+        assert_eq!(finder_fits(&m, room), 4);
+        assert_eq!(finder_fits(&m, 3.0), 1);
     }
 
     #[test]
@@ -2690,7 +2792,7 @@ mod tests {
         let folded = usage(&m, 3, &SCALES, true);
         assert_eq!(folded.limits.len(), 1);
         assert!(folded.settings.is_empty() && folded.settings_box.is_none());
-        assert_eq!(folded.size.1, folded.limits_box.bottom() + m.pad);
+        assert_eq!(folded.search.y, folded.limits_box.bottom() + m.gap);
         assert!(folded.size.1 < usage(&m, 3, &SCALES, false).size.1);
     }
 
