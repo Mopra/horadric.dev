@@ -27,6 +27,21 @@
 //!   file dialog is: from there other programs can be started with the
 //!   program's rights, so operating one elevated program can not be
 //!   contained to it, and the first question says so.
+//! - Bypass, which the human turns on in the app to watch a session work
+//!   unasked, reaches it only as a claim: before a question, the helper
+//!   asks the app (`desktop.bypass`) when bypass ends for this session.
+//!   A claim is no answer. The first time one would spare a question,
+//!   the helper asks the human in its own window whether this bypass
+//!   holds in its program too, until the end the claim names, and says
+//!   what that lets in. Only after that yes does it let actions through
+//!   unasked, and only while the claim still stands, names the same end,
+//!   and its own clock is before that end and at most
+//!   [`listed::BYPASS_MOST`] after the yes. So a program that forges a
+//!   claim gets no further than a question the human can refuse: a no
+//!   means each action is asked as before for that bypass, and a new end
+//!   is a new bypass and a new question. What a forger can do is keep
+//!   claiming a bypass the human did say yes to after the app ended it,
+//!   up to that end, as the session itself could while it lasted.
 //!
 //! The app is still asked, and told how each action went, through the MCP
 //! process, so the human watches it as any other program: its no still
@@ -78,6 +93,7 @@ use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, GetNamedPipeServerProcessId,
     PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
+use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::System::Threading::{
     GetCurrentProcess, GetProcessId, OpenProcess, OpenProcessToken, QueryFullProcessImageNameW,
     TerminateProcess, WaitForSingleObject, INFINITE, PROCESS_NAME_WIN32,
@@ -1017,6 +1033,119 @@ pub fn risky_question(program: &str, window: &str, what: &str, why: &str, within
     )
 }
 
+/// What the helper holds of the bypasses the app told it of.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BypassHeld {
+    /// The one the human let in: the end the app claimed, which tells
+    /// this bypass from a later one, and the end the helper keeps to.
+    pub yes: Option<(u64, u64)>,
+    /// The end the app claimed of the one the human refused.
+    pub no: Option<u64>,
+}
+
+/// What becomes of a question the helper would ask, with bypass.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Bypassing {
+    /// Ask it, as without bypass.
+    Ask,
+    /// Ask first whether this bypass holds here, until `until`.
+    AskBypass { claim: u64, until: u64 },
+    /// The human let this bypass in, and it has not ended.
+    Allow,
+}
+
+/// What a bypass the app `claim`s to end then (seconds since 1970) makes
+/// of a question at `now`. Without a claim that still stands, or once
+/// the human refused this bypass, the question is asked. A yes holds only
+/// for the same claimed end and until the end kept with it, which is
+/// never past [`listed::BYPASS_MOST`] from when it was asked.
+pub fn bypassing(claim: Option<u64>, held: BypassHeld, now: u64) -> Bypassing {
+    let Some(claim) = claim.filter(|c| *c > now) else {
+        return Bypassing::Ask;
+    };
+    match held.yes {
+        Some((said, until)) if said == claim => {
+            return match now < until {
+                true => Bypassing::Allow,
+                false => Bypassing::Ask,
+            };
+        }
+        _ => {}
+    }
+    if held.no == Some(claim) {
+        return Bypassing::Ask;
+    }
+    Bypassing::AskBypass {
+        claim,
+        until: claim.min(now + listed::BYPASS_MOST.as_secs()),
+    }
+}
+
+/// The local clock `ahead` seconds after `now`, as hours and minutes,
+/// `now` being seconds into the local day. Cut to the minute, as the
+/// plate cuts the bypass end it shows, so the two read the same.
+pub fn clock_after(now: u64, ahead: u64) -> String {
+    let minutes = (now + ahead) / 60;
+    format!("{:02}:{:02}", minutes / 60 % 24, minutes % 60)
+}
+
+/// Seconds into the local day now.
+fn local_seconds() -> u64 {
+    let t = unsafe { GetLocalTime() };
+    u64::from(t.wHour) * 3600 + u64::from(t.wMinute) * 60 + u64::from(t.wSecond)
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// The helper's question when the app says bypass is on: once per bypass,
+/// whether it holds in this program too.
+pub fn bypass_question(program: &str, what: &str, until: &str, within: u64) -> String {
+    format!(
+        "Horadric says you turned bypass on until {until}, for the AI agent's session that asks \
+         to operate this program, which runs as administrator:\n\n{program}\n\nNow it wants \
+         to {what}.\n\nYes lets the agent do everything in this program without asking here, \
+         its Open and Save dialogs included, until {until} or until bypass ends, whichever comes \
+         first. It can not be limited to this program: from its Open and Save dialogs, and from \
+         whatever else the program offers, other programs can be started with the same \
+         rights.\n\nAsk each time asks about every risky action here as before, for as long as \
+         this bypass lasts. This window answers to the mouse only. Unanswered in {within} s, the \
+         action is refused."
+    )
+}
+
+/// What the agent is told when nobody answered one of the helper's
+/// questions.
+fn unanswered_text(name: &str, within: u64) -> String {
+    format!(
+        "nobody answered the helper's question about {name} within {within} s, so nothing was \
+         done, and it is not asked again for {} s. The helper's questions are answered with the \
+         mouse at this machine. If this is safe to do without asking, an administrator can list \
+         it from an elevated shell (horadric takeover allow --elevated, horadric takeover \
+         approve --elevated)",
+        listed::REFUSED_FOR.as_secs()
+    )
+}
+
+/// How long a question may wait for the human, of `within`, once `since`
+/// is that far behind: the helper's questions in one call all share
+/// [`ASKING_MOST`].
+fn time_left(within: u64, since: Instant) -> Duration {
+    Duration::from_secs(within).min(ASKING_MOST.saturating_sub(since.elapsed()))
+}
+
+/// The end of bypass the app claims for this session, if any. An app
+/// that does not know the op, or a session gone, claims none.
+fn bypass_claim<P: FnMut(Value) -> Result<Value, String>>(peer: &mut P) -> Option<u64> {
+    peer(json!({ "op": "desktop.bypass" }))
+        .ok()?
+        .get("until")
+        .and_then(Value::as_u64)
+}
+
 /// The file and the process of the window `hwnd`, by this process's own
 /// lookup.
 fn image_of(hwnd: isize) -> Option<(u32, String)> {
@@ -1103,6 +1232,8 @@ struct Gate {
     /// The call now decided was refused in a question, whose answer is
     /// its line in the log already.
     answered: bool,
+    /// The human's answers to whether a bypass holds here.
+    bypass: BypassHeld,
 }
 
 impl Gate {
@@ -1114,6 +1245,7 @@ impl Gate {
             refused: Refusals::default(),
             list_refused: None,
             answered: false,
+            bypass: BypassHeld::default(),
         }
     }
 
@@ -1176,7 +1308,7 @@ impl Gate {
             return Err(listed::refused_text(question, name, left));
         }
         let risky = question == Question::Risky;
-        let time = Duration::from_secs(within).min(ASKING_MOST.saturating_sub(since.elapsed()));
+        let time = time_left(within, since);
         let (title, yes) = match question {
             Question::Approve => (
                 "Horadric's helper (administrator): operate this program?",
@@ -1215,14 +1347,7 @@ impl Gate {
                     risky,
                     secs: within,
                 },
-                Some(format!(
-                    "nobody answered the helper's question about {name} within {within} s, so \
-                     nothing was done, and it is not asked again for {} s. The helper's questions \
-                     are answered with the mouse at this machine. If this is safe to do without \
-                     asking, an administrator can list it from an elevated shell (horadric \
-                     takeover allow --elevated, horadric takeover approve --elevated)",
-                    listed::REFUSED_FOR.as_secs()
-                )),
+                Some(unanswered_text(name, within)),
             ),
         };
         self.log(source, what);
@@ -1239,12 +1364,94 @@ impl Gate {
         }
     }
 
+    /// Whether a bypass the app claims spares the human `question`,
+    /// asking them first, once per bypass, whether it holds here. False
+    /// is: ask the question as without bypass. The claim is asked of the
+    /// app only when a question is near, and once per call (`claim`).
+    #[allow(clippy::too_many_arguments)]
+    fn by_bypass<P: FnMut(Value) -> Result<Value, String>>(
+        &mut self,
+        peer: &mut P,
+        claim: &mut Option<Option<u64>>,
+        question: Question,
+        what: &str,
+        within: u64,
+        since: Instant,
+        near: isize,
+    ) -> Result<bool, String> {
+        let claimed = *claim.get_or_insert_with(|| bypass_claim(peer));
+        let now = unix_now();
+        let (claimed, until) = match bypassing(claimed, self.bypass, now) {
+            Bypassing::Ask => return Ok(false),
+            Bypassing::Allow => {
+                self.log(Source::Bypass, what);
+                return Ok(true);
+            }
+            Bypassing::AskBypass { claim, until } => (claim, until),
+        };
+        // Held after nobody answered: the question it holds says so.
+        if self.refused.left(&(), question, Instant::now()).is_some() {
+            return Ok(false);
+        }
+        let shown = clock_after(local_seconds(), until.saturating_sub(now));
+        let text = bypass_question(&self.program, what, &shown, within);
+        let answer = match time_left(within, since).as_secs() {
+            0..=4 => ask::Answer::Unanswered,
+            secs => ask::ask(
+                "Horadric's helper (administrator): bypass here too?",
+                &text,
+                &format!("Allow until {shown}"),
+                "Ask each time",
+                Duration::from_secs(secs),
+                near,
+            ),
+        };
+        let asked = |yes| Source::BypassAsked {
+            yes,
+            until: shown.clone(),
+        };
+        match answer {
+            ask::Answer::TooTall => Err(TOO_TALL.into()),
+            ask::Answer::Yes => {
+                self.bypass.yes = Some((claimed, until));
+                self.log(asked(true), what);
+                Ok(true)
+            }
+            // A no to all of it is not a no to this action, which is
+            // asked about next as it would be without bypass.
+            ask::Answer::No => {
+                self.bypass.no = Some(claimed);
+                self.log(asked(false), what);
+                Ok(false)
+            }
+            // Nobody there to answer the next question either.
+            ask::Answer::Unanswered => {
+                let risky = question == Question::Risky;
+                self.log(
+                    Source::NoAnswer {
+                        risky,
+                        secs: within,
+                    },
+                    what,
+                );
+                self.refused.note(&(), question, Instant::now());
+                self.answered = true;
+                Err(unanswered_text(listed_name(&self.program), within))
+            }
+        }
+    }
+
     /// Whether the helper lets the action of an `allow` body go ahead.
     /// The body was built by this process's own engine, so the window, the
     /// action's parts and its risk are what the helper read; only the
     /// agent's sentence of why is the session's, and it is not shown.
-    fn decide(&mut self, body: &Value) -> Result<(), String> {
+    fn decide<P: FnMut(Value) -> Result<Value, String>>(
+        &mut self,
+        body: &Value,
+        peer: &mut P,
+    ) -> Result<(), String> {
         let since = Instant::now();
+        let mut claim = None;
         let hwnd = body
             .pointer("/window/hwnd")
             .and_then(Value::as_i64)
@@ -1282,6 +1489,18 @@ impl Gate {
             let level = listed::find(&list.programs, &path, &name, true).map(|e| e.level);
             if level == Some(Level::Operate) {
                 self.log(Source::List(Level::Operate), &what);
+            } else if self.by_bypass(
+                peer,
+                &mut claim,
+                Question::Approve,
+                &what,
+                within,
+                since,
+                hwnd,
+            )? {
+                // Bypass covers the whole action, and lets nothing in
+                // past its end: operating is asked about again then.
+                return Ok(());
             } else {
                 let text = first_question(&self.program, &shown, within);
                 self.ask(Question::Approve, &text, &what, within, since, hwnd)?;
@@ -1293,6 +1512,18 @@ impl Gate {
         };
         if let Some(pattern) = listed::pre_approval(&list.programs, &path, &name, true, &act) {
             self.log(Source::PreApproved(pattern), &what);
+            return Ok(());
+        }
+        let bypassed = self.by_bypass(
+            peer,
+            &mut claim,
+            Question::Risky,
+            &what,
+            within,
+            since,
+            hwnd,
+        )?;
+        if bypassed {
             return Ok(());
         }
         let window = match act.window.trim() {
@@ -1331,7 +1562,7 @@ impl Gate {
             _ => return peer(body),
         }
         self.answered = false;
-        if let Err(why) = self.decide(&body) {
+        if let Err(why) = self.decide(&body, peer) {
             if !self.answered {
                 self.note(&format!("refused by the helper: {why}"), &what);
             }
@@ -1766,6 +1997,95 @@ mod ask {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bypass_claim_is_asked_about_once_and_held_to_its_end() {
+        let most = listed::BYPASS_MOST.as_secs();
+        let none = BypassHeld::default();
+        // No claim, or one already over: asked as ever.
+        assert_eq!(bypassing(None, none, 100), Bypassing::Ask);
+        assert_eq!(bypassing(Some(100), none, 100), Bypassing::Ask);
+        // A claim is no answer: the human is asked whether it holds here.
+        assert_eq!(
+            bypassing(Some(900), none, 100),
+            Bypassing::AskBypass {
+                claim: 900,
+                until: 900
+            }
+        );
+        // A claim of a bypass longer than any the app allows is held to
+        // the longest, from when it is asked.
+        assert_eq!(
+            bypassing(Some(u64::MAX), none, 100),
+            Bypassing::AskBypass {
+                claim: u64::MAX,
+                until: 100 + most
+            }
+        );
+        let yes = BypassHeld {
+            yes: Some((900, 900)),
+            no: None,
+        };
+        assert_eq!(bypassing(Some(900), yes, 500), Bypassing::Allow);
+        // The claim gone (Esc, or its work done) or the time passed: asked.
+        assert_eq!(bypassing(None, yes, 500), Bypassing::Ask);
+        assert_eq!(bypassing(Some(900), yes, 900), Bypassing::Ask);
+        // A new bypass is a new question.
+        assert_eq!(
+            bypassing(Some(1_800), yes, 500),
+            Bypassing::AskBypass {
+                claim: 1_800,
+                until: 1_800
+            }
+        );
+        // A capped yes ends at its cap, though the claim goes on.
+        let capped = BypassHeld {
+            yes: Some((u64::MAX, 100 + most)),
+            no: None,
+        };
+        assert_eq!(
+            bypassing(Some(u64::MAX), capped, 99 + most),
+            Bypassing::Allow
+        );
+        assert_eq!(
+            bypassing(Some(u64::MAX), capped, 100 + most),
+            Bypassing::Ask
+        );
+        // A no holds for that bypass, which then asks each action.
+        let no = BypassHeld {
+            yes: None,
+            no: Some(900),
+        };
+        assert_eq!(bypassing(Some(900), no, 500), Bypassing::Ask);
+        assert_eq!(
+            bypassing(Some(1_800), no, 500),
+            Bypassing::AskBypass {
+                claim: 1_800,
+                until: 1_800
+            }
+        );
+    }
+
+    #[test]
+    fn the_bypass_end_reads_as_the_plate_shows_it() {
+        // 11:43:50, and thirty minutes on: the plate says 12:13.
+        let now = 11 * 3600 + 43 * 60 + 50;
+        assert_eq!(clock_after(now, 30 * 60), "12:13");
+        assert_eq!(clock_after(23 * 3600 + 50 * 60, 30 * 60), "00:20");
+        assert_eq!(clock_after(0, 0), "00:00");
+    }
+
+    #[test]
+    fn the_bypass_question_says_until_when_and_what_it_lets_in() {
+        let q = bypass_question(r"C:\S\Studio.exe", "click Open", "12:13", 60);
+        assert!(q.contains("until 12:13"));
+        assert!(q.contains(r"C:\S\Studio.exe"));
+        assert!(q.contains("click Open"));
+        assert!(q.contains("Open and Save dialogs included"));
+        assert!(q.contains("other programs can be started"));
+        assert!(q.contains("mouse only"));
+        assert!(q.contains("60 s"));
+    }
 
     #[test]
     fn a_helper_line_is_one_line_and_a_long_reason_is_cut() {

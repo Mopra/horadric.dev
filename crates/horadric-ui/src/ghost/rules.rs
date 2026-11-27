@@ -37,8 +37,9 @@ pub(crate) const ESC_HOLD: Duration = Duration::from_millis(600);
 /// How long the mouse is held on Bypass before it turns on, so a click
 /// that strays onto it turns nothing on.
 pub(crate) const BYPASS_HOLD: Duration = Duration::from_millis(700);
-/// Bypass never lasts longer than this, whatever the sessions do.
-pub(crate) const BYPASS_MAX: Duration = Duration::from_secs(30 * 60);
+/// Bypass never lasts longer than this, whatever the sessions do. The
+/// elevated helper caps a bypass by the same.
+pub(crate) const BYPASS_MAX: Duration = horadric_core::takeover_programs::BYPASS_MOST;
 
 /// The plate's width, its padding, and its distance from the work area's
 /// corner, clear of the runes round the screen, in DIPs.

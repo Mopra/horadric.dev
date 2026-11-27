@@ -227,6 +227,9 @@ thread_local! {
     /// plate showed when the human turned it on. Here and not on the
     /// overlay, since deciding a call reads it too, and never saved.
     static BYPASS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    /// When bypass ends at the latest, in seconds since 1970, while it is
+    /// on: what the elevated helper is told, to ask the human about.
+    static BYPASS_END: Cell<Option<u64>> = const { Cell::new(None) };
 }
 
 /// Whether bypass is on, for any session.
@@ -239,6 +242,11 @@ pub(super) fn bypass() -> bool {
 /// they watched, not for whatever else runs.
 pub(super) fn bypass_covers() -> HashSet<String> {
     BYPASS.with_borrow(Clone::clone)
+}
+
+/// When bypass ends at the latest, in seconds since 1970, while it is on.
+pub(super) fn bypass_end() -> Option<u64> {
+    BYPASS_END.get()
 }
 
 /// The glide speed from the state file, at the app's start.
@@ -597,11 +605,14 @@ fn clock_in(after: Duration) -> String {
     format!("{:02}:{:02}", minutes / 60 % 24, minutes % 60)
 }
 
-fn utc_now() -> String {
-    let secs = std::time::SystemTime::now()
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    horadric_core::tasks::utc(secs)
+        .map_or(0, |d| d.as_secs())
+}
+
+fn utc_now() -> String {
+    horadric_core::tasks::utc(unix_now())
 }
 
 fn monitor_scale(monitor: HMONITOR) -> f32 {
@@ -942,6 +953,7 @@ impl Overlay {
             return false;
         }
         BYPASS.set(HashSet::from([self.now.session.clone()]));
+        BYPASS_END.set(Some(unix_now() + BYPASS_MAX.as_secs()));
         BYPASS_LIVE.store(true, Ordering::Release);
         take_turns_ended();
         let now = Instant::now();
@@ -992,6 +1004,7 @@ impl Overlay {
     /// gone yet.
     fn bypass_off(&mut self, how: BypassEnd) {
         BYPASS.set(HashSet::new());
+        BYPASS_END.set(None);
         BYPASS_LIVE.store(false, Ordering::Release);
         take_turns_ended();
         self.holders.clear();
