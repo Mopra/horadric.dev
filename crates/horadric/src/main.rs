@@ -351,6 +351,8 @@ fn main() -> ExitCode {
         // and notes that have them.
         #[cfg(windows)]
         Some("takeover-helper" | "desktop-helper") => takeover_helper::run(&args[1..]),
+        #[cfg(all(windows, debug_assertions))]
+        Some("takeover-helper-preview") => takeover_helper::preview(&args[1..]),
         #[cfg(windows)]
         Some("takeover" | "desktop") => takeover_programs::run(&args[1..]),
         #[cfg(not(target_os = "linux"))]

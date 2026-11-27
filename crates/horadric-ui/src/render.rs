@@ -693,6 +693,9 @@ pub struct DialogScene<'a> {
     pub pressed: Option<DialogHit>,
     /// The check's label and whether it is ticked, when it has one.
     pub check: Option<(&'a str, bool)>,
+    /// A line beside the buttons where the check would go, such as the
+    /// time left to answer.
+    pub note: Option<&'a str>,
 }
 
 /// Everything one frame of the input the app asks with needs.
@@ -2451,6 +2454,9 @@ impl Painter<'_> {
                 theme::text_dim()
             };
             self.text(&gpu.small, ink, label, at);
+        }
+        if let (Some(note), Some(at)) = (scene.note, layout::dialog_note(l)) {
+            self.text(&gpu.small, theme::text_dim(), note, at);
         }
     }
 

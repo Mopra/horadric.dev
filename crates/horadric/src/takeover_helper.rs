@@ -1616,50 +1616,23 @@ fn listed_name(path: &str) -> &str {
     path.rsplit(['\\', '/']).next().unwrap_or(path)
 }
 
-/// The helper's own question: a plain window of this elevated process.
+/// The helper's own question: the app's question window, drawn by this
+/// elevated process in the look the human picked in the app.
 ///
 /// It never takes the keyboard (it can not be activated), so no key meant
 /// for another window answers it, the agent's or the human's: only a
-/// mouse click on one of its two buttons does, and not in its first
-/// moments, when a click already on its way could land on it. It draws
-/// its buttons itself, so UI Automation finds nothing in it to invoke.
-/// Windows keeps the input of programs that are not elevated out of it,
-/// and the desktop tools leave Horadric's own windows alone.
+/// mouse click on one of its buttons does, and not in its first moments,
+/// when a click already on its way could land on it. It draws its buttons
+/// itself, so UI Automation finds nothing in it to invoke. Windows keeps
+/// the input of programs that are not elevated out of it, and the desktop
+/// tools leave Horadric's own windows alone.
 mod ask {
-    use std::cell::RefCell;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
-    use windows::core::{w, HSTRING};
-    use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
-    use windows::Win32::Graphics::Gdi::{
-        BeginPaint, CreateFontW, DeleteObject, DrawTextW, EndPaint, FillRect, FrameRect, GetDC,
-        GetMonitorInfoW, GetSysColor, GetSysColorBrush, InvalidateRect, MonitorFromWindow,
-        ReleaseDC, SelectObject, SetBkMode, SetTextColor, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
-        COLOR_BTNFACE, COLOR_WINDOW, COLOR_WINDOWTEXT, DEFAULT_CHARSET, DT_CALCRECT, DT_CENTER,
-        DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, HFONT, HGDIOBJ, MONITORINFO,
-        MONITOR_DEFAULTTOPRIMARY, OUT_DEFAULT_PRECIS, PAINTSTRUCT, TRANSPARENT,
-    };
-    use windows::Win32::UI::HiDpi::GetDpiForWindow;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-        GetMessageW, KillTimer, LoadCursorW, RegisterClassW, SetTimer, SetWindowPos, ShowWindow,
-        TranslateMessage, HWND_TOPMOST, IDC_ARROW, MSG, SWP_NOACTIVATE, SW_SHOWNOACTIVATE,
-        WM_CLOSE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_PAINT, WM_TIMER, WNDCLASSW,
-        WS_CAPTION, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_SYSMENU,
-    };
-
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn GetModuleHandleW(name: *const u16) -> *mut core::ffi::c_void;
-    }
-
-    /// What Windows is told when the mouse comes down on the window: take
-    /// the click, do not come forward.
-    const MA_NOACTIVATE: isize = 3;
-    /// A click this soon after the window shows was aimed at what was
-    /// there before it.
-    const ARMED_AFTER: Duration = Duration::from_millis(900);
-    const TICK: usize = 1;
+    use horadric_ui::question::{self, Aside, Dialog, Tone};
+    use horadric_ui::theme::Theme;
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
 
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub enum Answer {
@@ -1672,154 +1645,20 @@ mod ask {
         TooTall,
     }
 
-    struct State {
-        text: Vec<u16>,
-        yes: Vec<u16>,
-        no: Vec<u16>,
-        text_at: RECT,
-        yes_at: RECT,
-        no_at: RECT,
-        note_at: RECT,
-        font: HFONT,
-        /// The button the mouse went down on: a click is down and up on
-        /// the same one.
-        down: Option<Answer>,
-        answer: Option<Answer>,
-        armed: Instant,
-        ends: Instant,
+    /// The look the human picked in the app, read from its state file.
+    /// Only the theme's name is taken from that file, which any program
+    /// of the user can write, and every name is one of the app's fixed
+    /// looks: a wrong or missing one changes the colours and nothing else.
+    fn picked() -> Theme {
+        let state = horadric_hooks::state_dir()
+            .and_then(|dir| std::fs::read(dir.join("state.json")).ok())
+            .unwrap_or_default();
+        super::theme_of(&state)
     }
 
-    thread_local! {
-        /// The question on screen. The helper serves one call at a time on
-        /// one thread, so there is never more than one.
-        static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
-    }
-
-    fn inside(r: &RECT, x: i32, y: i32) -> bool {
-        x >= r.left && x < r.right && y >= r.top && y < r.bottom
-    }
-
-    fn wide(s: &str) -> Vec<u16> {
-        s.encode_utf16().collect()
-    }
-
-    unsafe fn paint(hwnd: HWND, s: &State) {
-        let mut ps = PAINTSTRUCT::default();
-        let dc = BeginPaint(hwnd, &mut ps);
-        let old = SelectObject(dc, HGDIOBJ(s.font.0));
-        SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, COLORREF(GetSysColor(COLOR_WINDOWTEXT)));
-        let mut at = s.text_at;
-        DrawTextW(dc, &mut s.text.clone(), &mut at, DT_WORDBREAK | DT_NOPREFIX);
-        let frame = GetSysColorBrush(COLOR_WINDOWTEXT);
-        for (label, place, heavy) in [(&s.yes, s.yes_at, false), (&s.no, s.no_at, true)] {
-            FillRect(dc, &place, GetSysColorBrush(COLOR_BTNFACE));
-            FrameRect(dc, &place, frame);
-            if heavy {
-                // The refusing button is the marked one.
-                let inner = RECT {
-                    left: place.left + 1,
-                    top: place.top + 1,
-                    right: place.right - 1,
-                    bottom: place.bottom - 1,
-                };
-                FrameRect(dc, &inner, frame);
-            }
-            let mut at = place;
-            DrawTextW(
-                dc,
-                &mut label.clone(),
-                &mut at,
-                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-            );
-        }
-        let left = s.ends.saturating_duration_since(Instant::now()).as_secs();
-        let mut note = wide(&format!("Refused in {left} s"));
-        let mut at = s.note_at;
-        DrawTextW(
-            dc,
-            &mut note,
-            &mut at,
-            DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-        );
-        SelectObject(dc, old);
-        let _ = EndPaint(hwnd, &ps);
-    }
-
-    unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-        let at = |lp: LPARAM| {
-            (
-                i32::from((lp.0 & 0xFFFF) as u16 as i16),
-                i32::from(((lp.0 >> 16) & 0xFFFF) as u16 as i16),
-            )
-        };
-        let hit = |s: &State, lp: LPARAM| {
-            let (x, y) = at(lp);
-            if inside(&s.yes_at, x, y) {
-                Some(Answer::Yes)
-            } else if inside(&s.no_at, x, y) {
-                Some(Answer::No)
-            } else {
-                None
-            }
-        };
-        match msg {
-            WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE),
-            WM_PAINT => {
-                let painted = STATE.with(|s| {
-                    let s = s.borrow();
-                    s.as_ref().map(|s| paint(hwnd, s)).is_some()
-                });
-                if painted {
-                    return LRESULT(0);
-                }
-            }
-            WM_LBUTTONDOWN => {
-                STATE.with(|s| {
-                    if let Some(s) = s.borrow_mut().as_mut() {
-                        s.down = hit(s, lp).filter(|_| Instant::now() >= s.armed);
-                    }
-                });
-                return LRESULT(0);
-            }
-            WM_LBUTTONUP => {
-                STATE.with(|s| {
-                    if let Some(s) = s.borrow_mut().as_mut() {
-                        let up = hit(s, lp);
-                        if up.is_some() && up == s.down {
-                            s.answer = up;
-                        }
-                        s.down = None;
-                    }
-                });
-                return LRESULT(0);
-            }
-            WM_TIMER => {
-                STATE.with(|s| {
-                    if let Some(s) = s.borrow_mut().as_mut() {
-                        if Instant::now() >= s.ends {
-                            s.answer = Some(Answer::Unanswered);
-                        }
-                        let _ = InvalidateRect(Some(hwnd), Some(&s.note_at), true);
-                    }
-                });
-                return LRESULT(0);
-            }
-            WM_CLOSE => {
-                STATE.with(|s| {
-                    if let Some(s) = s.borrow_mut().as_mut() {
-                        s.answer = Some(Answer::No);
-                    }
-                });
-                return LRESULT(0);
-            }
-            _ => {}
-        }
-        DefWindowProcW(hwnd, msg, wp, lp)
-    }
-
-    /// Asks, on the screen of the window `near`, and waits `within` for a
-    /// click. A question that can not be shown is not answered yes.
+    /// Asks, aside from the window `near`, and waits `within` for a click.
+    /// The refusing button is the one ringed. A question that can not be
+    /// shown is not answered yes.
     pub fn ask(
         title: &str,
         text: &str,
@@ -1828,175 +1667,115 @@ mod ask {
         within: Duration,
         near: isize,
     ) -> Answer {
-        unsafe {
-            let module = HINSTANCE(GetModuleHandleW(std::ptr::null()));
-            let class = w!("HoradricHelperQuestion");
-            let wc = WNDCLASSW {
-                lpfnWndProc: Some(wndproc),
-                hInstance: module,
-                lpszClassName: class,
-                hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-                hbrBackground: GetSysColorBrush(COLOR_WINDOW),
-                ..Default::default()
-            };
-            // A second question finds the class there already.
-            RegisterClassW(&wc);
-            let ex = WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
-            let style = WS_POPUP | WS_CAPTION | WS_SYSMENU;
-            let Ok(hwnd) = CreateWindowExW(
-                ex,
-                class,
-                &HSTRING::from(title),
-                style,
-                0,
-                0,
-                100,
-                100,
-                None,
-                None,
-                Some(module),
-                None,
-            ) else {
-                return Answer::Unanswered;
-            };
-            let dpi = GetDpiForWindow(hwnd).max(96) as i32;
-            let px = |dip: i32| dip * dpi / 96;
-            let font = CreateFontW(
-                -px(15),
-                0,
-                0,
-                0,
-                400,
-                0,
-                0,
-                0,
-                DEFAULT_CHARSET,
-                OUT_DEFAULT_PRECIS,
-                CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY,
-                0,
-                w!("Segoe UI"),
-            );
-            let mut screen = MONITORINFO {
-                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-                ..Default::default()
-            };
-            let monitor = MonitorFromWindow(HWND(near as *mut _), MONITOR_DEFAULTTOPRIMARY);
-            let _ = GetMonitorInfoW(monitor, &mut screen);
-            let work = screen.rcWork;
-            let (pad, gap) = (px(18), px(12));
-            let (button_w, button_h) = (px(150), px(34));
-            let text = wide(text);
-            let measure = |width: i32| {
-                let mut measured = RECT {
-                    right: width - 2 * pad,
-                    ..Default::default()
-                };
-                let dc = GetDC(Some(hwnd));
-                let old = SelectObject(dc, HGDIOBJ(font.0));
-                DrawTextW(
-                    dc,
-                    &mut text.clone(),
-                    &mut measured,
-                    DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX,
-                );
-                SelectObject(dc, old);
-                ReleaseDC(Some(hwnd), dc);
-                let mut outer = RECT {
-                    left: 0,
-                    top: 0,
-                    right: width,
-                    bottom: measured.bottom + 3 * pad + button_h,
-                };
-                let _ = AdjustWindowRectEx(&mut outer, style, false, ex);
-                (measured.bottom, outer)
-            };
-            // A long text to type widens the window before it is ever cut:
-            // every character of it is what the human says yes to.
-            let room = work.bottom - work.top - px(16);
-            let mut width = px(560);
-            let (mut text_h, mut outer) = measure(width);
-            if outer.bottom - outer.top > room {
-                width = (work.right - work.left - px(32)).clamp(width, px(1200));
-                (text_h, outer) = measure(width);
-            }
-            if outer.bottom - outer.top > room {
-                let _ = DestroyWindow(hwnd);
-                let _ = DeleteObject(HGDIOBJ(font.0));
-                return Answer::TooTall;
-            }
-            let text_at = RECT {
-                left: pad,
-                top: pad,
-                right: width - pad,
-                bottom: pad + text_h,
-            };
-            let row = text_at.bottom + pad;
-            let no_at = RECT {
-                left: width - pad - button_w,
-                top: row,
-                right: width - pad,
-                bottom: row + button_h,
-            };
-            let yes_at = RECT {
-                left: no_at.left - gap - button_w,
-                top: row,
-                right: no_at.left - gap,
-                bottom: row + button_h,
-            };
-            let note_at = RECT {
-                left: pad,
-                top: row,
-                right: yes_at.left - gap,
-                bottom: row + button_h,
-            };
-            let (w, h) = (outer.right - outer.left, outer.bottom - outer.top);
-            // Near the top, clear of the middle, where the program's own
-            // dialog most likely is, unless it is too tall for that.
-            let x = work.left + ((work.right - work.left) - w).max(0) / 2;
-            let y = (work.top + px(40)).min(work.bottom - h).max(work.top);
-            let now = Instant::now();
-            STATE.set(Some(State {
-                text,
-                yes: wide(yes),
-                no: wide(no),
-                text_at,
-                yes_at,
-                no_at,
-                note_at,
-                font,
-                down: None,
-                answer: None,
-                armed: now + ARMED_AFTER,
-                ends: now + within,
-            }));
-            let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE);
-            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            SetTimer(Some(hwnd), TICK, 500, None);
-            let mut msg = MSG::default();
-            let answer = loop {
-                let answered = STATE.with(|s| s.borrow().as_ref().and_then(|s| s.answer));
-                if let Some(answer) = answered {
-                    break answer;
-                }
-                if !GetMessageW(&mut msg, None, 0, 0).as_bool() {
-                    break Answer::Unanswered;
-                }
-                let _ = TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            };
-            let _ = KillTimer(Some(hwnd), TICK);
-            STATE.set(None);
-            let _ = DestroyWindow(hwnd);
-            let _ = DeleteObject(HGDIOBJ(font.0));
-            answer
+        asked_in(picked(), title, text, yes, no, within, near)
+    }
+
+    /// As [`ask`], in the look `look`.
+    pub fn asked_in(
+        look: Theme,
+        title: &str,
+        text: &str,
+        yes: &str,
+        no: &str,
+        within: Duration,
+        near: isize,
+    ) -> Answer {
+        let mut r = RECT::default();
+        let avoid = unsafe { GetWindowRect(HWND(near as *mut _), &mut r) }
+            .ok()
+            .filter(|_| near != 0)
+            .map(|_| [r.left, r.top, r.right, r.bottom]);
+        let d = Dialog {
+            tone: Tone::Warning,
+            title,
+            text,
+            buttons: &[yes, no],
+            default: 1,
+            check: None,
+        };
+        match question::ask_alone(look, &d, &Aside { avoid, within }) {
+            question::Answer::Pressed(0) => Answer::Yes,
+            // Closed some other way is a no, as is the refusing button.
+            question::Answer::Pressed(_) | question::Answer::Dismissed => Answer::No,
+            question::Answer::Unanswered => Answer::Unanswered,
+            question::Answer::TooTall => Answer::TooTall,
         }
     }
+}
+
+/// The look named in the app's state file, the app's first for none or
+/// one this build does not know.
+fn theme_of(state: &[u8]) -> horadric_ui::theme::Theme {
+    let key = serde_json::from_slice::<Value>(state)
+        .ok()
+        .and_then(|v| v.get("theme").and_then(Value::as_str).map(str::to_string));
+    horadric_ui::theme::Theme::from_key(key.as_deref())
+}
+
+/// `horadric takeover-helper-preview [theme] [first|risky|bypass]`, in a
+/// debug build only: shows one of the helper's questions as the helper
+/// draws it, without elevation, for a look at it on screen. The answer is
+/// printed and nothing else is done with it.
+#[cfg(debug_assertions)]
+pub fn preview(args: &[String]) -> Result<(), String> {
+    let look = horadric_ui::theme::Theme::from_key(args.first().map(String::as_str));
+    let program = r"C:\Program Files\Acme\Studio\Studio.exe";
+    let what = "type \"C:\\Projects\\line4.smc2\" in Edit \"Filnavn:\"";
+    let (title, text, yes, no) = match args.get(1).map(String::as_str) {
+        Some("first") => (
+            "Horadric's helper (administrator): operate this program?",
+            first_question(program, what, 60),
+            "Let it operate".to_string(),
+            "Refuse",
+        ),
+        Some("risky") => (
+            "Horadric's helper (administrator): do this?",
+            risky_question(
+                program,
+                "Open",
+                what,
+                "it is in an Open or Save dialog, or on its button, and such a dialog can \
+                 start other programs with this program's administrator rights",
+                60,
+            ),
+            "Do it".to_string(),
+            "Refuse",
+        ),
+        _ => (
+            "Horadric's helper (administrator): bypass here too?",
+            bypass_question(program, what, "12:13", 60),
+            "Allow until 12:13".to_string(),
+            "Ask each time",
+        ),
+    };
+    let answer = ask::asked_in(look, title, &text, &yes, no, Duration::from_secs(60), 0);
+    println!("{answer:?}");
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_helper_asks_in_the_look_the_app_was_given() {
+        use horadric_ui::theme::Theme;
+        assert_eq!(theme_of(br#"{"theme":"matrix"}"#), Theme::Matrix);
+        assert_eq!(
+            theme_of(br#"{"theme":"winamp","recent":[]}"#),
+            Theme::Winamp
+        );
+        // Missing, unknown, the wrong type or no JSON at all: the first.
+        for state in [
+            &b"{}"[..],
+            br#"{"theme":"vaporwave"}"#,
+            br#"{"theme":7}"#,
+            b"",
+            b"{",
+        ] {
+            assert_eq!(theme_of(state), Theme::Skeuomorph);
+        }
+    }
 
     #[test]
     fn a_bypass_claim_is_asked_about_once_and_held_to_its_end() {
@@ -2085,6 +1864,9 @@ mod tests {
         assert!(q.contains("other programs can be started"));
         assert!(q.contains("mouse only"));
         assert!(q.contains("60 s"));
+        // Its lines are joined by a single space where the source breaks.
+        assert!(!q.contains("  "));
+        assert!(!unanswered_text("Studio.exe", 60).contains("  "));
     }
 
     #[test]
