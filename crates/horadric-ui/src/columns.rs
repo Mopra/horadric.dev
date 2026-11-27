@@ -359,6 +359,27 @@ pub fn drop_column(lefts: &[i32], width: i32, gap: i32, x: i32, can_add: bool) -
     lefts.iter().rposition(|&l| x >= l - gap / 2).unwrap_or(0)
 }
 
+/// The bands of a column between its windows, as (top, bottom) on screen,
+/// that show between the column's `top` and `bottom`. The windows are
+/// given top to bottom. A wheel turned over one of these would otherwise
+/// scroll whatever lies behind the tiles.
+pub fn gaps(windows: &[(i32, i32)], top: i32, bottom: i32) -> Vec<(i32, i32)> {
+    windows
+        .windows(2)
+        .map(|w| (w[0].1.max(top), w[1].0.min(bottom)))
+        .filter(|(from, to)| to > from)
+        .collect()
+}
+
+/// How far down a column its windows reach, from the first one's top to
+/// the last one's bottom, as much of it as shows between `top` and
+/// `bottom`. None when nothing shows.
+pub fn span(windows: &[(i32, i32)], top: i32, bottom: i32) -> Option<(i32, i32)> {
+    let from = windows.first()?.0.max(top);
+    let to = windows.last()?.1.min(bottom);
+    (to > from).then_some((from, to))
+}
+
 /// Where among the windows of a column, as (top, bottom), one let go of
 /// at `y` goes: before the first whose middle is below it.
 pub fn drop_slot(others: &[(i32, i32)], y: i32) -> usize {
@@ -380,6 +401,28 @@ mod tests {
 
     fn all(_: &str) -> bool {
         true
+    }
+
+    #[test]
+    fn the_gaps_are_the_bands_between_windows_that_show() {
+        let w = [(0, 100), (112, 200), (212, 400)];
+        assert_eq!(gaps(&w, 0, 1000), vec![(100, 112), (200, 212)]);
+        // Scrolled: the first gap is above the column's top, the last
+        // below its bottom.
+        assert_eq!(gaps(&w, 105, 210), vec![(105, 112), (200, 210)]);
+        assert_eq!(gaps(&w, 150, 190), vec![]);
+        // Windows that touch leave no gap.
+        assert_eq!(gaps(&[(0, 100), (100, 200)], 0, 1000), vec![]);
+        assert_eq!(gaps(&[(0, 100)], 0, 1000), vec![]);
+    }
+
+    #[test]
+    fn the_span_runs_from_the_first_top_to_the_last_bottom_that_show() {
+        let w = [(10, 100), (112, 200)];
+        assert_eq!(span(&w, 0, 1000), Some((10, 200)));
+        assert_eq!(span(&w, 50, 150), Some((50, 150)));
+        assert_eq!(span(&w, 300, 400), None);
+        assert_eq!(span(&[], 0, 1000), None);
     }
 
     #[test]
