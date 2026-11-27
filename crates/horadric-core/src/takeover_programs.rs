@@ -849,6 +849,11 @@ pub fn deny(entries: &mut Vec<Entry>, program: &str, elevated: bool) -> usize {
 /// question.
 pub const LOG_FILE: &str = "takeover.log";
 
+/// Bypass never lasts longer than this, whatever the sessions do. The
+/// elevated helper holds a bypass it was told of to it as well, so a
+/// claim of one that lasts all day buys no more than this.
+pub const BYPASS_MOST: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
 /// Where a decision about a call came from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
@@ -875,6 +880,9 @@ pub enum Source {
     /// Bypass ended, and how: by Esc, by its switch, or by itself once the
     /// work it was on for was done.
     BypassOff(&'static str),
+    /// The human's answer in the elevated helper's own window to whether
+    /// a bypass the app claims holds in its program too, and until when.
+    BypassAsked { yes: bool, until: String },
 }
 
 /// One line of [`LOG_FILE`]: when, which session, how, which program, and
@@ -900,6 +908,12 @@ pub fn log_line(utc: &str, session: &str, source: Source, program: &str, what: &
         Source::Bypass => "not asked, the human had bypass on".into(),
         Source::BypassOn => "bypass turned on by the human".into(),
         Source::BypassOff(how) => format!("bypass off: {how}"),
+        Source::BypassAsked { yes: true, until } => {
+            format!("bypass until {until} let in as the human answered")
+        }
+        Source::BypassAsked { yes: false, until } => {
+            format!("bypass until {until} refused by the human, asking each action")
+        }
     };
     let mut line = format!(
         "{utc}  {}  {how}  {}",
@@ -1619,6 +1633,15 @@ mod tests {
             log_line(at, "s", Source::BypassOff("Esc"), "a.exe", ""),
             format!("{at}  s  bypass off: Esc  a.exe\n")
         );
+        let asked = |yes| Source::BypassAsked {
+            yes,
+            until: "12:13".into(),
+        };
+        assert_eq!(
+            log_line(at, "s", asked(true), "a.exe", ""),
+            format!("{at}  s  bypass until 12:13 let in as the human answered  a.exe\n")
+        );
+        assert!(log_line(at, "s", asked(false), "a.exe", "").contains("refused"));
     }
 
     #[test]

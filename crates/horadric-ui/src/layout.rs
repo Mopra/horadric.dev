@@ -1467,6 +1467,14 @@ pub fn dialog_wide(width: f32, text_h: f32, labels: &[f32], check: Option<f32>) 
     }
 }
 
+/// Where a line beside a dialog's buttons goes, such as the time left to
+/// answer: where the check would be, so none when it has one.
+pub fn dialog_note(l: &DialogLayout) -> Option<Rect> {
+    let first = l.buttons.first().filter(|_| l.check.is_none())?;
+    let w = first.x - DIALOG_BUTTON_GAP - DIALOG_PAD;
+    Some(Rect::new(DIALOG_PAD, first.y, w.max(0.0), first.h))
+}
+
 pub fn dialog_hit(l: &DialogLayout, x: f32, y: f32) -> Option<DialogHit> {
     if let Some(i) = l.buttons.iter().position(|r| r.contains(x, y)) {
         return Some(DialogHit::Button(i));
@@ -2527,6 +2535,18 @@ mod tests {
             Some(DialogHit::Button(1))
         );
         assert_eq!(dialog_hit(&l, l.text.x + 1.0, l.text.y + 1.0), None);
+    }
+
+    #[test]
+    fn a_dialog_note_sits_where_a_check_would_and_never_beside_one() {
+        let l = dialog(40.0, &[40.0, 40.0], None);
+        let note = dialog_note(&l).unwrap();
+        let first = l.buttons[0];
+        assert_eq!(note.x, DIALOG_PAD);
+        assert_eq!((note.y, note.h), (first.y, first.h));
+        assert_eq!(note.right() + DIALOG_BUTTON_GAP, first.x);
+        assert!(dialog_note(&dialog(40.0, &[40.0], Some(80.0))).is_none());
+        assert!(dialog_note(&dialog(40.0, &[], None)).is_none());
     }
 
     #[test]

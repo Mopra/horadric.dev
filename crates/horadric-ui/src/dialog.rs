@@ -18,10 +18,15 @@
 //! it has no taskbar button and is not in Alt+Tab, so one that the
 //! program came to cover could not be found again, and for a maximised
 //! program every corner is over the program.
+//!
+//! The elevated takeover helper asks with the same window ([`ask_alone`]),
+//! with no app around it. Its question answers to the mouse alone: it is
+//! never activated, so no key reaches it, a click in its first moments
+//! is not taken, and it counts down the time left beside its buttons.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
@@ -45,10 +50,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetMessageW, GetWindowLongPtrW, IsWindow, LoadCursorW, PostMessageW,
     PostQuitMessage, RegisterClassW, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
     SetWindowPos, ShowWindow, TranslateMessage, CREATESTRUCTW, GWLP_USERDATA, HWND_TOPMOST,
-    IDC_ARROW, MSG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE,
-    WA_INACTIVE, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CLOSE, WM_ERASEBKGND, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY,
-    WM_PAINT, WM_RBUTTONDOWN, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    IDC_ARROW, MA_NOACTIVATE, MSG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOW,
+    SW_SHOWNOACTIVATE, WA_INACTIVE, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CLOSE, WM_ERASEBKGND,
+    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
+    WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::appear;
@@ -61,6 +67,12 @@ pub(crate) const CLASS: PCWSTR = w!("HoradricDialog");
 
 /// The timer that ends a question put aside when nobody answers.
 const NO_ANSWER_TIMER: usize = 0x4e41;
+/// The timer that counts down a question asked with the mouse alone.
+const COUNTDOWN_TIMER: usize = 0x4e43;
+/// How long after a question asked with the mouse alone shows before a
+/// click on it counts: one already on its way was aimed at what was
+/// there before.
+const ARMED_AFTER: Duration = Duration::from_millis(900);
 
 /// How a question about another program is put.
 pub struct Aside {
@@ -175,7 +187,7 @@ fn screen_of(aside: Option<&Aside>) -> (POINT, f32) {
 
 /// Asks, and returns the button pressed. None when dismissed.
 pub fn show(gpu: &Gpu, metrics: &Metrics, d: &Dialog) -> Option<usize> {
-    let popup = Popup::open(gpu, metrics, d, None, layout::dialog_text_w())
+    let popup = Popup::open(gpu, metrics, d, None, layout::dialog_text_w(), false)
         .map_err(|e| eprintln!("horadric: cannot ask \"{}\": {e}", d.title))
         .ok()?;
     run(&popup, d)
@@ -191,7 +203,7 @@ pub fn show_aside(gpu: &Gpu, metrics: &Metrics, d: &Dialog, aside: &Aside) -> An
             return Answer::Unanswered;
         }
     };
-    let Ok(popup) = Popup::open(gpu, metrics, d, Some(aside), text_w)
+    let Ok(popup) = Popup::open(gpu, metrics, d, Some(aside), text_w, false)
         .map_err(|e| eprintln!("horadric: cannot ask \"{}\": {e}", d.title))
     else {
         return Answer::Unanswered;
@@ -228,7 +240,7 @@ pub fn show_aside_releasable(
             return Some(Answer::Unanswered);
         }
     };
-    let Ok(popup) = Popup::open(gpu, metrics, d, Some(aside), text_w)
+    let Ok(popup) = Popup::open(gpu, metrics, d, Some(aside), text_w, false)
         .map_err(|e| eprintln!("horadric: cannot ask \"{}\": {e}", d.title))
     else {
         return Some(Answer::Unanswered);
@@ -287,6 +299,44 @@ fn run(popup: &Popup, d: &Dialog) -> Option<usize> {
     popup.outcome.get().flatten()
 }
 
+/// What is left of a question's time, as its countdown says it.
+pub fn countdown_note(left: Duration) -> String {
+    format!("Refused in {} s", left.as_secs())
+}
+
+/// Asks, for a process with no app around it (the elevated takeover
+/// helper), in the app's own window drawn in `look`: put aside from
+/// `aside.avoid`, answered with the mouse alone (see the module's notes),
+/// and counted down. A question that can not be drawn is not answered.
+pub fn ask_alone(look: theme::Theme, d: &Dialog, aside: &Aside) -> Answer {
+    unsafe {
+        let _ = windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(
+            windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        );
+    }
+    theme::set(look);
+    let Ok(gpu) = Gpu::new() else {
+        return Answer::Unanswered;
+    };
+    if register_class().is_err() {
+        return Answer::Unanswered;
+    }
+    let metrics = Metrics::default();
+    let text_w = match aside_text_w(&gpu, d, aside) {
+        Ok(Some(w)) => w,
+        Ok(None) => return Answer::TooTall,
+        Err(_) => return Answer::Unanswered,
+    };
+    let Ok(popup) = Popup::open(&gpu, &metrics, d, Some(aside), text_w, true) else {
+        return Answer::Unanswered;
+    };
+    match run(&popup, d) {
+        Some(i) => Answer::Pressed(i),
+        None if popup.no_answer.get() => Answer::Unanswered,
+        None => Answer::Dismissed,
+    }
+}
+
 /// Says what went wrong, for a process that has no app to draw with, such
 /// as `horadricw`. Falls silent only if even Direct2D cannot start.
 pub fn error_alone(title: &str, text: &str) {
@@ -337,6 +387,9 @@ struct Popup<'a> {
     aside: bool,
     /// Its time ran out with nobody answering.
     no_answer: Cell<bool>,
+    /// Answered with the mouse alone: from when a click counts, and when
+    /// its time runs out, for the countdown.
+    mouse_only: Option<(Instant, Instant)>,
 }
 
 impl<'a> Popup<'a> {
@@ -346,6 +399,7 @@ impl<'a> Popup<'a> {
         d: &Dialog,
         aside: Option<&Aside>,
         text_w: f32,
+        mouse_only: bool,
     ) -> Result<Box<Self>> {
         let (cursor, s) = screen_of(aside);
         let text = render::wrapped(gpu, &gpu.body, d.text, text_w)?;
@@ -398,12 +452,21 @@ impl<'a> Popup<'a> {
             outcome: Cell::new(None),
             aside: aside.is_some(),
             no_answer: Cell::new(false),
+            mouse_only: aside.filter(|_| mouse_only).map(|a| {
+                let now = Instant::now();
+                (now + ARMED_AFTER, now + a.within)
+            }),
         });
         // Aside too it is always on top: its corner keeps it off the
         // program it asks about where the screen allows, and one the
         // program covered could not be brought back, having neither a
         // taskbar button nor a place in Alt+Tab.
-        let ex = WS_EX_TOOLWINDOW | WS_EX_TOPMOST;
+        let mut ex = WS_EX_TOOLWINDOW | WS_EX_TOPMOST;
+        if popup.mouse_only.is_some() {
+            // Never active, so no key, the agent's or the human's, can
+            // answer it.
+            ex |= WS_EX_NOACTIVATE;
+        }
         let title: Vec<u16> = d.title.encode_utf16().chain([0]).collect();
         unsafe {
             // Born where it shows and at its size: a window that starts
@@ -449,6 +512,9 @@ impl<'a> Popup<'a> {
                     );
                     let ms = u32::try_from(a.within.as_millis()).unwrap_or(u32::MAX);
                     SetTimer(Some(hwnd), NO_ANSWER_TIMER, ms.max(1), None);
+                    if popup.mouse_only.is_some() {
+                        SetTimer(Some(hwnd), COUNTDOWN_TIMER, 500, None);
+                    }
                 }
                 None => {
                     let _ = ShowWindow(hwnd, SW_SHOW);
@@ -487,6 +553,9 @@ impl<'a> Popup<'a> {
                 }
             }
         }
+        let note = self
+            .mouse_only
+            .map(|(_, ends)| countdown_note(ends.saturating_duration_since(Instant::now())));
         let scene = DialogScene {
             layout: &self.layout,
             title: &self.title,
@@ -497,6 +566,7 @@ impl<'a> Popup<'a> {
             hot: self.hot.get(),
             pressed: self.pressed.get(),
             check: self.check.as_ref().map(|(l, t)| (l.as_str(), t.get())),
+            note: note.as_deref(),
         };
         let failed = slot
             .as_ref()
@@ -571,6 +641,21 @@ impl<'a> Popup<'a> {
                 if self.hot.replace(hot) != hot {
                     self.invalidate();
                 }
+                Some(LRESULT(0))
+            }
+            WM_MOUSEACTIVATE if self.mouse_only.is_some() => Some(LRESULT(MA_NOACTIVATE as isize)),
+            // Not taken: a key could come from the agent as well as from
+            // the human.
+            WM_KEYDOWN if self.mouse_only.is_some() => Some(LRESULT(0)),
+            WM_LBUTTONDOWN
+                if self
+                    .mouse_only
+                    .is_some_and(|(armed, _)| Instant::now() < armed) =>
+            {
+                Some(LRESULT(0))
+            }
+            WM_TIMER if wparam.0 == COUNTDOWN_TIMER => {
+                self.invalidate();
                 Some(LRESULT(0))
             }
             WM_LBUTTONDOWN => {
@@ -691,5 +776,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     match popup.handle(msg, wparam, lparam) {
         Some(r) => r,
         None => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_countdown_says_the_whole_seconds_left() {
+        assert_eq!(
+            countdown_note(Duration::from_millis(59_900)),
+            "Refused in 59 s"
+        );
+        assert_eq!(countdown_note(Duration::ZERO), "Refused in 0 s");
     }
 }

@@ -27,6 +27,21 @@
 //!   file dialog is: from there other programs can be started with the
 //!   program's rights, so operating one elevated program can not be
 //!   contained to it, and the first question says so.
+//! - Bypass, which the human turns on in the app to watch a session work
+//!   unasked, reaches it only as a claim: before a question, the helper
+//!   asks the app (`desktop.bypass`) when bypass ends for this session.
+//!   A claim is no answer. The first time one would spare a question,
+//!   the helper asks the human in its own window whether this bypass
+//!   holds in its program too, until the end the claim names, and says
+//!   what that lets in. Only after that yes does it let actions through
+//!   unasked, and only while the claim still stands, names the same end,
+//!   and its own clock is before that end and at most
+//!   [`listed::BYPASS_MOST`] after the yes. So a program that forges a
+//!   claim gets no further than a question the human can refuse: a no
+//!   means each action is asked as before for that bypass, and a new end
+//!   is a new bypass and a new question. What a forger can do is keep
+//!   claiming a bypass the human did say yes to after the app ended it,
+//!   up to that end, as the session itself could while it lasted.
 //!
 //! The app is still asked, and told how each action went, through the MCP
 //! process, so the human watches it as any other program: its no still
@@ -78,6 +93,7 @@ use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, GetNamedPipeServerProcessId,
     PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
+use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::System::Threading::{
     GetCurrentProcess, GetProcessId, OpenProcess, OpenProcessToken, QueryFullProcessImageNameW,
     TerminateProcess, WaitForSingleObject, INFINITE, PROCESS_NAME_WIN32,
@@ -1017,6 +1033,119 @@ pub fn risky_question(program: &str, window: &str, what: &str, why: &str, within
     )
 }
 
+/// What the helper holds of the bypasses the app told it of.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BypassHeld {
+    /// The one the human let in: the end the app claimed, which tells
+    /// this bypass from a later one, and the end the helper keeps to.
+    pub yes: Option<(u64, u64)>,
+    /// The end the app claimed of the one the human refused.
+    pub no: Option<u64>,
+}
+
+/// What becomes of a question the helper would ask, with bypass.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Bypassing {
+    /// Ask it, as without bypass.
+    Ask,
+    /// Ask first whether this bypass holds here, until `until`.
+    AskBypass { claim: u64, until: u64 },
+    /// The human let this bypass in, and it has not ended.
+    Allow,
+}
+
+/// What a bypass the app `claim`s to end then (seconds since 1970) makes
+/// of a question at `now`. Without a claim that still stands, or once
+/// the human refused this bypass, the question is asked. A yes holds only
+/// for the same claimed end and until the end kept with it, which is
+/// never past [`listed::BYPASS_MOST`] from when it was asked.
+pub fn bypassing(claim: Option<u64>, held: BypassHeld, now: u64) -> Bypassing {
+    let Some(claim) = claim.filter(|c| *c > now) else {
+        return Bypassing::Ask;
+    };
+    match held.yes {
+        Some((said, until)) if said == claim => {
+            return match now < until {
+                true => Bypassing::Allow,
+                false => Bypassing::Ask,
+            };
+        }
+        _ => {}
+    }
+    if held.no == Some(claim) {
+        return Bypassing::Ask;
+    }
+    Bypassing::AskBypass {
+        claim,
+        until: claim.min(now + listed::BYPASS_MOST.as_secs()),
+    }
+}
+
+/// The local clock `ahead` seconds after `now`, as hours and minutes,
+/// `now` being seconds into the local day. Cut to the minute, as the
+/// plate cuts the bypass end it shows, so the two read the same.
+pub fn clock_after(now: u64, ahead: u64) -> String {
+    let minutes = (now + ahead) / 60;
+    format!("{:02}:{:02}", minutes / 60 % 24, minutes % 60)
+}
+
+/// Seconds into the local day now.
+fn local_seconds() -> u64 {
+    let t = unsafe { GetLocalTime() };
+    u64::from(t.wHour) * 3600 + u64::from(t.wMinute) * 60 + u64::from(t.wSecond)
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// The helper's question when the app says bypass is on: once per bypass,
+/// whether it holds in this program too.
+pub fn bypass_question(program: &str, what: &str, until: &str, within: u64) -> String {
+    format!(
+        "Horadric says you turned bypass on until {until}, for the AI agent's session that asks \
+         to operate this program, which runs as administrator:\n\n{program}\n\nNow it wants \
+         to {what}.\n\nYes lets the agent do everything in this program without asking here, \
+         its Open and Save dialogs included, until {until} or until bypass ends, whichever comes \
+         first. It can not be limited to this program: from its Open and Save dialogs, and from \
+         whatever else the program offers, other programs can be started with the same \
+         rights.\n\nAsk each time asks about every risky action here as before, for as long as \
+         this bypass lasts. This window answers to the mouse only. Unanswered in {within} s, the \
+         action is refused."
+    )
+}
+
+/// What the agent is told when nobody answered one of the helper's
+/// questions.
+fn unanswered_text(name: &str, within: u64) -> String {
+    format!(
+        "nobody answered the helper's question about {name} within {within} s, so nothing was \
+         done, and it is not asked again for {} s. The helper's questions are answered with the \
+         mouse at this machine. If this is safe to do without asking, an administrator can list \
+         it from an elevated shell (horadric takeover allow --elevated, horadric takeover \
+         approve --elevated)",
+        listed::REFUSED_FOR.as_secs()
+    )
+}
+
+/// How long a question may wait for the human, of `within`, once `since`
+/// is that far behind: the helper's questions in one call all share
+/// [`ASKING_MOST`].
+fn time_left(within: u64, since: Instant) -> Duration {
+    Duration::from_secs(within).min(ASKING_MOST.saturating_sub(since.elapsed()))
+}
+
+/// The end of bypass the app claims for this session, if any. An app
+/// that does not know the op, or a session gone, claims none.
+fn bypass_claim<P: FnMut(Value) -> Result<Value, String>>(peer: &mut P) -> Option<u64> {
+    peer(json!({ "op": "desktop.bypass" }))
+        .ok()?
+        .get("until")
+        .and_then(Value::as_u64)
+}
+
 /// The file and the process of the window `hwnd`, by this process's own
 /// lookup.
 fn image_of(hwnd: isize) -> Option<(u32, String)> {
@@ -1103,6 +1232,8 @@ struct Gate {
     /// The call now decided was refused in a question, whose answer is
     /// its line in the log already.
     answered: bool,
+    /// The human's answers to whether a bypass holds here.
+    bypass: BypassHeld,
 }
 
 impl Gate {
@@ -1114,6 +1245,7 @@ impl Gate {
             refused: Refusals::default(),
             list_refused: None,
             answered: false,
+            bypass: BypassHeld::default(),
         }
     }
 
@@ -1176,7 +1308,7 @@ impl Gate {
             return Err(listed::refused_text(question, name, left));
         }
         let risky = question == Question::Risky;
-        let time = Duration::from_secs(within).min(ASKING_MOST.saturating_sub(since.elapsed()));
+        let time = time_left(within, since);
         let (title, yes) = match question {
             Question::Approve => (
                 "Horadric's helper (administrator): operate this program?",
@@ -1215,14 +1347,7 @@ impl Gate {
                     risky,
                     secs: within,
                 },
-                Some(format!(
-                    "nobody answered the helper's question about {name} within {within} s, so \
-                     nothing was done, and it is not asked again for {} s. The helper's questions \
-                     are answered with the mouse at this machine. If this is safe to do without \
-                     asking, an administrator can list it from an elevated shell (horadric \
-                     takeover allow --elevated, horadric takeover approve --elevated)",
-                    listed::REFUSED_FOR.as_secs()
-                )),
+                Some(unanswered_text(name, within)),
             ),
         };
         self.log(source, what);
@@ -1239,12 +1364,94 @@ impl Gate {
         }
     }
 
+    /// Whether a bypass the app claims spares the human `question`,
+    /// asking them first, once per bypass, whether it holds here. False
+    /// is: ask the question as without bypass. The claim is asked of the
+    /// app only when a question is near, and once per call (`claim`).
+    #[allow(clippy::too_many_arguments)]
+    fn by_bypass<P: FnMut(Value) -> Result<Value, String>>(
+        &mut self,
+        peer: &mut P,
+        claim: &mut Option<Option<u64>>,
+        question: Question,
+        what: &str,
+        within: u64,
+        since: Instant,
+        near: isize,
+    ) -> Result<bool, String> {
+        let claimed = *claim.get_or_insert_with(|| bypass_claim(peer));
+        let now = unix_now();
+        let (claimed, until) = match bypassing(claimed, self.bypass, now) {
+            Bypassing::Ask => return Ok(false),
+            Bypassing::Allow => {
+                self.log(Source::Bypass, what);
+                return Ok(true);
+            }
+            Bypassing::AskBypass { claim, until } => (claim, until),
+        };
+        // Held after nobody answered: the question it holds says so.
+        if self.refused.left(&(), question, Instant::now()).is_some() {
+            return Ok(false);
+        }
+        let shown = clock_after(local_seconds(), until.saturating_sub(now));
+        let text = bypass_question(&self.program, what, &shown, within);
+        let answer = match time_left(within, since).as_secs() {
+            0..=4 => ask::Answer::Unanswered,
+            secs => ask::ask(
+                "Horadric's helper (administrator): bypass here too?",
+                &text,
+                &format!("Allow until {shown}"),
+                "Ask each time",
+                Duration::from_secs(secs),
+                near,
+            ),
+        };
+        let asked = |yes| Source::BypassAsked {
+            yes,
+            until: shown.clone(),
+        };
+        match answer {
+            ask::Answer::TooTall => Err(TOO_TALL.into()),
+            ask::Answer::Yes => {
+                self.bypass.yes = Some((claimed, until));
+                self.log(asked(true), what);
+                Ok(true)
+            }
+            // A no to all of it is not a no to this action, which is
+            // asked about next as it would be without bypass.
+            ask::Answer::No => {
+                self.bypass.no = Some(claimed);
+                self.log(asked(false), what);
+                Ok(false)
+            }
+            // Nobody there to answer the next question either.
+            ask::Answer::Unanswered => {
+                let risky = question == Question::Risky;
+                self.log(
+                    Source::NoAnswer {
+                        risky,
+                        secs: within,
+                    },
+                    what,
+                );
+                self.refused.note(&(), question, Instant::now());
+                self.answered = true;
+                Err(unanswered_text(listed_name(&self.program), within))
+            }
+        }
+    }
+
     /// Whether the helper lets the action of an `allow` body go ahead.
     /// The body was built by this process's own engine, so the window, the
     /// action's parts and its risk are what the helper read; only the
     /// agent's sentence of why is the session's, and it is not shown.
-    fn decide(&mut self, body: &Value) -> Result<(), String> {
+    fn decide<P: FnMut(Value) -> Result<Value, String>>(
+        &mut self,
+        body: &Value,
+        peer: &mut P,
+    ) -> Result<(), String> {
         let since = Instant::now();
+        let mut claim = None;
         let hwnd = body
             .pointer("/window/hwnd")
             .and_then(Value::as_i64)
@@ -1282,6 +1489,18 @@ impl Gate {
             let level = listed::find(&list.programs, &path, &name, true).map(|e| e.level);
             if level == Some(Level::Operate) {
                 self.log(Source::List(Level::Operate), &what);
+            } else if self.by_bypass(
+                peer,
+                &mut claim,
+                Question::Approve,
+                &what,
+                within,
+                since,
+                hwnd,
+            )? {
+                // Bypass covers the whole action, and lets nothing in
+                // past its end: operating is asked about again then.
+                return Ok(());
             } else {
                 let text = first_question(&self.program, &shown, within);
                 self.ask(Question::Approve, &text, &what, within, since, hwnd)?;
@@ -1293,6 +1512,18 @@ impl Gate {
         };
         if let Some(pattern) = listed::pre_approval(&list.programs, &path, &name, true, &act) {
             self.log(Source::PreApproved(pattern), &what);
+            return Ok(());
+        }
+        let bypassed = self.by_bypass(
+            peer,
+            &mut claim,
+            Question::Risky,
+            &what,
+            within,
+            since,
+            hwnd,
+        )?;
+        if bypassed {
             return Ok(());
         }
         let window = match act.window.trim() {
@@ -1331,7 +1562,7 @@ impl Gate {
             _ => return peer(body),
         }
         self.answered = false;
-        if let Err(why) = self.decide(&body) {
+        if let Err(why) = self.decide(&body, peer) {
             if !self.answered {
                 self.note(&format!("refused by the helper: {why}"), &what);
             }
@@ -1385,50 +1616,23 @@ fn listed_name(path: &str) -> &str {
     path.rsplit(['\\', '/']).next().unwrap_or(path)
 }
 
-/// The helper's own question: a plain window of this elevated process.
+/// The helper's own question: the app's question window, drawn by this
+/// elevated process in the look the human picked in the app.
 ///
 /// It never takes the keyboard (it can not be activated), so no key meant
 /// for another window answers it, the agent's or the human's: only a
-/// mouse click on one of its two buttons does, and not in its first
-/// moments, when a click already on its way could land on it. It draws
-/// its buttons itself, so UI Automation finds nothing in it to invoke.
-/// Windows keeps the input of programs that are not elevated out of it,
-/// and the desktop tools leave Horadric's own windows alone.
+/// mouse click on one of its buttons does, and not in its first moments,
+/// when a click already on its way could land on it. It draws its buttons
+/// itself, so UI Automation finds nothing in it to invoke. Windows keeps
+/// the input of programs that are not elevated out of it, and the desktop
+/// tools leave Horadric's own windows alone.
 mod ask {
-    use std::cell::RefCell;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
-    use windows::core::{w, HSTRING};
-    use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
-    use windows::Win32::Graphics::Gdi::{
-        BeginPaint, CreateFontW, DeleteObject, DrawTextW, EndPaint, FillRect, FrameRect, GetDC,
-        GetMonitorInfoW, GetSysColor, GetSysColorBrush, InvalidateRect, MonitorFromWindow,
-        ReleaseDC, SelectObject, SetBkMode, SetTextColor, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
-        COLOR_BTNFACE, COLOR_WINDOW, COLOR_WINDOWTEXT, DEFAULT_CHARSET, DT_CALCRECT, DT_CENTER,
-        DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, HFONT, HGDIOBJ, MONITORINFO,
-        MONITOR_DEFAULTTOPRIMARY, OUT_DEFAULT_PRECIS, PAINTSTRUCT, TRANSPARENT,
-    };
-    use windows::Win32::UI::HiDpi::GetDpiForWindow;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-        GetMessageW, KillTimer, LoadCursorW, RegisterClassW, SetTimer, SetWindowPos, ShowWindow,
-        TranslateMessage, HWND_TOPMOST, IDC_ARROW, MSG, SWP_NOACTIVATE, SW_SHOWNOACTIVATE,
-        WM_CLOSE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_PAINT, WM_TIMER, WNDCLASSW,
-        WS_CAPTION, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_SYSMENU,
-    };
-
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn GetModuleHandleW(name: *const u16) -> *mut core::ffi::c_void;
-    }
-
-    /// What Windows is told when the mouse comes down on the window: take
-    /// the click, do not come forward.
-    const MA_NOACTIVATE: isize = 3;
-    /// A click this soon after the window shows was aimed at what was
-    /// there before it.
-    const ARMED_AFTER: Duration = Duration::from_millis(900);
-    const TICK: usize = 1;
+    use horadric_ui::question::{self, Aside, Dialog, Tone};
+    use horadric_ui::theme::Theme;
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
 
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub enum Answer {
@@ -1441,154 +1645,20 @@ mod ask {
         TooTall,
     }
 
-    struct State {
-        text: Vec<u16>,
-        yes: Vec<u16>,
-        no: Vec<u16>,
-        text_at: RECT,
-        yes_at: RECT,
-        no_at: RECT,
-        note_at: RECT,
-        font: HFONT,
-        /// The button the mouse went down on: a click is down and up on
-        /// the same one.
-        down: Option<Answer>,
-        answer: Option<Answer>,
-        armed: Instant,
-        ends: Instant,
+    /// The look the human picked in the app, read from its state file.
+    /// Only the theme's name is taken from that file, which any program
+    /// of the user can write, and every name is one of the app's fixed
+    /// looks: a wrong or missing one changes the colours and nothing else.
+    fn picked() -> Theme {
+        let state = horadric_hooks::state_dir()
+            .and_then(|dir| std::fs::read(dir.join("state.json")).ok())
+            .unwrap_or_default();
+        super::theme_of(&state)
     }
 
-    thread_local! {
-        /// The question on screen. The helper serves one call at a time on
-        /// one thread, so there is never more than one.
-        static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
-    }
-
-    fn inside(r: &RECT, x: i32, y: i32) -> bool {
-        x >= r.left && x < r.right && y >= r.top && y < r.bottom
-    }
-
-    fn wide(s: &str) -> Vec<u16> {
-        s.encode_utf16().collect()
-    }
-
-    unsafe fn paint(hwnd: HWND, s: &State) {
-        let mut ps = PAINTSTRUCT::default();
-        let dc = BeginPaint(hwnd, &mut ps);
-        let old = SelectObject(dc, HGDIOBJ(s.font.0));
-        SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, COLORREF(GetSysColor(COLOR_WINDOWTEXT)));
-        let mut at = s.text_at;
-        DrawTextW(dc, &mut s.text.clone(), &mut at, DT_WORDBREAK | DT_NOPREFIX);
-        let frame = GetSysColorBrush(COLOR_WINDOWTEXT);
-        for (label, place, heavy) in [(&s.yes, s.yes_at, false), (&s.no, s.no_at, true)] {
-            FillRect(dc, &place, GetSysColorBrush(COLOR_BTNFACE));
-            FrameRect(dc, &place, frame);
-            if heavy {
-                // The refusing button is the marked one.
-                let inner = RECT {
-                    left: place.left + 1,
-                    top: place.top + 1,
-                    right: place.right - 1,
-                    bottom: place.bottom - 1,
-                };
-                FrameRect(dc, &inner, frame);
-            }
-            let mut at = place;
-            DrawTextW(
-                dc,
-                &mut label.clone(),
-                &mut at,
-                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-            );
-        }
-        let left = s.ends.saturating_duration_since(Instant::now()).as_secs();
-        let mut note = wide(&format!("Refused in {left} s"));
-        let mut at = s.note_at;
-        DrawTextW(
-            dc,
-            &mut note,
-            &mut at,
-            DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-        );
-        SelectObject(dc, old);
-        let _ = EndPaint(hwnd, &ps);
-    }
-
-    unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-        let at = |lp: LPARAM| {
-            (
-                i32::from((lp.0 & 0xFFFF) as u16 as i16),
-                i32::from(((lp.0 >> 16) & 0xFFFF) as u16 as i16),
-            )
-        };
-        let hit = |s: &State, lp: LPARAM| {
-            let (x, y) = at(lp);
-            if inside(&s.yes_at, x, y) {
-                Some(Answer::Yes)
-            } else if inside(&s.no_at, x, y) {
-                Some(Answer::No)
-            } else {
-                None
-            }
-        };
-        match msg {
-            WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE),
-            WM_PAINT => {
-                let painted = STATE.with(|s| {
-                    let s = s.borrow();
-                    s.as_ref().map(|s| paint(hwnd, s)).is_some()
-                });
-                if painted {
-                    return LRESULT(0);
-                }
-            }
-            WM_LBUTTONDOWN => {
-                STATE.with(|s| {
-                    if let Some(s) = s.borrow_mut().as_mut() {
-                        s.down = hit(s, lp).filter(|_| Instant::now() >= s.armed);
-                    }
-                });
-                return LRESULT(0);
-            }
-            WM_LBUTTONUP => {
-                STATE.with(|s| {
-                    if let Some(s) = s.borrow_mut().as_mut() {
-                        let up = hit(s, lp);
-                        if up.is_some() && up == s.down {
-                            s.answer = up;
-                        }
-                        s.down = None;
-                    }
-                });
-                return LRESULT(0);
-            }
-            WM_TIMER => {
-                STATE.with(|s| {
-                    if let Some(s) = s.borrow_mut().as_mut() {
-                        if Instant::now() >= s.ends {
-                            s.answer = Some(Answer::Unanswered);
-                        }
-                        let _ = InvalidateRect(Some(hwnd), Some(&s.note_at), true);
-                    }
-                });
-                return LRESULT(0);
-            }
-            WM_CLOSE => {
-                STATE.with(|s| {
-                    if let Some(s) = s.borrow_mut().as_mut() {
-                        s.answer = Some(Answer::No);
-                    }
-                });
-                return LRESULT(0);
-            }
-            _ => {}
-        }
-        DefWindowProcW(hwnd, msg, wp, lp)
-    }
-
-    /// Asks, on the screen of the window `near`, and waits `within` for a
-    /// click. A question that can not be shown is not answered yes.
+    /// Asks, aside from the window `near`, and waits `within` for a click.
+    /// The refusing button is the one ringed. A question that can not be
+    /// shown is not answered yes.
     pub fn ask(
         title: &str,
         text: &str,
@@ -1597,175 +1667,207 @@ mod ask {
         within: Duration,
         near: isize,
     ) -> Answer {
-        unsafe {
-            let module = HINSTANCE(GetModuleHandleW(std::ptr::null()));
-            let class = w!("HoradricHelperQuestion");
-            let wc = WNDCLASSW {
-                lpfnWndProc: Some(wndproc),
-                hInstance: module,
-                lpszClassName: class,
-                hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-                hbrBackground: GetSysColorBrush(COLOR_WINDOW),
-                ..Default::default()
-            };
-            // A second question finds the class there already.
-            RegisterClassW(&wc);
-            let ex = WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
-            let style = WS_POPUP | WS_CAPTION | WS_SYSMENU;
-            let Ok(hwnd) = CreateWindowExW(
-                ex,
-                class,
-                &HSTRING::from(title),
-                style,
-                0,
-                0,
-                100,
-                100,
-                None,
-                None,
-                Some(module),
-                None,
-            ) else {
-                return Answer::Unanswered;
-            };
-            let dpi = GetDpiForWindow(hwnd).max(96) as i32;
-            let px = |dip: i32| dip * dpi / 96;
-            let font = CreateFontW(
-                -px(15),
-                0,
-                0,
-                0,
-                400,
-                0,
-                0,
-                0,
-                DEFAULT_CHARSET,
-                OUT_DEFAULT_PRECIS,
-                CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY,
-                0,
-                w!("Segoe UI"),
-            );
-            let mut screen = MONITORINFO {
-                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-                ..Default::default()
-            };
-            let monitor = MonitorFromWindow(HWND(near as *mut _), MONITOR_DEFAULTTOPRIMARY);
-            let _ = GetMonitorInfoW(monitor, &mut screen);
-            let work = screen.rcWork;
-            let (pad, gap) = (px(18), px(12));
-            let (button_w, button_h) = (px(150), px(34));
-            let text = wide(text);
-            let measure = |width: i32| {
-                let mut measured = RECT {
-                    right: width - 2 * pad,
-                    ..Default::default()
-                };
-                let dc = GetDC(Some(hwnd));
-                let old = SelectObject(dc, HGDIOBJ(font.0));
-                DrawTextW(
-                    dc,
-                    &mut text.clone(),
-                    &mut measured,
-                    DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX,
-                );
-                SelectObject(dc, old);
-                ReleaseDC(Some(hwnd), dc);
-                let mut outer = RECT {
-                    left: 0,
-                    top: 0,
-                    right: width,
-                    bottom: measured.bottom + 3 * pad + button_h,
-                };
-                let _ = AdjustWindowRectEx(&mut outer, style, false, ex);
-                (measured.bottom, outer)
-            };
-            // A long text to type widens the window before it is ever cut:
-            // every character of it is what the human says yes to.
-            let room = work.bottom - work.top - px(16);
-            let mut width = px(560);
-            let (mut text_h, mut outer) = measure(width);
-            if outer.bottom - outer.top > room {
-                width = (work.right - work.left - px(32)).clamp(width, px(1200));
-                (text_h, outer) = measure(width);
-            }
-            if outer.bottom - outer.top > room {
-                let _ = DestroyWindow(hwnd);
-                let _ = DeleteObject(HGDIOBJ(font.0));
-                return Answer::TooTall;
-            }
-            let text_at = RECT {
-                left: pad,
-                top: pad,
-                right: width - pad,
-                bottom: pad + text_h,
-            };
-            let row = text_at.bottom + pad;
-            let no_at = RECT {
-                left: width - pad - button_w,
-                top: row,
-                right: width - pad,
-                bottom: row + button_h,
-            };
-            let yes_at = RECT {
-                left: no_at.left - gap - button_w,
-                top: row,
-                right: no_at.left - gap,
-                bottom: row + button_h,
-            };
-            let note_at = RECT {
-                left: pad,
-                top: row,
-                right: yes_at.left - gap,
-                bottom: row + button_h,
-            };
-            let (w, h) = (outer.right - outer.left, outer.bottom - outer.top);
-            // Near the top, clear of the middle, where the program's own
-            // dialog most likely is, unless it is too tall for that.
-            let x = work.left + ((work.right - work.left) - w).max(0) / 2;
-            let y = (work.top + px(40)).min(work.bottom - h).max(work.top);
-            let now = Instant::now();
-            STATE.set(Some(State {
-                text,
-                yes: wide(yes),
-                no: wide(no),
-                text_at,
-                yes_at,
-                no_at,
-                note_at,
-                font,
-                down: None,
-                answer: None,
-                armed: now + ARMED_AFTER,
-                ends: now + within,
-            }));
-            let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE);
-            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            SetTimer(Some(hwnd), TICK, 500, None);
-            let mut msg = MSG::default();
-            let answer = loop {
-                let answered = STATE.with(|s| s.borrow().as_ref().and_then(|s| s.answer));
-                if let Some(answer) = answered {
-                    break answer;
-                }
-                if !GetMessageW(&mut msg, None, 0, 0).as_bool() {
-                    break Answer::Unanswered;
-                }
-                let _ = TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            };
-            let _ = KillTimer(Some(hwnd), TICK);
-            STATE.set(None);
-            let _ = DestroyWindow(hwnd);
-            let _ = DeleteObject(HGDIOBJ(font.0));
-            answer
+        asked_in(picked(), title, text, yes, no, within, near)
+    }
+
+    /// As [`ask`], in the look `look`.
+    pub fn asked_in(
+        look: Theme,
+        title: &str,
+        text: &str,
+        yes: &str,
+        no: &str,
+        within: Duration,
+        near: isize,
+    ) -> Answer {
+        let mut r = RECT::default();
+        let avoid = unsafe { GetWindowRect(HWND(near as *mut _), &mut r) }
+            .ok()
+            .filter(|_| near != 0)
+            .map(|_| [r.left, r.top, r.right, r.bottom]);
+        let d = Dialog {
+            tone: Tone::Warning,
+            title,
+            text,
+            buttons: &[yes, no],
+            default: 1,
+            check: None,
+        };
+        match question::ask_alone(look, &d, &Aside { avoid, within }) {
+            question::Answer::Pressed(0) => Answer::Yes,
+            // Closed some other way is a no, as is the refusing button.
+            question::Answer::Pressed(_) | question::Answer::Dismissed => Answer::No,
+            question::Answer::Unanswered => Answer::Unanswered,
+            question::Answer::TooTall => Answer::TooTall,
         }
     }
+}
+
+/// The look named in the app's state file, the app's first for none or
+/// one this build does not know.
+fn theme_of(state: &[u8]) -> horadric_ui::theme::Theme {
+    let key = serde_json::from_slice::<Value>(state)
+        .ok()
+        .and_then(|v| v.get("theme").and_then(Value::as_str).map(str::to_string));
+    horadric_ui::theme::Theme::from_key(key.as_deref())
+}
+
+/// `horadric takeover-helper-preview [theme] [first|risky|bypass]`, in a
+/// debug build only: shows one of the helper's questions as the helper
+/// draws it, without elevation, for a look at it on screen. The answer is
+/// printed and nothing else is done with it.
+#[cfg(debug_assertions)]
+pub fn preview(args: &[String]) -> Result<(), String> {
+    let look = horadric_ui::theme::Theme::from_key(args.first().map(String::as_str));
+    let program = r"C:\Program Files\Acme\Studio\Studio.exe";
+    let what = "type \"C:\\Projects\\line4.smc2\" in Edit \"Filnavn:\"";
+    let (title, text, yes, no) = match args.get(1).map(String::as_str) {
+        Some("first") => (
+            "Horadric's helper (administrator): operate this program?",
+            first_question(program, what, 60),
+            "Let it operate".to_string(),
+            "Refuse",
+        ),
+        Some("risky") => (
+            "Horadric's helper (administrator): do this?",
+            risky_question(
+                program,
+                "Open",
+                what,
+                "it is in an Open or Save dialog, or on its button, and such a dialog can \
+                 start other programs with this program's administrator rights",
+                60,
+            ),
+            "Do it".to_string(),
+            "Refuse",
+        ),
+        _ => (
+            "Horadric's helper (administrator): bypass here too?",
+            bypass_question(program, what, "12:13", 60),
+            "Allow until 12:13".to_string(),
+            "Ask each time",
+        ),
+    };
+    let answer = ask::asked_in(look, title, &text, &yes, no, Duration::from_secs(60), 0);
+    println!("{answer:?}");
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_helper_asks_in_the_look_the_app_was_given() {
+        use horadric_ui::theme::Theme;
+        assert_eq!(theme_of(br#"{"theme":"matrix"}"#), Theme::Matrix);
+        assert_eq!(
+            theme_of(br#"{"theme":"winamp","recent":[]}"#),
+            Theme::Winamp
+        );
+        // Missing, unknown, the wrong type or no JSON at all: the first.
+        for state in [
+            &b"{}"[..],
+            br#"{"theme":"vaporwave"}"#,
+            br#"{"theme":7}"#,
+            b"",
+            b"{",
+        ] {
+            assert_eq!(theme_of(state), Theme::Skeuomorph);
+        }
+    }
+
+    #[test]
+    fn a_bypass_claim_is_asked_about_once_and_held_to_its_end() {
+        let most = listed::BYPASS_MOST.as_secs();
+        let none = BypassHeld::default();
+        // No claim, or one already over: asked as ever.
+        assert_eq!(bypassing(None, none, 100), Bypassing::Ask);
+        assert_eq!(bypassing(Some(100), none, 100), Bypassing::Ask);
+        // A claim is no answer: the human is asked whether it holds here.
+        assert_eq!(
+            bypassing(Some(900), none, 100),
+            Bypassing::AskBypass {
+                claim: 900,
+                until: 900
+            }
+        );
+        // A claim of a bypass longer than any the app allows is held to
+        // the longest, from when it is asked.
+        assert_eq!(
+            bypassing(Some(u64::MAX), none, 100),
+            Bypassing::AskBypass {
+                claim: u64::MAX,
+                until: 100 + most
+            }
+        );
+        let yes = BypassHeld {
+            yes: Some((900, 900)),
+            no: None,
+        };
+        assert_eq!(bypassing(Some(900), yes, 500), Bypassing::Allow);
+        // The claim gone (Esc, or its work done) or the time passed: asked.
+        assert_eq!(bypassing(None, yes, 500), Bypassing::Ask);
+        assert_eq!(bypassing(Some(900), yes, 900), Bypassing::Ask);
+        // A new bypass is a new question.
+        assert_eq!(
+            bypassing(Some(1_800), yes, 500),
+            Bypassing::AskBypass {
+                claim: 1_800,
+                until: 1_800
+            }
+        );
+        // A capped yes ends at its cap, though the claim goes on.
+        let capped = BypassHeld {
+            yes: Some((u64::MAX, 100 + most)),
+            no: None,
+        };
+        assert_eq!(
+            bypassing(Some(u64::MAX), capped, 99 + most),
+            Bypassing::Allow
+        );
+        assert_eq!(
+            bypassing(Some(u64::MAX), capped, 100 + most),
+            Bypassing::Ask
+        );
+        // A no holds for that bypass, which then asks each action.
+        let no = BypassHeld {
+            yes: None,
+            no: Some(900),
+        };
+        assert_eq!(bypassing(Some(900), no, 500), Bypassing::Ask);
+        assert_eq!(
+            bypassing(Some(1_800), no, 500),
+            Bypassing::AskBypass {
+                claim: 1_800,
+                until: 1_800
+            }
+        );
+    }
+
+    #[test]
+    fn the_bypass_end_reads_as_the_plate_shows_it() {
+        // 11:43:50, and thirty minutes on: the plate says 12:13.
+        let now = 11 * 3600 + 43 * 60 + 50;
+        assert_eq!(clock_after(now, 30 * 60), "12:13");
+        assert_eq!(clock_after(23 * 3600 + 50 * 60, 30 * 60), "00:20");
+        assert_eq!(clock_after(0, 0), "00:00");
+    }
+
+    #[test]
+    fn the_bypass_question_says_until_when_and_what_it_lets_in() {
+        let q = bypass_question(r"C:\S\Studio.exe", "click Open", "12:13", 60);
+        assert!(q.contains("until 12:13"));
+        assert!(q.contains(r"C:\S\Studio.exe"));
+        assert!(q.contains("click Open"));
+        assert!(q.contains("Open and Save dialogs included"));
+        assert!(q.contains("other programs can be started"));
+        assert!(q.contains("mouse only"));
+        assert!(q.contains("60 s"));
+        // Its lines are joined by a single space where the source breaks.
+        assert!(!q.contains("  "));
+        assert!(!unanswered_text("Studio.exe", 60).contains("  "));
+    }
 
     #[test]
     fn a_helper_line_is_one_line_and_a_long_reason_is_cut() {

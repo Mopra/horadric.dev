@@ -143,6 +143,12 @@ mod titler;
 pub mod vault;
 #[cfg(windows)]
 pub use dialog::error_alone;
+/// The app's question window, for the elevated takeover helper, which
+/// asks with no app around it.
+#[cfg(windows)]
+pub mod question {
+    pub use crate::dialog::{ask_alone, Answer, Aside, Dialog, Tone};
+}
 /// For `horadric quest`, which writes the chronicle from a session's shell
 /// under the same project key the app uses.
 pub use {
