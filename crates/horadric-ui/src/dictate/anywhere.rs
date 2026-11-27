@@ -43,6 +43,8 @@ use crate::window::Shared;
 const POLL: usize = 1;
 /// The hotkey id Esc has while the microphone is open.
 const ESC: i32 = 1;
+/// The timer that waits for the chord's key to come up after a press.
+const UP: usize = 2;
 
 thread_local! {
     /// The window the dictation's notes come to: message only, unseen.
@@ -51,6 +53,8 @@ thread_local! {
     static KEY: Cell<u16> = const { Cell::new(0) };
     /// What the sentence being heard is for.
     static PURPOSE: Cell<Purpose> = const { Cell::new(Purpose::Type) };
+    /// The chord's key has not come up since the last press.
+    static HELD: Cell<bool> = const { Cell::new(false) };
 }
 
 /// What becomes of the sentence once it is written down.
@@ -67,6 +71,17 @@ pub enum Purpose {
 /// chord began it.
 pub fn press(shared: &Rc<Shared>, key: u16, purpose: Purpose) {
     let Some(hwnd) = window() else { return };
+    // MOD_NOREPEAT does not hold everywhere: a held chord was seen to
+    // come again and again, each time stopping the listening and
+    // starting it anew, so holding the take over's key started a session
+    // per repeat. Only a press after the key came up counts.
+    if HELD.with(Cell::get) {
+        return;
+    }
+    HELD.with(|h| h.set(true));
+    unsafe {
+        SetTimer(Some(hwnd), UP, 30, None);
+    }
     if super::shown(hwnd).is_none() {
         PURPOSE.with(|p| p.set(purpose));
         if purpose == Purpose::HandOver {
@@ -143,6 +158,13 @@ fn is_down(vk: u16) -> bool {
 
 unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
+        WM_TIMER if wparam.0 == UP => {
+            if !is_down(KEY.with(Cell::get)) {
+                HELD.with(|h| h.set(false));
+                let _ = KillTimer(Some(hwnd), UP);
+            }
+            LRESULT(0)
+        }
         WM_TIMER if wparam.0 == POLL => {
             if !is_down(KEY.with(Cell::get)) {
                 // A hold ends here; a tap waits for the next press.

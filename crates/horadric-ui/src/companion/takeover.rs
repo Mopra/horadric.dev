@@ -226,6 +226,13 @@ pub(crate) struct Ready {
 
 static READY: Mutex<Vec<Ready>> = Mutex::new(Vec::new());
 
+/// When the last take over was handed on.
+static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+/// Two take overs closer than this are one press seen twice, not two
+/// things the human wants done.
+const APART: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// The take over's key went down and the microphone opens: remembers the
 /// window in front and reads the trail as it is now.
 pub(crate) fn begin() {
@@ -255,6 +262,13 @@ pub(crate) fn said(words: Option<String>) {
         .map(|w| w.trim().to_string())
         .filter(|w| !w.is_empty())
         .unwrap_or_else(|| NO_WORDS.to_string());
+    {
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        if last.is_some_and(|at| at.elapsed() < APART) {
+            return;
+        }
+        *last = Some(std::time::Instant::now());
+    }
     // On a thread of its own: this is the thread that draws, and the
     // trail may still be being read from the disk.
     let hand_on = move || {
