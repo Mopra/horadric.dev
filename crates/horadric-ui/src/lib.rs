@@ -219,6 +219,8 @@ mod questlog;
 #[cfg(windows)]
 pub mod desk;
 #[cfg(windows)]
+pub mod companion;
+#[cfg(windows)]
 mod light;
 #[cfg(any(windows, target_os = "macos"))]
 #[cfg_attr(not(windows), allow(dead_code))]

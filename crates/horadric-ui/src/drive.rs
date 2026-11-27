@@ -19,9 +19,12 @@ use horadric_hooks::listener::{BrowserCall, Reply};
 use horadric_hooks::open_url;
 use serde_json::{json, Value};
 
-use super::{App, WEB};
+use super::{folder_key, App, Kind, WEB};
 use crate::browse::{self, closed, error, Call};
+use crate::companion::{link, takeover};
 use crate::console::Console;
+use crate::hotkey::Action;
+use crate::quests::{Runner as _, SessionSpec, Workplace};
 use crate::vault::{fill, identity, run};
 use crate::web;
 use crate::window::project_name;
@@ -56,6 +59,21 @@ impl App {
                 ));
             }
             return self.takeover_call(call);
+        }
+        // The trail and the companion are no project's either. The key
+        // matters most here: the trail holds everything that was on the
+        // human's screen, and no other local program may ask for it under
+        // a session's name.
+        if let Some(op) = (call.body.get("op").and_then(Value::as_str))
+            .filter(|op| op.starts_with("trail.") || op.starts_with("companion."))
+        {
+            if !self.keyed(&call.session, &call.body) {
+                return call.reply.send(error(
+                    "Horadric answers for the companion only to a session it runs, with that                      session's key.",
+                ));
+            }
+            let op = op.to_string();
+            return self.companion_call(&op, call);
         }
         // The agent's desk is no project's either. The key keeps any
         // other local program from opening it under a session's name.
@@ -204,6 +222,119 @@ impl App {
                 });
             }
         }
+    }
+
+    /// A call about the companion from `horadric mcp`: `trail.recall`
+    /// asks what the human was doing, `companion.offer` hands the human a
+    /// text to type. The caller has shown the session's key already.
+    fn companion_call(&mut self, op: &str, call: BrowserCall) {
+        let id = call.session.as_str();
+        match op {
+            "trail.recall" => {
+                // Only a session the human sits at. Warriv, a reviewer, an
+                // errand and a quest's session work unwatched, where a page
+                // they read could talk them into fetching the trail.
+                let own = !horadric_core::warriv::is_warriv(id)
+                    && !horadric_core::runeword::is_errand(id)
+                    && !self.holds_quest(id);
+                let who = format!("{} ({id})", self.name_of(id));
+                takeover::recall(who, own, &call.body, call.reply);
+            }
+            "companion.offer" => {
+                let folder = takeover::folder().map(|d| folder_key(&d.to_string_lossy()));
+                if folder.is_none() || self.project_of(id) != folder {
+                    return call.reply.send(error(
+                        "Only the companion's own session, started by a take over, offers the                          human a text.",
+                    ));
+                }
+                let Some(text) = call.body["text"].as_str().filter(|t| !t.trim().is_empty())
+                else {
+                    return call.reply.send(error("say what to offer: text"));
+                };
+                takeover::offer(text);
+                let i = Action::CompanionType.index();
+                let how = match self.keys_live[i] {
+                    true => format!("{} types it where your cursor is", self.keys[i].name()),
+                    false => "Set a key to type it in Settings, under Keys".to_string(),
+                };
+                self.toasts.show(
+                    Kind::Info,
+                    "The companion has a text",
+                    &format!("{}
+{how}", takeover::offer_shown(text)),
+                );
+                call.reply.send(json!({ "text": takeover::OFFER_TAKEN }));
+            }
+            _ => call.reply.send(error("unknown companion call")),
+        }
+    }
+
+    /// Starts a session for each take over that has its sentence, in the
+    /// companion's own folder, with the trail in its first prompt. Never
+    /// shown on the stage and never given the keyboard: the human is in
+    /// another program and stays there.
+    pub(super) fn companion_start(&mut self) {
+        for ready in takeover::ready() {
+            let started = takeover::folder()
+                .ok_or_else(|| "it has no folder to work in".to_string())
+                .and_then(|dir| {
+                    // A folder nobody was asked about would stop the
+                    // session at Claude Code's question, unseen.
+                    if !crate::accounts::trusted(&dir) {
+                        if let Err(e) = crate::accounts::trust(&dir) {
+                            eprintln!("horadric: cannot trust {}: {e}", dir.display());
+                        }
+                    }
+                    self.start_session(SessionSpec {
+                        name: Some("Companion".into()),
+                        prompt: Some(ready.prompt),
+                        place: Workplace::Here,
+                        show: false,
+                        quiet: true,
+                        ..SessionSpec::new(dir, self.chat_sessions)
+                    })
+                });
+            match started {
+                Ok(_) => self.toasts.show(
+                    Kind::Info,
+                    "The companion took it over",
+                    &ready.instruction,
+                ),
+                Err(e) => self
+                    .toasts
+                    .show(Kind::Failed, "The companion could not take it over", &e),
+            }
+        }
+    }
+
+    /// The key that types the companion's offer where the caret is, in
+    /// whatever program has the keyboard.
+    pub(super) fn companion_type(&mut self) {
+        match takeover::take_offer() {
+            // On a thread: it waits for the chord's modifiers to be let go.
+            Some(text) => {
+                std::thread::spawn(move || crate::dictate::anywhere::type_text(&text));
+            }
+            None => self
+                .toasts
+                .show(Kind::Info, "The companion has nothing to type", ""),
+        }
+    }
+
+    /// The pause key.
+    pub(super) fn companion_pause(&mut self) {
+        if !link::is_on() {
+            return self.toasts.show(
+                Kind::Info,
+                "The companion is off",
+                "Turn it on in Settings, under General",
+            );
+        }
+        let title = match link::toggle_pause() {
+            true => "Companion paused",
+            false => "Companion watching",
+        };
+        self.toasts.show(Kind::Info, title, "");
     }
 
     /// `horadric open-url` from a terminal of the project `key`, a

@@ -135,6 +135,10 @@ pub struct SavedState {
     /// Dictation is tidied by Haiku before it is typed, from Settings.
     #[serde(default)]
     pub dictation_tidy: bool,
+    /// The companion follows the human's work in other programs, from
+    /// Settings. Off until turned on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub companion: bool,
     /// The Whisper model dictation listens with, by its folder under
     /// `models`. None is the small English one.
     #[serde(default, skip_serializing_if = "Option::is_none")]

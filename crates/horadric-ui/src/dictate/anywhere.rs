@@ -14,6 +14,10 @@
 //! human's. A new line is Shift+Enter, which is a new line in a chat box
 //! where Enter would send. Beside the ticks, a plate by the caret shows
 //! the voice and the words so far ([`super::plate`]).
+//!
+//! The companion's take over listens the same way with a chord of its
+//! own. Its sentence is not typed: it is what the companion is told to
+//! do ([`crate::companion::takeover`]).
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -45,12 +49,32 @@ thread_local! {
     static WINDOW: Cell<Option<HWND>> = const { Cell::new(None) };
     /// The chord's key, looked at to tell when it is let go.
     static KEY: Cell<u16> = const { Cell::new(0) };
+    /// What the sentence being heard is for.
+    static PURPOSE: Cell<Purpose> = const { Cell::new(Purpose::Type) };
 }
 
-/// The global chord went down, its key `key`: starts listening, or stops
-/// a tapped dictation already listening.
-pub fn press(shared: &Rc<Shared>, key: u16) {
+/// What becomes of the sentence once it is written down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    /// Typed where the caret is.
+    Type,
+    /// Told to the companion, as what to do with the work in front.
+    HandOver,
+}
+
+/// A global chord went down, its key `key`: starts listening for
+/// `purpose`, or stops a tapped dictation already listening, whichever
+/// chord began it.
+pub fn press(shared: &Rc<Shared>, key: u16, purpose: Purpose) {
     let Some(hwnd) = window() else { return };
+    if super::shown(hwnd).is_none() {
+        PURPOSE.with(|p| p.set(purpose));
+        if purpose == Purpose::HandOver {
+            // Before the plate shows, so the window in front is still
+            // the human's.
+            crate::companion::takeover::begin();
+        }
+    }
     KEY.with(|k| k.set(key));
     super::press(hwnd, None, "");
     if super::shown(hwnd).is_some() {
@@ -59,6 +83,9 @@ pub fn press(shared: &Rc<Shared>, key: u16) {
             let _ = RegisterHotKey(Some(hwnd), ESC, MOD_NOREPEAT, u32::from(VK_ESCAPE.0));
             SetTimer(Some(hwnd), POLL, 30, None);
         }
+    } else {
+        // A pane of Horadric's has the microphone: nothing began here.
+        crate::companion::takeover::dropped();
     }
 }
 
@@ -99,6 +126,10 @@ fn window() -> Option<HWND> {
 /// Gives back Esc and stops looking at the key, once nothing is heard.
 fn settle(hwnd: HWND) {
     if super::shown(hwnd).is_none() {
+        // A take over that got its sentence has been handed on by now.
+        // One that ended without, on Esc or when only the speech model
+        // was fetched, is over: the next press reads the trail afresh.
+        crate::companion::takeover::dropped();
         unsafe {
             let _ = UnregisterHotKey(Some(hwnd), ESC);
             let _ = KillTimer(Some(hwnd), POLL);
@@ -126,11 +157,20 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             LRESULT(0)
         }
         WM_DICTATE => {
-            match super::take(hwnd) {
-                Some(Ok(text)) if !text.is_empty() => {
+            match (super::take(hwnd), PURPOSE.with(Cell::get)) {
+                (Some(Ok(text)), Purpose::Type) if !text.is_empty() => {
                     std::thread::spawn(move || type_text(&text));
                 }
-                Some(Err(e)) => eprintln!("horadric: dictation anywhere: {e}"),
+                (Some(Err(e)), Purpose::Type) => eprintln!("horadric: dictation anywhere: {e}"),
+                // The key alone hands it over: silence, or a microphone
+                // that failed, leaves the instruction to the companion.
+                (Some(Ok(text)), Purpose::HandOver) => {
+                    crate::companion::takeover::said(Some(text));
+                }
+                (Some(Err(e)), Purpose::HandOver) => {
+                    eprintln!("horadric: take over heard nothing: {e}");
+                    crate::companion::takeover::said(None);
+                }
                 _ => {}
             }
             settle(hwnd);
@@ -142,7 +182,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
 
 /// Types `text` into the program with the keyboard, once the chord's
 /// modifiers are up: typed under a held Ctrl, a letter is a shortcut.
-fn type_text(text: &str) {
+pub(crate) fn type_text(text: &str) {
     let held = [VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN];
     let began = Instant::now();
     while held.iter().any(|k| is_down(k.0)) && began.elapsed() < Duration::from_secs(3) {

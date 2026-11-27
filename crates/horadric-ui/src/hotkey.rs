@@ -24,10 +24,17 @@ pub enum Action {
     DictateAnywhere,
     /// Puts the terminal and the tiles away, or brings them back.
     Toggle,
+    /// Hands what the human works on to the companion, with a spoken
+    /// instruction.
+    CompanionTakeOver,
+    /// Types the text the companion offered where the caret is.
+    CompanionType,
+    /// Stops the companion watching, or lets it watch again.
+    CompanionPause,
 }
 
 /// How many shortcuts there are.
-pub const COUNT: usize = 7;
+pub const COUNT: usize = 10;
 
 impl Action {
     pub const ALL: [Action; COUNT] = [
@@ -38,6 +45,9 @@ impl Action {
         Action::Dictate,
         Action::DictateAnywhere,
         Action::Toggle,
+        Action::CompanionTakeOver,
+        Action::CompanionType,
+        Action::CompanionPause,
     ];
 
     /// Registered with Windows for every program, rather than read by the
@@ -70,6 +80,9 @@ impl Action {
             Action::Dictate => "dictate",
             Action::DictateAnywhere => "dictate_anywhere",
             Action::Toggle => "toggle",
+            Action::CompanionTakeOver => "companion_take_over",
+            Action::CompanionType => "companion_type",
+            Action::CompanionPause => "companion_pause",
         }
     }
 
@@ -82,6 +95,9 @@ impl Action {
             Action::Dictate => "Dictate",
             Action::DictateAnywhere => "Dictate in any program",
             Action::Toggle => "Show or hide Horadric",
+            Action::CompanionTakeOver => "Hand this to the companion",
+            Action::CompanionType => "Type the companion's answer",
+            Action::CompanionPause => "Pause the companion",
         }
     }
 
@@ -91,6 +107,9 @@ impl Action {
     /// that matter here, where AltGr+A types a letter in Polish.
     /// Dictation in Horadric is Ctrl+Space, which types nothing in a
     /// terminal; it is no global, so dev and installed share it.
+    /// The companion's letters, G, J and B, type nothing with AltGr on
+    /// the Danish, German and Polish layouts, and Word has no shortcut
+    /// of its own on Ctrl+Alt with any of them.
     pub fn default_chord(self, dev: bool) -> Chord {
         if self == Action::Dictate {
             return Chord {
@@ -108,6 +127,9 @@ impl Action {
             Action::Account => u16::from(b'K'),
             Action::DictateAnywhere => u16::from(b'D'),
             Action::Toggle => u16::from(b'H'),
+            Action::CompanionTakeOver => u16::from(b'G'),
+            Action::CompanionType => u16::from(b'J'),
+            Action::CompanionPause => u16::from(b'B'),
             Action::Dictate => VK_SPACE,
         };
         Chord {
@@ -333,7 +355,10 @@ mod tests {
                 "Ctrl+Alt+K",
                 "Ctrl+Space",
                 "Ctrl+Alt+D",
-                "Ctrl+Alt+H"
+                "Ctrl+Alt+H",
+                "Ctrl+Alt+G",
+                "Ctrl+Alt+J",
+                "Ctrl+Alt+B"
             ]
         );
         assert_eq!(
@@ -437,9 +462,19 @@ mod tests {
         assert_eq!(clash(&chords, Action::Listen, home), None);
         let fresh = Chord {
             mods: CTRL_ALT,
-            key: u16::from(b'J'),
+            key: u16::from(b'Q'),
         };
         assert_eq!(clash(&chords, Action::Next, fresh), None);
+    }
+
+    #[test]
+    fn no_two_defaults_share_a_chord() {
+        for dev in [false, true] {
+            let chords = Action::ALL.map(|a| a.default_chord(dev));
+            for a in Action::ALL {
+                assert_eq!(clash(&chords, a, chords[a.index()]), None, "{a:?}");
+            }
+        }
     }
 
     #[test]

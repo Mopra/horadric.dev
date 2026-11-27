@@ -658,6 +658,8 @@ pub(crate) enum Input {
     StageActive,
     /// The stage went down to its taskbar button: the tiles go with it.
     StageMinimized,
+    /// A take over has its sentence: the companion's session starts.
+    Companion,
 }
 
 thread_local! {
@@ -800,6 +802,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     web::set_sizes(&saved.page_sizes);
     ghost::set_speed_saved(saved.desktop_glide_ms);
     crate::takeover_mode::set_mode(saved.takeover);
+    crate::companion::link::set_on(saved.companion);
     theme::set_accents(&saved.accents);
     web::set_docks(&saved.page_docks);
     sanctuary::set_docks(&saved.sky_docks);
@@ -1274,6 +1277,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     // exception for a factory released that late: every quit and every
     // reload ended as a crash in the event log.
     crate::web::shutdown();
+    crate::companion::link::stop();
     crate::tip::release();
     crate::menu::release();
     Ok(())
@@ -1693,6 +1697,11 @@ fn tray_menu(hwnd: HWND) {
         Some(Choice::Settings) => open_settings(None),
         Some(Choice::Desk(line)) => crate::desk::window::tray_pick(line),
         Some(Choice::Takeover(line)) => crate::takeover_mode::tray_pick(line),
+        Some(Choice::Companion(line)) => {
+            crate::companion::link::tray_pick(line);
+            // On and off are kept.
+            with_app(App::save);
+        }
         Some(Choice::New) => pick_and_start(hwnd, projects.first().map(PathBuf::from)),
         Some(Choice::Recent(path)) => start_logged(PathBuf::from(path)),
         Some(Choice::QuestLog(path)) => {
@@ -4407,7 +4416,15 @@ impl App {
                 Some(Action::DictateAnywhere) => crate::dictate::anywhere::press(
                     &self.shared,
                     self.keys[Action::DictateAnywhere.index()].key,
+                    crate::dictate::anywhere::Purpose::Type,
                 ),
+                Some(Action::CompanionTakeOver) => crate::dictate::anywhere::press(
+                    &self.shared,
+                    self.keys[Action::CompanionTakeOver.index()].key,
+                    crate::dictate::anywhere::Purpose::HandOver,
+                ),
+                Some(Action::CompanionType) => self.companion_type(),
+                Some(Action::CompanionPause) => self.companion_pause(),
                 Some(Action::Toggle) => {
                     self.toggle();
                 }
@@ -6436,6 +6453,7 @@ impl App {
                 }
             },
             tidy: crate::dictate::tidies(),
+            companion: crate::companion::link::is_on(),
             towns: crate::town_settings::views(),
             animations: !self.still,
             switch_accounts: self.switch_accounts,
@@ -7137,6 +7155,10 @@ impl App {
             Field::DictationWords => crate::dictate::edit_words(),
             Field::TidyDictation => {
                 crate::dictate::use_tidy(!crate::dictate::tidies());
+                self.save();
+            }
+            Field::Companion => {
+                crate::companion::link::set_on(!crate::companion::link::is_on());
                 self.save();
             }
             Field::Sounds => {
@@ -9613,6 +9635,7 @@ impl App {
             sounds: self.sounds,
             microphone: self.microphone.clone(),
             dictation_tidy: crate::dictate::tidies(),
+            companion: crate::companion::link::is_on(),
             dictation_model: Some(crate::dictate::voice().model)
                 .filter(|m| *m != horadric_memory::speech::Model::SmallEn)
                 .map(|m| m.folder().to_string()),
@@ -9911,6 +9934,10 @@ impl App {
             (t, 0) => format!("{app}: {t} session{}", if t == 1 { "" } else { "s" }),
             (t, w) => format!("{app}: {t} sessions, {w} waiting"),
         };
+        let tip = match crate::companion::link::tip() {
+            Some(companion) => format!("{tip}, {companion}"),
+            None => tip,
+        };
         self.tray.set_tip(&tip);
         self.sync_discord();
         self.identify();
@@ -10201,6 +10228,7 @@ impl App {
                     self.raise();
                 }
                 Input::StageMinimized => self.hide_tiles(),
+                Input::Companion => self.companion_start(),
                 Input::TileMenu(id) => {
                     self.menu_for = Some(id);
                     post(self.notify.0 as isize, WM_HORADRIC_TILE_MENU, 0);

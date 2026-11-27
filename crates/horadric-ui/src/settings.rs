@@ -136,6 +136,8 @@ pub enum Field {
     DictationWords,
     /// Whether Haiku tidies what was dictated.
     TidyDictation,
+    /// Whether the companion follows the work in other programs.
+    Companion,
     /// A default for the sessions Horadric starts, the same value the
     /// usage window's rows show.
     Default(Setting),
@@ -207,6 +209,9 @@ impl Field {
             Field::DictationLanguage => "What you speak, for a model that hears any language",
             Field::DictationWords => "Names it mishears, and what you meant",
             Field::TidyDictation => "Haiku drops the ums and carries out \"scratch that\"",
+            Field::Companion => {
+                "Follows what you work on in other programs, kept on this PC for seven days"
+            }
             Field::Default(Setting::Model) => "The model new sessions start on",
             Field::Default(Setting::Effort) => "How long new sessions think before they answer",
             Field::Default(Setting::Permissions) => "What new sessions may do without asking",
@@ -241,6 +246,11 @@ impl Field {
             Field::Key(Action::Dictate) => "Talk into a session or chat, tap or hold",
             Field::Key(Action::DictateAnywhere) => "Talk into the program you are in, tap or hold",
             Field::Key(Action::Toggle) => "Puts the terminal and tiles away, or brings them back",
+            Field::Key(Action::CompanionTakeOver) => {
+                "Say what to do with what you are working on, tap or hold"
+            }
+            Field::Key(Action::CompanionType) => "Types its answer where your cursor is",
+            Field::Key(Action::CompanionPause) => "Stops it watching, or lets it watch again",
             Field::Vault(row) => crate::vault::settings::help(row),
             _ => "",
         }
@@ -311,6 +321,8 @@ pub struct Values {
     pub dictation_language: String,
     /// Haiku tidies what was dictated before it is typed.
     pub tidy: bool,
+    /// The companion follows the work in other programs.
+    pub companion: bool,
     /// The towns, as their rows show them.
     pub towns: Vec<crate::town_settings::View>,
     pub animations: bool,
@@ -490,6 +502,7 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
             };
             let (notify, n) = switch(v.notify);
             let (sounds, s) = switch(v.sounds);
+            let (companion, c) = switch(v.companion);
             vec![
                 shown(Field::Autostart, "Start with Windows", v.autostart),
                 shown(Field::Explorer, "Open in Horadric in Explorer", v.explorer),
@@ -501,6 +514,7 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
                     v.discord.label(),
                     Control::List,
                 ),
+                line(Field::Companion, "Companion", companion, c),
             ]
         }
         Section::Dictation => {
@@ -1662,6 +1676,7 @@ mod tests {
             dictation_model: "Small, English".into(),
             dictation_language: "English".into(),
             tidy: false,
+            companion: false,
             towns: Vec::new(),
             animations: true,
             defaults: Defaults {
@@ -1758,7 +1773,8 @@ mod tests {
                 Field::Explorer,
                 Field::Notify,
                 Field::Sounds,
-                Field::Discord
+                Field::Discord,
+                Field::Companion
             ]
         );
         assert_eq!(
@@ -1804,6 +1820,9 @@ mod tests {
                 Field::Key(Action::Dictate),
                 Field::Key(Action::DictateAnywhere),
                 Field::Key(Action::Toggle),
+                Field::Key(Action::CompanionTakeOver),
+                Field::Key(Action::CompanionType),
+                Field::Key(Action::CompanionPause),
                 Field::KeysNote
             ]
         );
@@ -1820,8 +1839,8 @@ mod tests {
                 Field::Forge
             ]
         );
-        // A project's settings, the tallest section.
-        assert_eq!(tallest(&v), height(Section::Projects, &v));
+        // The shortcuts, the tallest section.
+        assert_eq!(tallest(&v), height(Section::Keys, &v));
     }
 
     #[test]
@@ -1897,8 +1916,8 @@ mod tests {
         let rows = lines(Section::Projects, &v);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].control, Control::Fixed);
-        // Sized for a project's settings even before there is one.
-        assert_eq!(tallest(&v), height(Section::Projects, &values()));
+        // Room for a project's settings even before there is one.
+        assert!(tallest(&v) >= height(Section::Projects, &values()));
     }
 
     #[test]
@@ -1979,22 +1998,24 @@ mod tests {
 
     #[test]
     fn the_keys_show_their_chords_and_listen_for_one() {
+        // The note comes after every shortcut's row.
+        const NOTE: usize = hotkey::COUNT;
         let mut v = values();
         let keys = lines(Section::Keys, &v);
         assert_eq!(keys[0].value, "Ctrl+Alt+Space");
         assert_eq!(keys[2].value, "Ctrl+Alt+W");
         assert_eq!(keys[4].value, "Ctrl+Space");
         assert_eq!(keys[0].control, Control::Button);
-        assert_eq!(keys[7].control, Control::Note);
-        assert_eq!(keys[7].value, "Click a shortcut, then press its new keys");
+        assert_eq!(keys[NOTE].control, Control::Note);
+        assert_eq!(keys[NOTE].value, "Click a shortcut, then press its new keys");
         v.listening = Some(Action::Listen);
         let keys = lines(Section::Keys, &v);
         assert_eq!(keys[1].value, "Press the keys\u{2026}");
         assert_eq!(keys[0].value, "Ctrl+Alt+Space");
-        assert!(keys[7].value.starts_with("Esc keeps it"));
+        assert!(keys[NOTE].value.starts_with("Esc keeps it"));
         v.keys_note = Some("Hold Ctrl, Alt or Win with the key".into());
         assert_eq!(
-            lines(Section::Keys, &v)[7].value,
+            lines(Section::Keys, &v)[NOTE].value,
             "Hold Ctrl, Alt or Win with the key"
         );
     }
@@ -2021,7 +2042,7 @@ mod tests {
         v.keys[1].live = false;
         let keys = lines(Section::Keys, &v);
         assert_eq!(keys[1].value, "Ctrl+Alt+Home, taken");
-        assert_eq!(keys[7].value, "Ctrl+Alt+Home is taken by another program");
+        assert_eq!(keys[hotkey::COUNT].value, "Ctrl+Alt+Home is taken by another program");
     }
 
     #[test]

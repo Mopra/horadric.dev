@@ -63,6 +63,8 @@ pub enum Choice {
     Desk(usize),
     /// A line of takeover's menu, which `takeover_mode` reads.
     Takeover(usize),
+    /// A line of the companion's menu, which `companion::link` reads.
+    Companion(usize),
     /// Start a session in a folder chosen with the picker.
     New,
     /// Start a session in this recent project.
@@ -470,6 +472,7 @@ pub fn menu(m: Menu) -> Option<Choice> {
     items.push(Item::Submenu("Other PCs".into(), machines));
     items.push(crate::desk::window::tray_item());
     items.push(crate::takeover_mode::tray_item());
+    items.push(crate::companion::link::tray_item());
     items.push(Item::Separator);
 
     items.push(Item::action(SETTINGS, "Settings\u{2026}"));
@@ -487,6 +490,7 @@ pub fn menu(m: Menu) -> Option<Choice> {
         SETTINGS => Some(Choice::Settings),
         i if crate::desk::window::tray_owns(i) => Some(Choice::Desk(i)),
         i if crate::takeover_mode::tray_owns(i) => Some(Choice::Takeover(i)),
+        i if crate::companion::link::tray_owns(i) => Some(Choice::Companion(i)),
         CONTEXT => Some(Choice::Context),
         TIDY => Some(Choice::Tidy),
         NEXT => Some(Choice::NextWaiting),

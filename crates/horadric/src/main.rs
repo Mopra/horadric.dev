@@ -68,6 +68,7 @@ mod status;
 mod takeover_watch;
 #[cfg(not(target_os = "linux"))]
 mod task;
+mod trail;
 
 use std::io::Read;
 #[cfg(not(target_os = "linux"))]
@@ -188,6 +189,11 @@ Usage:
                                starts this itself when they are off)
   horadric desk hand [--dev]     Not for people: serves the agent's desk to the desk_ tools
                                from inside it, started at the desk's sign-in
+  horadric companion [--parent PID]
+                               Not for people: follows the window in front and writes
+                               what it shows to the trail, started by the app
+  horadric companion peek        Wait 3 seconds, then print what the companion reads of
+                               the window in front and how long it took; writes nothing
   horadric portal [off|phones|forget N|all|relay URL]
                                Town Portal, Horadric from your phone: turn it on and show
                                a pairing QR code that works once, for 5 minutes; turn it
@@ -331,6 +337,8 @@ fn main() -> ExitCode {
         Some("remote") => remote::run(&args[1..]),
         #[cfg(windows)]
         Some("desk") => desk_command(&args[1..]),
+        #[cfg(windows)]
+        Some("companion") => horadric_ui::companion::run(&args[1..]),
         Some("open-url") => open_url::run(&args[1..]),
         // `BROWSER` names this program alone, since most openers run it as
         // one program with the link as its only argument.
