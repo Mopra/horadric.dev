@@ -1392,14 +1392,39 @@ const DIALOG_BUTTON_GAP: f32 = 10.0;
 
 /// How wide a dialog's text wraps.
 pub fn dialog_text_w() -> f32 {
-    DIALOG_W - 2.0 * DIALOG_PAD
+    dialog_text_w_of(DIALOG_W)
+}
+
+/// How wide the text of a dialog `width` wide wraps.
+pub fn dialog_text_w_of(width: f32) -> f32 {
+    width - 2.0 * DIALOG_PAD
+}
+
+/// How wide a dialog is whose text wraps at `text_w`.
+pub fn dialog_w_of(text_w: f32) -> f32 {
+    text_w + 2.0 * DIALOG_PAD
+}
+
+/// The widest a dialog grows for a text that would be too tall at
+/// [`DIALOG_W`].
+pub const DIALOG_W_MOST: f32 = 1000.0;
+
+/// How tall a dialog is around its text, title and buttons: its height
+/// with no text at all.
+pub fn dialog_chrome_h() -> f32 {
+    dialog(0.0, &[], None).size.1
 }
 
 /// Lays out a dialog whose text wraps to `text_h` DIPs at
 /// [`dialog_text_w`], with a button for each of `labels`, their widths,
 /// and a check whose label is `check` wide when it has one.
 pub fn dialog(text_h: f32, labels: &[f32], check: Option<f32>) -> DialogLayout {
-    let w = dialog_text_w();
+    dialog_wide(DIALOG_W, text_h, labels, check)
+}
+
+/// As [`dialog`], `width` wide, for a text too long for the usual width.
+pub fn dialog_wide(width: f32, text_h: f32, labels: &[f32], check: Option<f32>) -> DialogLayout {
+    let w = dialog_text_w_of(width);
     let lamp = (DIALOG_PAD + 4.0, 20.0 + 12.0);
     let title = Rect::new(DIALOG_PAD + 16.0, 20.0, w - 16.0, 24.0);
     let text = Rect::new(DIALOG_PAD, title.bottom() + 8.0, w, text_h);
@@ -1408,7 +1433,7 @@ pub fn dialog(text_h: f32, labels: &[f32], check: Option<f32>) -> DialogLayout {
         .iter()
         .map(|l| (l.ceil() + 2.0 * DIALOG_BUTTON_PAD).max(DIALOG_BUTTON_MIN))
         .collect();
-    let mut x = DIALOG_W - DIALOG_PAD;
+    let mut x = width - DIALOG_PAD;
     let mut buttons: Vec<Rect> = widths
         .iter()
         .rev()
@@ -1429,11 +1454,11 @@ pub fn dialog(text_h: f32, labels: &[f32], check: Option<f32>) -> DialogLayout {
         );
         let x = boxed.right() + DIALOG_CHECK_GAP;
         // It gives way to the buttons rather than running under them.
-        let room = buttons.first().map_or(DIALOG_W, |b| b.x) - DIALOG_BUTTON_GAP - x;
+        let room = buttons.first().map_or(width, |b| b.x) - DIALOG_BUTTON_GAP - x;
         (boxed, Rect::new(x, y, w.ceil().min(room), DIALOG_BUTTON_H))
     });
     DialogLayout {
-        size: (DIALOG_W, y + DIALOG_BUTTON_H + DIALOG_PAD - 4.0),
+        size: (width, y + DIALOG_BUTTON_H + DIALOG_PAD - 4.0),
         lamp,
         title,
         text,
@@ -1459,6 +1484,28 @@ pub fn dialog_place(size: (i32, i32), work: [i32; 4]) -> (i32, i32) {
     let x = wl + (wr - wl - size.0) / 2;
     let y = wt + (wb - wt - size.1) * 2 / 5;
     (x.max(wl), y.max(wt))
+}
+
+/// Where a question about another program goes: in a corner of the work
+/// area, the one covering least of `avoid` (that program's windows), and
+/// the bottom right, by the tray, when corners tie.
+pub fn dialog_aside(size: (i32, i32), work: [i32; 4], avoid: Option<[i32; 4]>) -> (i32, i32) {
+    const GAP: i32 = 16;
+    let [wl, wt, wr, wb] = work;
+    let (right, bottom) = (wr - size.0 - GAP, wb - size.1 - GAP);
+    let (left, top) = (wl + GAP, wt + GAP);
+    let covered = |(x, y): (i32, i32)| {
+        avoid.map_or(0, |[l, t, r, b]| {
+            let w = (x + size.0).min(r) - x.max(l);
+            let h = (y + size.1).min(b) - y.max(t);
+            i64::from(w.max(0)) * i64::from(h.max(0))
+        })
+    };
+    [(right, bottom), (left, bottom), (right, top), (left, top)]
+        .into_iter()
+        .map(|(x, y)| (x.max(wl), y.max(wt)))
+        .min_by_key(|&at| covered(at))
+        .unwrap_or((wl, wt))
 }
 
 /// How tall the stage's caption is, in DIPs.
@@ -2519,6 +2566,26 @@ mod tests {
             dialog_place((400, 200), [1000, 100, 2000, 800]),
             (1300, 300)
         );
+    }
+
+    #[test]
+    fn a_question_about_a_program_keeps_clear_of_it() {
+        let work = [0, 0, 1920, 1040];
+        // Nothing to avoid, or a maximised program: by the tray.
+        assert_eq!(dialog_aside((400, 200), work, None), (1504, 824));
+        assert_eq!(dialog_aside((400, 200), work, Some(work)), (1504, 824));
+        // A program on the right half: the bottom left.
+        assert_eq!(
+            dialog_aside((400, 200), work, Some([960, 0, 1920, 1040])),
+            (16, 824)
+        );
+        // A program low on the left: the top right.
+        let low_left = Some([0, 500, 1600, 1040]);
+        assert_eq!(dialog_aside((400, 200), work, low_left), (1504, 16));
+        // A modal dialog in the middle is never covered.
+        let dialog = [660, 370, 1260, 670];
+        let (x, y) = dialog_aside((400, 200), work, Some(dialog));
+        assert!(x + 400 <= dialog[0] || x >= dialog[2] || y + 200 <= dialog[1] || y >= dialog[3]);
     }
 
     #[test]

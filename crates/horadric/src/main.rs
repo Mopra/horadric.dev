@@ -35,6 +35,12 @@ mod install;
 mod install;
 #[cfg(not(target_os = "macos"))]
 mod lore;
+#[cfg(windows)]
+mod takeover;
+#[cfg(windows)]
+mod takeover_helper;
+#[cfg(windows)]
+mod takeover_programs;
 // The Mac serves the browser tools; the lore is not on it yet.
 mod mcp;
 #[cfg(target_os = "linux")]
@@ -58,6 +64,8 @@ mod secret;
 #[cfg(windows)]
 mod setup;
 mod status;
+#[cfg(windows)]
+mod takeover_watch;
 #[cfg(not(target_os = "linux"))]
 mod task;
 
@@ -124,6 +132,21 @@ Usage:
                                label and steps, and why any does not parse
   horadric runeword cast NAME    Cast that stone of this project's Runetome, in a session
                                of its own when it needs one
+  horadric takeover list|allow PROGRAM look|operate|deny PROGRAM|log [N]
+                               The programs on your own desktop every session may take
+                               over without being asked (risky actions are asked all
+                               the same),
+                               and the log of grants and answers. Not from inside a
+                               session: the human runs these
+  horadric takeover allow --elevated PROGRAM look|operate
+                               The same for a program that runs as administrator, on
+                               the administrators' list in %ProgramData%\\Horadric.
+                               Needs an elevated shell, as approve does
+  horadric takeover approve [--elevated] PROGRAM click|type|press NAME|KEY [--window W] ...
+                               Pre-approve one named risky action in a program on the
+                               administrators' list (allow --admin PROGRAM operate puts
+                               one there that is not elevated; unapprove PROGRAM N
+                               takes an action off)
   horadric backup now [--folder DIR]
                                Back the memory and the lore up, encrypted, into
                                DIR\\Horadric backup\\<this PC>; the folder is remembered
@@ -324,6 +347,12 @@ fn main() -> ExitCode {
         Some("sky") => lore::sky(),
         #[cfg(windows)]
         Some("backup") => backup::run(&args[1..]),
+        // The names these were first shipped under stay, for the scripts
+        // and notes that have them.
+        #[cfg(windows)]
+        Some("takeover-helper" | "desktop-helper") => takeover_helper::run(&args[1..]),
+        #[cfg(windows)]
+        Some("takeover" | "desktop") => takeover_programs::run(&args[1..]),
         #[cfg(not(target_os = "linux"))]
         Some("swap") => reload::swap(&args[1..]),
         Some("install") => install_command(),

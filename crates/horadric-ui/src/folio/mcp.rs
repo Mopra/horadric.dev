@@ -546,7 +546,12 @@ fn small(cx: &Ctx, s: &mut Scene, right: f32, y: f32, label: &str, primary: bool
 
 fn icon(cx: &Ctx, s: &mut Scene, right: f32, y: f32, glyph: &str, d: Do) -> f32 {
     let r = Rect::new(right - 22.0, y + 3.0, 22.0, ROW - 6.0);
-    s.line(glyph, F::Icon, Rect::new(r.x + 3.0, r.y, 16.0, r.h), cx.pal.faint);
+    s.line(
+        glyph,
+        F::Icon,
+        Rect::new(r.x + 3.0, r.y, 16.0, r.h),
+        cx.pal.faint,
+    );
     s.hit(r, Hit::Tr(Act::Mcp(d)));
     r.x
 }
@@ -614,7 +619,12 @@ pub(super) unsafe fn card(cx: &Ctx, i: usize, card: &McpCard, w: f32) -> Scene {
         }
     }
     let folds = [
-        ("CONNECTED", Group::Connected, card.connected_open, &connected),
+        (
+            "CONNECTED",
+            Group::Connected,
+            card.connected_open,
+            &connected,
+        ),
         ("OFF", Group::Off, card.off_open, &off),
     ];
     for (label, group, open, servers) in folds {
@@ -691,7 +701,11 @@ unsafe fn row(
         "pending" => cx.pal.dim,
         _ => cx.pal.faint.with_alpha(0.5),
     };
-    s.fill(Rect::new(PAD + 2.0, y + ROW / 2.0 - 3.5, 7.0, 7.0), 3.5, dot);
+    s.fill(
+        Rect::new(PAD + 2.0, y + ROW / 2.0 - 3.5, 7.0, 7.0),
+        3.5,
+        dot,
+    );
     let from = PAD + INDENT;
     let left = (x - from - 8.0).max(80.0);
     let name_ink = if m.status == "disabled" || m.removed {
@@ -819,7 +833,10 @@ pub(super) unsafe fn notice(
             Some(("Sign in", Do::SignIn(name))),
         ),
         1 => (format!("{name} needs sign-in"), Some(("Show", Do::Show))),
-        n => (format!("{n} MCP servers need you"), Some(("Show", Do::Show))),
+        n => (
+            format!("{n} MCP servers need you"),
+            Some(("Show", Do::Show)),
+        ),
     };
     gfx.fill_round(
         &Rect::new(x + 1.0, top + H / 2.0 - 3.0, 6.0, 6.0),

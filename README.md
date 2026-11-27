@@ -85,6 +85,27 @@ of the agent. The terminal is the UI.
   lines in the file viewer (right click). The prompt gets one short line,
   and the whole of it waits in a file the agent reads.
 
+**Computer use** (Windows)
+
+- The agent's desk: a second Windows desktop of your own account, shown
+  in a window on the monitor you give it. An agent works there with
+  mouse and keyboard, in any app, while you keep working on yours. Your
+  cursor and focus never move. Open it from the tray menu; close it and
+  the agent's reach is gone.
+- Takeover, for what only works on your own desktop: a program that is
+  already open there, one that runs as administrator, one bound to
+  hardware or a licence. The agent clicks and types in the real window.
+  A soft light along the screen's edges says an agent has the desktop,
+  its rune travels to each click before it is made, a plate says what
+  it is about to do and why, and holding Esc stops it.
+- You decide how far takeover goes. Each program is approved once per
+  session, to look or to operate, or ahead of time with `horadric
+  takeover allow`. Risky actions (deleting, writing, sending something
+  to a machine) are asked every time. Set "Takeover" to "Off" in the
+  tray menu and agents do not have it at all.
+- [docs/plan/takeover.md](docs/plan/takeover.md) has the commands, the
+  two lists and what they can promise.
+
 **Getting your attention**
 
 - **Ctrl+Alt+Space**, from anywhere, jumps to the session that has waited

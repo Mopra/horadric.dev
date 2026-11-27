@@ -583,8 +583,7 @@ fn ssh_process(pid: u32, end_when: Option<&Identity>) -> Option<Identity> {
     use windows::Win32::Foundation::{CloseHandle, FILETIME};
     use windows::Win32::System::Threading::{
         GetExitCodeProcess, GetProcessTimes, OpenProcess, QueryFullProcessImageNameW,
-        TerminateProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-        PROCESS_TERMINATE,
+        TerminateProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
     };
     const STILL_ACTIVE: u32 = 259;
     let access = if end_when.is_some() {
@@ -965,9 +964,8 @@ fn request(port: u16, bytes: Vec<u8>, wait: Duration, cap: usize) -> Result<Resp
     let at = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let mut s = TcpStream::connect_timeout(&at, wait.min(Duration::from_secs(3)))
         .map_err(|e| format!("the tunnel did not answer: {e}"))?;
-    let timed_out = |e: &std::io::Error| {
-        matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
-    };
+    let timed_out =
+        |e: &std::io::Error| matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut);
     let mut written = 0;
     while written < bytes.len() {
         let _ = s.set_write_timeout(Some(left(deadline, wait)?));
@@ -1199,10 +1197,7 @@ pub fn call(
 /// app asks the human once per project and destination and remembers the
 /// answer, so asking it every time costs the human nothing. Whatever it
 /// says against it is the tool's error, word for word.
-fn allowed(
-    dest: &str,
-    ask: &mut dyn FnMut(Value) -> Result<Value, String>,
-) -> Result<(), String> {
+fn allowed(dest: &str, ask: &mut dyn FnMut(Value) -> Result<Value, String>) -> Result<(), String> {
     let answer = ask(json!({ "op": "remote_allow", "ssh": dest }))?;
     if answer.get("allowed") == Some(&Value::Bool(true)) {
         Ok(())
@@ -1234,9 +1229,8 @@ fn answer(
         return send_input(&dest, dev, &bodies).map(|()| vec![crate::mcp::text(done)]);
     }
     if name == "remote_open" {
-        let show = |url: &str| {
-            ask(json!({ "op": "open", "url": url })).map(|a| crate::mcp::describe(&a))
-        };
+        let show =
+            |url: &str| ask(json!({ "op": "open", "url": url })).map(|a| crate::mcp::describe(&a));
         return open(&dest, dev, show).map(|o| {
             vec![crate::mcp::text(format!(
                 "Opened the desktop of {dest} ({}). {}",
@@ -1364,7 +1358,10 @@ mod tests {
             ("remote_click", json!({ "ssh": "vm", "x": 1, "y": 2 })),
             ("remote_type", json!({ "ssh": "vm", "text": "x" })),
             ("remote_press", json!({ "ssh": "vm", "key": "Enter" })),
-            ("remote_scroll", json!({ "ssh": "vm", "x": 1, "y": 2, "delta": 1 })),
+            (
+                "remote_scroll",
+                json!({ "ssh": "vm", "x": 1, "y": 2, "delta": 1 }),
+            ),
         ];
         for (name, args) in calls {
             let mut asked = Vec::new();
@@ -1375,7 +1372,11 @@ mod tests {
             .unwrap()
             .unwrap_err();
             assert_eq!(e, "the user said no to vm", "{name}");
-            assert_eq!(asked, [json!({ "op": "remote_allow", "ssh": "vm" })], "{name}");
+            assert_eq!(
+                asked,
+                [json!({ "op": "remote_allow", "ssh": "vm" })],
+                "{name}"
+            );
         }
     }
 
@@ -1388,9 +1389,11 @@ mod tests {
             json!({ "allowed": 1 }),
             json!(null),
         ] {
-            let e = call("remote_press", &json!({ "ssh": "vm", "key": "Enter" }), |_| {
-                Ok(answer.clone())
-            })
+            let e = call(
+                "remote_press",
+                &json!({ "ssh": "vm", "key": "Enter" }),
+                |_| Ok(answer.clone()),
+            )
             .unwrap()
             .unwrap_err();
             assert!(e.contains("did not allow") && e.contains("vm"), "{e}");
@@ -1554,7 +1557,10 @@ mod tests {
         let long = Duration::from_secs(5);
 
         // The length said is where reading stops, though the peer stays.
-        let port = serve(b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nok".to_vec(), long);
+        let port = serve(
+            b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nok".to_vec(),
+            long,
+        );
         let began = Instant::now();
         let r = request(port, head(port), Duration::from_secs(4), 64).unwrap();
         assert_eq!((r.status, r.body.as_slice()), (200, b"ok".as_slice()));

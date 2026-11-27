@@ -34,6 +34,23 @@ Microsoft's ConPTY package, the pseudo console that passes `CSI c`
 through so OSC 7501 works (see
 `crates/horadric-pty/conpty/README.md`). Adding one is a decision, not a reflex.
 
+Features of the `windows` crate are not crates: each only compiles in
+bindings to a part of the Windows API that is on every machine, so this
+page does not list them. Takeover added to them without adding a crate
+(2026-11-26). In `horadric`, fourteen for the engine and its elevated
+helper: UI Automation and its values (`Win32_UI_Accessibility`,
+`Win32_System_Ole`, `Win32_System_Variant`), a window's picture
+(`Win32_Graphics_Gdi`, `Win32_Graphics_Dwm`, `Win32_Graphics_Imaging`,
+`Win32_Storage_Xps`, where `PrintWindow` lives, `Win32_UI_HiDpi`), real
+clicks and keys (`Win32_UI_Input_KeyboardAndMouse`), the clipboard
+(`Win32_System_DataExchange`, `Win32_System_Memory`), and the helper's
+pipes and who may open them (`Win32_System_Pipes`, `Win32_System_IO`,
+`Win32_Security`). In `horadric-ui`, four for the overlay's light round
+the screens (`Win32_Graphics_Direct3D`, `Win32_Graphics_Direct3D11`,
+`Win32_Graphics_Dxgi`, `Win32_Graphics_DirectComposition`): it is drawn
+once and moved by the compositor, so it costs the UI thread nothing per
+frame.
+
 On macOS (`horadric-ui/src/mac/`) the UI uses `objc2` with `objc2-foundation`, `objc2-app-kit`, `objc2-core-foundation`, `objc2-core-graphics` and `objc2-core-text`, the Objective-C and AppKit bindings that stand in for the `windows` crate, and `objc2-web-kit` for the browser pane, WKWebView as `webview2-com` is WebView2 (the Mac side of the one web view decided 2026-09-29, no new decision; it brings `objc2-javascript-core` and `objc2-security`, WebKit's own bindings). `libc` is used in `horadric`, `horadric-pty` and `horadric-ui` for the Unix side of the pty and process code.
 
 ## The Forge's artefact runtime

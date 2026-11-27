@@ -1051,12 +1051,12 @@ fn start(cwd: &Path) -> Result<(), String> {
             chars(horadric_ui::AGENT_PROMPT),
         ),
         (
-            "Horadric's MCP server instructions (browser, lore)".into(),
+            "Horadric's MCP server instructions (browser, desk, takeover, lore)".into(),
             chars(&crate::mcp::instructions()) + chars(crate::mcp::LORE),
         ),
         (
             "Horadric's MCP tool list, when not deferred".into(),
-            chars(&crate::mcp::tool_list().to_string()),
+            chars(&crate::mcp::tool_list(true).to_string()),
         ),
     ]);
     let home = std::env::var_os("USERPROFILE")

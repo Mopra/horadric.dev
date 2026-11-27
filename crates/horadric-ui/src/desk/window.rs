@@ -3,7 +3,8 @@
 //!
 //! There is one, on the UI thread, and it keeps itself: the app only
 //! tells it when it starts and stops, and the tray menu asks it for its
-//! lines. Opening it is the human's permission for the `desk_` tools, so
+//! lines, and an agent's `desk_` call opens it through [`agent_call`]
+//! when it is closed. The `desk_` tools work only while it is open, so
 //! the file that names the session exists only while it is connected.
 
 use std::cell::{Cell, RefCell};
@@ -31,13 +32,12 @@ use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Registry::{
     RegCloseKey, RegDeleteKeyValueW, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, RegSetKeyValueW,
-    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, REG_SZ, RRF_RT_REG_DWORD,
-    RRF_RT_REG_SZ,
+    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, REG_SZ, RRF_RT_REG_DWORD, RRF_RT_REG_SZ,
 };
 use windows::Win32::System::RemoteDesktop::{
     ProcessIdToSessionId, WTSEnableChildSessions, WTSFreeMemory, WTSGetActiveConsoleSessionId,
-    WTSGetChildSessionId, WTSIsChildSessionsEnabled, WTSLogoffSession,
-    WTSQuerySessionInformationW, WTSUserName,
+    WTSGetChildSessionId, WTSIsChildSessionsEnabled, WTSLogoffSession, WTSQuerySessionInformationW,
+    WTSUserName,
 };
 use windows::Win32::System::Threading::{GetCurrentProcessId, WaitForSingleObject, INFINITE};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
@@ -45,11 +45,10 @@ use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLE
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, IsIconic, KillTimer,
     LoadCursorW, PostMessageW, RegisterClassW, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, GWL_STYLE, IDC_ARROW, SIZE_MINIMIZED, SWP_FRAMECHANGED,
-    SWP_NOZORDER, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, WM_APP, WM_CLOSE, WM_DESTROY,
-    WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_LBUTTONUP, WM_PAINT,
-    WM_SETFOCUS, WM_SIZE, WM_TIMER, WNDCLASSW, WS_CLIPCHILDREN, WS_EX_APPWINDOW,
-    WS_OVERLAPPEDWINDOW, WS_POPUP,
+    SetWindowPos, ShowWindow, GWL_STYLE, IDC_ARROW, SIZE_MINIMIZED, SWP_FRAMECHANGED, SWP_NOZORDER,
+    SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, WM_APP, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
+    WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_LBUTTONUP, WM_PAINT, WM_SETFOCUS, WM_SIZE,
+    WM_TIMER, WNDCLASSW, WS_CLIPCHILDREN, WS_EX_APPWINDOW, WS_OVERLAPPEDWINDOW, WS_POPUP,
 };
 
 use horadric_core::desk;
@@ -309,6 +308,8 @@ struct Desk {
     polls: u32,
     /// The human is dragging an edge: the session waits for the end.
     sizing: bool,
+    /// The desk shows but its hand never answered, see [`hand_asked`].
+    handless: bool,
 }
 
 thread_local! {
@@ -412,13 +413,24 @@ pub(crate) fn shutdown() {
 
 /// Opens the desk's window, or brings it to the front.
 pub fn open() {
+    open_as(true);
+}
+
+/// [`open`], for the human's pick or an agent's call. An agent's never
+/// takes the keyboard from the human: the window shows where it always
+/// does, but the human's window keeps the focus.
+fn open_as(activate: bool) {
     if let Some(hwnd) = window() {
         unsafe {
-            if IsIconic(hwnd).as_bool() {
-                let _ = ShowWindow(hwnd, SW_RESTORE);
+            if activate {
+                if IsIconic(hwnd).as_bool() {
+                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                }
+                let _ = ShowWindow(hwnd, SW_SHOW);
+                let _ = SetForegroundWindow(hwnd);
+            } else {
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             }
-            let _ = ShowWindow(hwnd, SW_SHOW);
-            let _ = SetForegroundWindow(hwnd);
         }
         // A window that was closing is wanted again, but its control is
         // still letting go and can not connect anew: the disconnect it
@@ -428,7 +440,13 @@ pub fn open() {
                 d.again = true;
                 d.status = "Opening the agent's desk again.".into();
             }
-            d.phase == Phase::Idle && d.rdp.is_none()
+            let begin = d.phase == Phase::Idle && d.rdp.is_none();
+            // Words left by a failure are no longer true, and an agent
+            // asking how the desk is would read them as this try's.
+            if begin {
+                d.status.clear();
+            }
+            begin
         });
         unsafe {
             let _ = InvalidateRect(Some(hwnd), None, true);
@@ -438,9 +456,70 @@ pub fn open() {
         }
         return;
     }
-    if let Err(e) = create() {
+    if let Err(e) = create(activate) {
         tell("The agent's desk did not open", &e);
     }
+}
+
+/// How an agent's call finds the desk.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Seen {
+    /// No window, or one the human is closing.
+    Closed,
+    /// On its way: a prompt, the sign-in or the connection.
+    Opening(String),
+    /// Shown; its hand may still be starting.
+    Open,
+    /// It stopped and says why, waiting for a click to try again.
+    Failed(String),
+}
+
+impl Seen {
+    /// The answer to `horadric mcp`, which its `crate::desk` reads.
+    pub(crate) fn json(&self) -> serde_json::Value {
+        let (desk, status) = match self {
+            Seen::Closed => ("closed", ""),
+            Seen::Opening(s) => ("opening", s.as_str()),
+            Seen::Open => ("open", ""),
+            Seen::Failed(s) => ("failed", s.as_str()),
+        };
+        serde_json::json!({ "desk": desk, "status": status })
+    }
+}
+
+/// The desk's window as an agent's call sees it.
+fn seen() -> Seen {
+    let Some((phase, status, again, handless)) =
+        with(|d| (d.phase, d.status.clone(), d.again, d.handless))
+    else {
+        return Seen::Closed;
+    };
+    // The window's words end in what to click, which is the human's.
+    let words = status
+        .lines()
+        .filter(|l| !l.starts_with("Click here"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    match phase {
+        Phase::Connected if handless => Seen::Failed(HANDLESS.into()),
+        Phase::Connected => Seen::Open,
+        Phase::Closing if !again => Seen::Closed,
+        // A fresh window, or one asked to begin again, has no words
+        // until its first step says some.
+        Phase::Idle if !words.is_empty() => Seen::Failed(words),
+        _ => Seen::Opening(words),
+    }
+}
+
+/// An agent's `desk.open` or `desk.state`: the first opens the desk as
+/// the tray's Open does, the second only looks. Called on the UI thread
+/// from the app's call routing; nothing here waits, the window's own
+/// steps are posted to it.
+pub(crate) fn agent_call(op: &str) -> serde_json::Value {
+    if op == "desk.open" && !matches!(seen(), Seen::Open | Seen::Opening(_)) {
+        open_as(false);
+    }
+    seen().json()
 }
 
 /// Signs the desk out, which closes every app on it.
@@ -534,7 +613,7 @@ fn register_class() {
     }
 }
 
-fn create() -> Result<(), String> {
+fn create(activate: bool) -> Result<(), String> {
     register_class();
     let hwnd = unsafe {
         CreateWindowExW(
@@ -568,11 +647,12 @@ fn create() -> Result<(), String> {
             returning: false,
             polls: 0,
             sizing: false,
+            handless: false,
         })
     });
     stand(hwnd);
     unsafe {
-        if TRIAL.with(Cell::get) {
+        if TRIAL.with(Cell::get) || !activate {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         } else {
             let _ = ShowWindow(hwnd, SW_SHOW);
@@ -709,8 +789,12 @@ fn sign_in(hwnd: HWND) {
         let owner = HWND(to as *mut c_void);
         let mut ready = Ready::default();
         ready.stored = kept.is_some();
-        let typed = kept
-            .or_else(|| prompt(owner, &account(microsoft_account().as_deref(), &local_user())));
+        let typed = kept.or_else(|| {
+            prompt(
+                owner,
+                &account(microsoft_account().as_deref(), &local_user()),
+            )
+        });
         if let Some((user, secret)) = typed {
             ready.user = user;
             ready.secret = secret;
@@ -779,7 +863,14 @@ fn connect(hwnd: HWND, mut ready: Ready) {
     });
     match connected {
         Ok(rdp) => {
-            debug(&format!("connecting as a {} account", if user.contains('@') { "Microsoft" } else { "local" }));
+            debug(&format!(
+                "connecting as a {} account",
+                if user.contains('@') {
+                    "Microsoft"
+                } else {
+                    "local"
+                }
+            ));
             with(|d| {
                 d.rdp = Some(Rc::new(rdp));
                 d.stored = stored;
@@ -787,6 +878,7 @@ fn connect(hwnd: HWND, mut ready: Ready) {
                 d.armed = armed;
                 d.returning = ready.returning;
                 d.polls = 0;
+                d.handless = false;
             });
             unsafe {
                 SetTimer(Some(hwnd), T_PATIENCE, 60_000, None);
@@ -860,8 +952,11 @@ fn prompt(owner: HWND, user: &str) -> Option<(String, Vec<u8>)> {
         let mut name = [0u16; 514];
         let mut domain = [0u16; 256];
         let mut password = [0u16; 257];
-        let (mut name_len, mut domain_len, mut password_len) =
-            (name.len() as u32, domain.len() as u32, password.len() as u32);
+        let (mut name_len, mut domain_len, mut password_len) = (
+            name.len() as u32,
+            domain.len() as u32,
+            password.len() as u32,
+        );
         let unpacked = CredUnPackAuthenticationBufferW(
             CRED_PACK_FLAGS(0),
             out,
@@ -1132,7 +1227,11 @@ fn disconnected(hwnd: HWND, reason: i32) {
         credential::delete(&desk::credential_target(horadric_hooks::state_name()));
     }
     let text = why(reason, hello_only(), said.as_deref());
-    say(hwnd, Phase::Idle, &format!("{text}\nClick here to try again."));
+    say(
+        hwnd,
+        Phase::Idle,
+        &format!("{text}\nClick here to try again."),
+    );
     tell("The agent's desk closed", &text);
 }
 
@@ -1233,7 +1332,11 @@ fn on_timer(hwnd: HWND, timer: usize) {
                     disarm_hand();
                 }
                 let text = "Windows did not answer the sign-in within a minute.";
-                say(hwnd, Phase::Idle, &format!("{text}\nClick here to try again."));
+                say(
+                    hwnd,
+                    Phase::Idle,
+                    &format!("{text}\nClick here to try again."),
+                );
                 tell("The agent's desk did not open", text);
             }
         }
@@ -1276,6 +1379,7 @@ fn hand_asked(answers: bool, mark: u16) {
     if answers || !shown {
         return;
     }
+    with(|d| d.handless = true);
     tell(
         "The desk's helper is not running",
         "The agent can not see or use the desk without it. \"End the desk\" in the tray \
@@ -1283,6 +1387,11 @@ fn hand_asked(answers: bool, mark: u16) {
          on it.",
     );
 }
+
+/// What an agent hears of a desk that shows without its hand.
+const HANDLESS: &str = "The desk is open but its helper is not running, and only a new \
+     sign-in starts one. The human can end the desk from Horadric's tray menu (Agent's desk, \
+     End the desk), which closes the apps open on it; the next desk_ call opens it again.";
 
 fn paint(hwnd: HWND) {
     let status = with(|d| d.status.clone()).unwrap_or_default();
@@ -1511,7 +1620,10 @@ mod tests {
 
     #[test]
     fn an_unknown_reason_keeps_what_windows_said_and_its_number() {
-        assert_eq!(why(9999, false, Some("It broke.")), "It broke. (reason 9999)");
+        assert_eq!(
+            why(9999, false, Some("It broke.")),
+            "It broke. (reason 9999)"
+        );
         assert!(why(9999, false, None).contains("9999"));
     }
 }

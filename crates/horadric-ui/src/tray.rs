@@ -61,6 +61,8 @@ const FLAME_STRIDE: usize = 2;
 pub enum Choice {
     /// A line of the agent's desk's menu, which `desk::window` reads.
     Desk(usize),
+    /// A line of takeover's menu, which `takeover_mode` reads.
+    Takeover(usize),
     /// Start a session in a folder chosen with the picker.
     New,
     /// Start a session in this recent project.
@@ -467,6 +469,7 @@ pub fn menu(m: Menu) -> Option<Choice> {
     });
     items.push(Item::Submenu("Other PCs".into(), machines));
     items.push(crate::desk::window::tray_item());
+    items.push(crate::takeover_mode::tray_item());
     items.push(Item::Separator);
 
     items.push(Item::action(SETTINGS, "Settings\u{2026}"));
@@ -483,6 +486,7 @@ pub fn menu(m: Menu) -> Option<Choice> {
         QUIT => Some(Choice::Quit),
         SETTINGS => Some(Choice::Settings),
         i if crate::desk::window::tray_owns(i) => Some(Choice::Desk(i)),
+        i if crate::takeover_mode::tray_owns(i) => Some(Choice::Takeover(i)),
         CONTEXT => Some(Choice::Context),
         TIDY => Some(Choice::Tidy),
         NEXT => Some(Choice::NextWaiting),

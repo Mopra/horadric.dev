@@ -181,7 +181,11 @@ pub fn without_site(sites: &[String], site: &str) -> Vec<String> {
 pub fn offers<'a>(groups: &'a [Identity], site: &str) -> Vec<&'a Identity> {
     groups
         .iter()
-        .filter(|g| g.sites.as_ref().is_some_and(|s| s.iter().any(|s| s == site)))
+        .filter(|g| {
+            g.sites
+                .as_ref()
+                .is_some_and(|s| s.iter().any(|s| s == site))
+        })
         .collect()
 }
 
@@ -205,7 +209,8 @@ pub fn env(
         match tool {
             "gh" => {
                 set.push(("GH_CONFIG_DIR".into(), at(&dir.join("gh"))));
-                remove.extend(["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"].map(String::from));
+                remove
+                    .extend(["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"].map(String::from));
             }
             "git" => match (&id.git, gh_user.map(str::trim).filter(|u| !u.is_empty())) {
                 (Some(git), _) => set.extend(git_env(git)),
@@ -240,12 +245,18 @@ pub fn env(
 /// name, domain, path and partition replaces it.
 fn key_of(c: &Value) -> String {
     let s = |k: &str| c.get(k).and_then(Value::as_str).unwrap_or("").to_string();
-    let partition = c.get("partitionKey").map(Value::to_string).unwrap_or_default();
+    let partition = c
+        .get("partitionKey")
+        .map(Value::to_string)
+        .unwrap_or_default();
     format!("{}\n{}\n{}\n{partition}", s("name"), s("domain"), s("path"))
 }
 
 fn value_of(c: &Value) -> String {
-    c.get("value").and_then(Value::as_str).unwrap_or("").to_string()
+    c.get("value")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
 }
 
 /// The cookies in a `Network.getAllCookies` answer.
@@ -277,7 +288,10 @@ fn param(c: &Value) -> Option<Value> {
         }
     }
     let session = c.get("session").and_then(Value::as_bool).unwrap_or(false);
-    if let Some(e) = c.get("expires").filter(|e| !session && e.as_f64().is_some_and(|e| e > 0.0)) {
+    if let Some(e) = c
+        .get("expires")
+        .filter(|e| !session && e.as_f64().is_some_and(|e| e > 0.0))
+    {
         p.insert("expires".into(), e.clone());
     }
     Some(Value::Object(p))
@@ -286,7 +300,10 @@ fn param(c: &Value) -> Option<Value> {
 /// The cookies of every site not in `sites`, as `Network.setCookies`
 /// takes them.
 pub fn inherited(all: &[Value], sites: &[String]) -> Vec<Value> {
-    all.iter().filter(|c| !split(c, sites)).filter_map(param).collect()
+    all.iter()
+        .filter(|c| !split(c, sites))
+        .filter_map(param)
+        .collect()
 }
 
 /// What names each cookie, to remember which were copied.
@@ -309,7 +326,10 @@ fn removal(c: &Value) -> Value {
 /// The `Network.deleteCookies` calls that take every cookie of `sites`
 /// out, as when a site is given back and the group's login must go.
 pub fn removals(all: &[Value], sites: &[String]) -> Vec<Value> {
-    all.iter().filter(|c| split(c, sites)).map(removal).collect()
+    all.iter()
+        .filter(|c| split(c, sites))
+        .map(removal)
+        .collect()
 }
 
 /// The `Network.deleteCookies` calls that make the group profile follow
@@ -386,9 +406,18 @@ mod tests {
 
     #[test]
     fn site_of_urls() {
-        assert_eq!(site_of("https://github.com/acme/x?y#z").as_deref(), Some("github.com"));
-        assert_eq!(site_of("https://u:p@api.github.com:443/").as_deref(), Some("github.com"));
-        assert_eq!(site_of("http://localhost:3000/").as_deref(), Some("localhost"));
+        assert_eq!(
+            site_of("https://github.com/acme/x?y#z").as_deref(),
+            Some("github.com")
+        );
+        assert_eq!(
+            site_of("https://u:p@api.github.com:443/").as_deref(),
+            Some("github.com")
+        );
+        assert_eq!(
+            site_of("http://localhost:3000/").as_deref(),
+            Some("localhost")
+        );
         assert_eq!(site_of("http://[::1]:8080/").as_deref(), Some("[::1]"));
         assert_eq!(site_of("about:blank"), None);
         assert_eq!(site_of("file:///C:/x.html"), None);
@@ -423,10 +452,16 @@ mod tests {
     #[test]
     fn azure_keeps_its_microsoft_login_out() {
         let azure = s(&["azure.com"]);
-        assert!(split(&cookie("ESTSAUTH", "login.microsoftonline.com", "1"), &azure));
+        assert!(split(
+            &cookie("ESTSAUTH", "login.microsoftonline.com", "1"),
+            &azure
+        ));
         assert!(split(&cookie("MSPAuth", ".login.live.com", "1"), &azure));
         assert!(!split(&cookie("x", "microsoft.com", "1"), &azure));
-        assert!(!split(&cookie("ESTSAUTH", "login.microsoftonline.com", "1"), &s(&["github.com"])));
+        assert!(!split(
+            &cookie("ESTSAUTH", "login.microsoftonline.com", "1"),
+            &s(&["github.com"])
+        ));
         assert_eq!(
             kept_out(&azure),
             s(&["azure.com", "login.microsoftonline.com", "login.live.com"])
@@ -436,7 +471,8 @@ mod tests {
     #[test]
     fn a_partitioned_cookie_under_a_split_site_is_split() {
         let mut c = cookie("embed", "widgets.test", "1");
-        c["partitionKey"] = json!({"topLevelSite": "https://github.com", "hasCrossSiteAncestor": false});
+        c["partitionKey"] =
+            json!({"topLevelSite": "https://github.com", "hasCrossSiteAncestor": false});
         assert!(split(&c, &s(&["github.com"])));
         assert!(inherited(&[c.clone()], &s(&["github.com"])).is_empty());
         let mut old = cookie("embed", "widgets.test", "1");
@@ -466,7 +502,10 @@ mod tests {
             g("home", Some(&["vercel.com"])),
             g("old", None),
         ];
-        let o: Vec<&str> = offers(&all, "github.com").iter().map(|i| i.slug.as_str()).collect();
+        let o: Vec<&str> = offers(&all, "github.com")
+            .iter()
+            .map(|i| i.slug.as_str())
+            .collect();
         assert_eq!(o, ["opti"]);
     }
 
@@ -517,19 +556,28 @@ mod tests {
             cookie("user_session", "github.com", "other"),
         ];
         let gone = mirror(&own, &shared, &copied, &split_sites);
-        assert_eq!(gone, vec![json!({"name": "sid", "domain": "x.test", "path": "/"})]);
+        assert_eq!(
+            gone,
+            vec![json!({"name": "sid", "domain": "x.test", "path": "/"})]
+        );
     }
 
     #[test]
     fn stale_copies_are_only_the_shared_ones() {
-        let shared = vec![cookie("user_session", "github.com", "main"), cookie("x", "x.test", "1")];
+        let shared = vec![
+            cookie("user_session", "github.com", "main"),
+            cookie("x", "x.test", "1"),
+        ];
         let own = vec![
             cookie("user_session", "github.com", "main"),
             cookie("logged_in", "github.com", "yes"),
             cookie("x", "x.test", "1"),
         ];
         let r = stale_copies(&own, &shared, &s(&["github.com"]));
-        assert_eq!(r, vec![json!({"name": "user_session", "domain": "github.com", "path": "/"})]);
+        assert_eq!(
+            r,
+            vec![json!({"name": "user_session", "domain": "github.com", "path": "/"})]
+        );
         let fresh = vec![cookie("user_session", "github.com", "other")];
         assert!(stale_copies(&fresh, &shared, &s(&["github.com"])).is_empty());
     }
@@ -537,11 +585,19 @@ mod tests {
     #[test]
     fn removals_name_each_cookie_of_the_sites() {
         let mut part = cookie("p", "gist.github.com", "1");
-        part["partitionKey"] = json!({"topLevelSite": "https://github.com", "hasCrossSiteAncestor": false});
-        let all = vec![cookie("a", ".github.com", "1"), part, cookie("b", "x.test", "1")];
+        part["partitionKey"] =
+            json!({"topLevelSite": "https://github.com", "hasCrossSiteAncestor": false});
+        let all = vec![
+            cookie("a", ".github.com", "1"),
+            part,
+            cookie("b", "x.test", "1"),
+        ];
         let r = removals(&all, &s(&["github.com"]));
         assert_eq!(r.len(), 2);
-        assert_eq!(r[0], json!({"name": "a", "domain": ".github.com", "path": "/"}));
+        assert_eq!(
+            r[0],
+            json!({"name": "a", "domain": ".github.com", "path": "/"})
+        );
         assert!(r[1].get("partitionKey").is_some());
     }
 
@@ -573,7 +629,10 @@ mod tests {
         assert_eq!(remove, ["VERCEL_TOKEN"]);
 
         // Wrangler has no folder variable, so it stays the machine's.
-        assert_eq!(env(&id, &s(&["cloudflare.com"]), dir, None), (vec![], vec![]));
+        assert_eq!(
+            env(&id, &s(&["cloudflare.com"]), dir, None),
+            (vec![], vec![])
+        );
     }
 
     #[test]
@@ -581,7 +640,10 @@ mod tests {
         let id = Identity::default();
         let dir = Path::new("C:/ids/opti");
         let (set, _) = env(&id, &s(&["github.com"]), dir, Some("acme-bot"));
-        assert!(set.contains(&("GIT_CONFIG_KEY_0".into(), "credential.https://github.com.username".into())));
+        assert!(set.contains(&(
+            "GIT_CONFIG_KEY_0".into(),
+            "credential.https://github.com.username".into()
+        )));
         assert!(set.contains(&("GIT_CONFIG_VALUE_0".into(), "acme-bot".into())));
         let (set, _) = env(&id, &s(&["github.com"]), dir, None);
         assert!(!set.iter().any(|(k, _)| k == "GIT_CONFIG_COUNT"));

@@ -48,6 +48,19 @@ pub const LOG_FILE: &str = "screen-share.log";
 /// The size the audit log is put aside at, for a new one to start.
 pub const LOG_MAX: u64 = 1024 * 1024;
 
+/// Moves a log that grew past [`LOG_MAX`] aside before the next line,
+/// keeping one old file beside it (`name.1`), so an audit log is never
+/// more than twice that. Shared by the logs of the state folder that grow
+/// for as long as Horadric is installed, and by the elevated helper's, so
+/// it lives here where the app and the binary both reach it.
+pub fn roll(path: &std::path::Path) {
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > LOG_MAX) {
+        let mut aside = path.as_os_str().to_owned();
+        aside.push(".1");
+        let _ = std::fs::rename(path, aside);
+    }
+}
+
 /// The most connections served at once.
 pub const MAX_CONNECTIONS: usize = 16;
 
@@ -613,6 +626,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_log_is_put_aside_only_once_it_is_past_the_limit() {
+        let dir = std::env::temp_dir().join(format!("horadric-roll-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("a.log");
+        let aside = dir.join("a.log.1");
+        std::fs::write(&log, vec![b'x'; LOG_MAX as usize]).unwrap();
+        roll(&log);
+        assert!(log.exists() && !aside.exists(), "at the limit it stays");
+        std::fs::write(&aside, "older").unwrap();
+        std::fs::write(&log, vec![b'x'; LOG_MAX as usize + 1]).unwrap();
+        roll(&log);
+        let rolled = std::fs::metadata(&aside).map(|m| m.len());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            rolled.ok(),
+            Some(LOG_MAX + 1),
+            "past it, it replaces the old one"
+        );
+        assert!(!log.exists());
+    }
+
+    #[test]
     fn only_one_turns_it_on() {
         assert!(enabled(Some("1")));
         assert!(!enabled(Some("0")));
@@ -675,7 +710,12 @@ mod tests {
 
     #[test]
     fn only_a_loopback_host_passes() {
-        for host in ["127.0.0.1", "127.0.0.1:43119", "localhost:5000", "LocalHost"] {
+        for host in [
+            "127.0.0.1",
+            "127.0.0.1:43119",
+            "localhost:5000",
+            "LocalHost",
+        ] {
             assert!(host_ok(host), "{host}");
         }
         for host in [
@@ -810,24 +850,44 @@ mod tests {
         ] {
             assert!(region(bad).is_err(), "{bad}");
         }
-        assert!(region("rx=1&ry=2&rh=4").unwrap_err().contains("rw is missing"));
+        assert!(region("rx=1&ry=2&rh=4")
+            .unwrap_err()
+            .contains("rw is missing"));
     }
 
     #[test]
     fn a_region_is_held_to_the_screen() {
-        assert_eq!(reg(100, 50, 400, 300).on(1920, 1080), Some(reg(100, 50, 400, 300)));
-        assert_eq!(reg(0, 0, 1920, 1080).on(1920, 1080), Some(reg(0, 0, 1920, 1080)));
-        assert_eq!(reg(1800, 1000, 400, 300).on(1920, 1080), Some(reg(1800, 1000, 120, 80)));
-        assert_eq!(reg(-50, -20, 100, 100).on(1920, 1080), Some(reg(0, 0, 50, 80)));
+        assert_eq!(
+            reg(100, 50, 400, 300).on(1920, 1080),
+            Some(reg(100, 50, 400, 300))
+        );
+        assert_eq!(
+            reg(0, 0, 1920, 1080).on(1920, 1080),
+            Some(reg(0, 0, 1920, 1080))
+        );
+        assert_eq!(
+            reg(1800, 1000, 400, 300).on(1920, 1080),
+            Some(reg(1800, 1000, 120, 80))
+        );
+        assert_eq!(
+            reg(-50, -20, 100, 100).on(1920, 1080),
+            Some(reg(0, 0, 50, 80))
+        );
         assert_eq!(
             reg(i32::MIN, i32::MIN, u32::MAX, u32::MAX).on(1920, 1080),
             Some(reg(0, 0, 1920, 1080))
         );
-        assert_eq!(reg(1919, 1079, 5, 5).on(1920, 1080), Some(reg(1919, 1079, 1, 1)));
+        assert_eq!(
+            reg(1919, 1079, 5, 5).on(1920, 1080),
+            Some(reg(1919, 1079, 1, 1))
+        );
         assert_eq!(reg(1920, 0, 10, 10).on(1920, 1080), None);
         assert_eq!(reg(0, 1080, 10, 10).on(1920, 1080), None);
         assert_eq!(reg(-10, 0, 10, 10).on(1920, 1080), None);
-        assert_eq!(reg(i32::MAX, i32::MAX, u32::MAX, u32::MAX).on(1920, 1080), None);
+        assert_eq!(
+            reg(i32::MAX, i32::MAX, u32::MAX, u32::MAX).on(1920, 1080),
+            None
+        );
         assert_eq!(reg(0, 0, 10, 10).on(0, 0), None);
     }
 
@@ -940,7 +1000,10 @@ mod tests {
         assert_eq!(typed("\r"), []);
         assert_eq!(typed(""), []);
         // Outside the basic plane a character is two units, kept together.
-        assert_eq!(typed("\u{e6}\u{1F600}"), [Typed::Units(vec![0xE6, 0xD83D, 0xDE00])]);
+        assert_eq!(
+            typed("\u{e6}\u{1F600}"),
+            [Typed::Units(vec![0xE6, 0xD83D, 0xDE00])]
+        );
     }
 
     #[test]

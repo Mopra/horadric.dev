@@ -214,6 +214,17 @@ pub struct SavedState {
     /// casts without asking first.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cast_without_asking: bool,
+    /// How long the ghost takes to reach a desktop click, in milliseconds,
+    /// once the Thinking plate's slider moved it from the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_glide_ms: Option<u32>,
+    /// Whether sessions may take over programs on the human's own desktop,
+    /// from the tray menu's Takeover. Asking, the default, is not written.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::takeover_programs::Mode::is_ask"
+    )]
+    pub takeover: crate::takeover_programs::Mode,
     /// The built in stones the human put away, by label, which the tome
     /// leaves out until they are shown again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -505,6 +516,12 @@ pub struct SavedSession {
     /// sessions open as.
     #[serde(default, skip_serializing_if = "is_false")]
     pub chat: bool,
+    /// When the session was first seen, in seconds since 1970, so "started"
+    /// on the Thinking plate and in refusals stays when it really began
+    /// across a restart or a reload. None in a file from before it was kept,
+    /// and for a session that moved here, which starts afresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<u64>,
 }
 
 fn is_default(loot: &Loot) -> bool {
@@ -535,6 +552,11 @@ impl SavedSession {
             loot: s.loot.clone(),
             runeword: s.runeword.clone(),
             chat: false,
+            created: s
+                .created
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_secs()),
         }
     }
 
@@ -553,6 +575,9 @@ impl SavedSession {
         s.runeword = self.runeword.clone();
         s.phase = Phase::Paused;
         s.since = now;
+        s.created = self.created.map_or(now, |secs| {
+            SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs)
+        });
         s
     }
 
@@ -740,7 +765,23 @@ mod tests {
             loot: Loot::default(),
             runeword: None,
             chat: false,
+            created: None,
         }
+    }
+
+    #[test]
+    fn a_session_keeps_when_it_started_across_a_restart() {
+        let mut live = Session::new("fix-1", "fix", "C:/app");
+        live.created = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000);
+        let written =
+            serde_json::to_string(&SavedSession::from_session(&live, Vec::new(), true)).unwrap();
+        let read: SavedSession = serde_json::from_str(&written).unwrap();
+        let later = live.created + std::time::Duration::from_secs(7200);
+        assert_eq!(read.to_session(later).created, live.created);
+        // A file from before it was kept starts it at the load.
+        let old = saved(&[], true);
+        assert!(!serde_json::to_string(&old).unwrap().contains("created"));
+        assert_eq!(old.to_session(later).created, later);
     }
 
     #[test]

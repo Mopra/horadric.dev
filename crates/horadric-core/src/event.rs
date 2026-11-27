@@ -54,6 +54,9 @@ pub struct HookEvent {
     /// ran past its timeout carries a `backgroundTaskId` here.
     #[serde(default)]
     pub tool_response: Option<Value>,
+    /// `PostToolUseFailure` only: the human interrupted the tool.
+    #[serde(default)]
+    pub is_interrupt: Option<Value>,
     /// `PermissionRequest` only: the rules Claude Code offers to add so it
     /// stops asking. Present means the prompt has an "always" choice.
     #[serde(default)]
@@ -239,6 +242,19 @@ impl HookEvent {
         self.agent_id.as_deref().is_some_and(|id| !id.is_empty())
     }
 
+    /// `PostToolUseFailure`'s error as text, none when it has none.
+    pub fn error_text(&self) -> Option<&str> {
+        self.error.as_ref().and_then(Value::as_str)
+    }
+
+    /// Whether `PostToolUseFailure` says the human interrupted the tool.
+    pub fn interrupted(&self) -> bool {
+        self.is_interrupt
+            .as_ref()
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
     /// Whether the conversation's title may have changed since the last
     /// event that said so. Claude Code writes it early in the first turn,
     /// `/rename` changes it between turns, and a resume brings an old one.
@@ -287,17 +303,43 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_tool_says_why_and_whether_it_was_interrupted() {
+        let failed = br#"{"session_id":"c","hook_event_name":"PostToolUseFailure",
+            "tool_name":"Bash","tool_use_id":"t1","error":"Exit code 2\nnope",
+            "is_interrupt":false}"#;
+        let e = HookEvent::from_json(failed).unwrap();
+        assert_eq!(e.error_text(), Some("Exit code 2\nnope"));
+        assert!(!e.interrupted());
+
+        let stopped = br#"{"session_id":"c","hook_event_name":"PostToolUseFailure",
+            "error":{"odd":1},"is_interrupt":true}"#;
+        let e = HookEvent::from_json(stopped).unwrap();
+        assert_eq!(e.error_text(), None);
+        assert!(e.interrupted());
+
+        let plain = HookEvent::synthetic("PostToolUse");
+        assert_eq!(plain.error_text(), None);
+        assert!(!plain.interrupted());
+    }
+
+    #[test]
     fn claude_codes_newer_fields_parse() {
         let fail = br#"{"session_id":"c","hook_event_name":"StopFailure",
             "prompt_id":"550e8400","error":"rate_limit",
             "error_details":"429 Too Many Requests"}"#;
         let e = HookEvent::from_json(fail).unwrap();
-        assert_eq!(e.failure(), ("rate_limit".into(), Some("429 Too Many Requests")));
+        assert_eq!(
+            e.failure(),
+            ("rate_limit".into(), Some("429 Too Many Requests"))
+        );
         assert_eq!(e.prompt_id.as_deref(), Some("550e8400"));
 
         let tool = br#"{"session_id":"c","hook_event_name":"PreToolUse",
             "effort":{"level":"xhigh"},"tool_name":"Bash"}"#;
-        assert_eq!(HookEvent::from_json(tool).unwrap().effort_level(), Some("xhigh"));
+        assert_eq!(
+            HookEvent::from_json(tool).unwrap().effort_level(),
+            Some("xhigh")
+        );
         // A shape the docs do not give must not lose the event.
         let odd = br#"{"session_id":"c","hook_event_name":"Stop","effort":"high","error":{"a":1}}"#;
         let e = HookEvent::from_json(odd).unwrap();
@@ -309,16 +351,25 @@ mod tests {
             error_message: Some("Credit balance is too low".into()),
             ..HookEvent::synthetic("StopFailure")
         };
-        assert_eq!(own.failure(), ("billing_error".into(), Some("Credit balance is too low")));
+        assert_eq!(
+            own.failure(),
+            ("billing_error".into(), Some("Credit balance is too low"))
+        );
 
         let switch = br#"{"session_id":"c","hook_event_name":"PostModelSwitch",
             "from_model":"claude-sonnet-5","to_model":"claude-opus-5","source":"command",
             "requested_model":null,"context_tokens":182340}"#;
-        assert_eq!(HookEvent::from_json(switch).unwrap().to_model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(
+            HookEvent::from_json(switch).unwrap().to_model.as_deref(),
+            Some("claude-opus-5")
+        );
 
         let task = br#"{"session_id":"c","hook_event_name":"TaskCreated",
             "task_id":"task-001","task_subject":"Implement user authentication"}"#;
-        assert_eq!(HookEvent::from_json(task).unwrap().task_id.as_deref(), Some("task-001"));
+        assert_eq!(
+            HookEvent::from_json(task).unwrap().task_id.as_deref(),
+            Some("task-001")
+        );
     }
 
     #[test]

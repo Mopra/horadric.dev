@@ -20,9 +20,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use horadric_core::screen_share::{
-    self as share, Button, Input, Mode, Region, Size, Trial, Typed,
-};
+use horadric_core::screen_share::{self as share, Button, Input, Mode, Region, Size, Trial, Typed};
 use windows::core::{Error, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, E_FAIL, HANDLE, HWND, POINT};
 use windows::Win32::Graphics::Gdi::{
@@ -57,8 +55,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC,
     MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
     MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
-    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT,
-    MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_RETURN, VK_TAB,
+    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT, MOUSE_EVENT_FLAGS,
+    VIRTUAL_KEY, VK_RETURN, VK_TAB,
 };
 use windows::Win32::UI::Shell::SHCreateMemStream;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -98,7 +96,10 @@ pub fn told() -> Option<(&'static str, &'static str)> {
         return None;
     }
     [
-        (WATCHED, "This desktop is being watched from another machine"),
+        (
+            WATCHED,
+            "This desktop is being watched from another machine",
+        ),
         (DRIVEN, "This desktop is being driven from another machine"),
     ]
     .into_iter()
@@ -279,9 +280,7 @@ pub(crate) fn log(file: &str, line: &str) {
         return;
     };
     let path = dir.join(file);
-    if std::fs::metadata(&path).is_ok_and(|m| m.len() > share::LOG_MAX) {
-        let _ = std::fs::rename(&path, dir.join(format!("{file}.1")));
-    }
+    roll(&path);
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -290,6 +289,10 @@ pub(crate) fn log(file: &str, line: &str) {
         let _ = writeln!(file, "{} {line}", crate::crashlog::stamp());
     }
 }
+
+/// The state folder's logs and the elevated helper's are rolled by one
+/// rule, which the binary reaches too.
+pub(crate) use horadric_core::screen_share::roll;
 
 /// A connection's place among the few served at once, given back when
 /// its thread ends or could not be started.
@@ -316,7 +319,10 @@ fn serve(serving: Serving, token: String) -> io::Result<()> {
     let listener = match bind(port) {
         Ok(l) => l,
         Err(e) => {
-            log(serving.log_file, &format!("could not bind port {port}: {e}"));
+            log(
+                serving.log_file,
+                &format!("could not bind port {port}: {e}"),
+            );
             return Err(e);
         }
     };
@@ -549,12 +555,22 @@ fn handle(stream: &TcpStream, shared: &Arc<Shared>) -> io::Result<()> {
         (method.as_str(), path),
         ("GET", "/frame.jpg") | ("POST", "/input")
     );
-    if let Some(refusal) = shared.serving.gate.filter(|_| gated).and_then(|gate| gate()) {
+    if let Some(refusal) = shared
+        .serving
+        .gate
+        .filter(|_| gated)
+        .and_then(|gate| gate())
+    {
         // With any body read, or closing on it would lose the answer.
         if method == "POST" && read_body(stream, &mut reader, content_length)?.is_none() {
             return Ok(());
         }
-        return respond(stream, refusal.status, refusal.kind, refusal.body.as_bytes());
+        return respond(
+            stream,
+            refusal.status,
+            refusal.kind,
+            refusal.body.as_bytes(),
+        );
     }
     match (method.as_str(), path) {
         ("GET", "/frame.jpg") => {
@@ -597,8 +613,7 @@ fn handle(stream: &TcpStream, shared: &Arc<Shared>) -> io::Result<()> {
             };
             match body.and_then(|b| share::parse_inputs(&b)) {
                 Ok(events) => {
-                    if events.iter().any(Input::drives) && shared.first_in_a_while(&shared.driven)
-                    {
+                    if events.iter().any(Input::drives) && shared.first_in_a_while(&shared.driven) {
                         shared.log("input began");
                         shared.tell(DRIVEN);
                     }
@@ -942,21 +957,7 @@ fn frame(max: Option<u32>, region: Option<Region>) -> windows::core::Result<Fram
             let _ = SetBrushOrgEx(small, 0, 0, None);
             // A failed stretch leaves the small bitmap black, and a black
             // frame looks like a screen that is off.
-            if !StretchBlt(
-                small,
-                0,
-                0,
-                w,
-                h,
-                Some(full),
-                0,
-                0,
-                src_w,
-                src_h,
-                SRCCOPY,
-            )
-            .as_bool()
-            {
+            if !StretchBlt(small, 0, 0, w, h, Some(full), 0, 0, src_w, src_h, SRCCOPY).as_bool() {
                 return Err(Error::from(E_FAIL));
             }
             small_bitmap
