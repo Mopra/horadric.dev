@@ -9,7 +9,8 @@
 //! pins it to the top of its column, the tiles below scrolling under it,
 //! and a drag does not move it. A list setting drops its list, which the app opens, since it owns the defaults. Effort is a slider in
 //! the window itself. Under the settings, the account in use, whose row
-//! opens the accounts to switch to.
+//! opens the accounts to switch to. At the bottom, a field that searches
+//! every conversation held in any project, see [`crate::finder`].
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -31,16 +32,18 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindowLongPtrW, GetWindowRect,
-    LoadCursorW, RegisterClassW, SetWindowLongPtrW, SetWindowPos, ShowWindow, CREATESTRUCTW,
-    CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW, MA_NOACTIVATE,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE,
-    WM_CAPTURECHANGED, WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SIZE,
-    WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+    LoadCursorW, RegisterClassW, SetCursor, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HTCLIENT, HWND_NOTOPMOST, HWND_TOPMOST,
+    IDC_ARROW, IDC_IBEAM, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SW_HIDE, SW_SHOWNOACTIVATE, WM_CAPTURECHANGED, WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_NCCREATE,
+    WM_NCDESTROY, WM_PAINT, WM_SETCURSOR, WM_SIZE, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_POPUP,
 };
 
 use crate::app::{self, Input};
-use crate::layout::{self, UsageHit, UsageLayout};
+use crate::finder::{Anchor, Search};
+use crate::layout::{self, Rect, UsageHit, UsageLayout};
 use crate::render::{SettingLook, Target, UsageScene};
 use crate::tip;
 use crate::window::Shared;
@@ -71,6 +74,7 @@ pub struct UsageWindow {
     slide: Cell<Option<(usize, usize)>>,
     /// A newer release's version, set by the app when a check finds one.
     pub update: RefCell<Option<String>>,
+    search: Search,
 }
 
 /// One row of the settings section.
@@ -166,6 +170,7 @@ impl UsageWindow {
             hwnd: HWND::default(),
             collapsed: Cell::new(collapsed),
             locked: Cell::new(locked),
+            search: Search::new(shared.clone()),
             shared,
             target: RefCell::new(None),
             layout: RefCell::new(initial),
@@ -193,6 +198,7 @@ impl UsageWindow {
                 Some(&*win as *const UsageWindow as *const c_void),
             )?;
             win.hwnd = hwnd;
+            win.search.set_host(hwnd);
             let pref: DWM_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND;
             let _ = DwmSetWindowAttribute(
                 hwnd,
@@ -252,6 +258,9 @@ impl UsageWindow {
 
     /// Shows or hides it with the tiles, never activating it.
     pub fn set_shown(&self, shown: bool) {
+        if !shown {
+            self.search.leave(false, false);
+        }
         unsafe {
             let _ = ShowWindow(self.hwnd, if shown { SW_SHOWNOACTIVATE } else { SW_HIDE });
         }
@@ -302,6 +311,9 @@ impl UsageWindow {
             let _ = GetWindowRect(self.hwnd, &mut r);
         }
         let changed = (r.right - r.left, r.bottom - r.top) != (w, h);
+        if self.search.typing() {
+            self.search.reanchor(&self.anchor());
+        }
         if changed {
             unsafe {
                 let _ = SetWindowPos(
@@ -338,6 +350,7 @@ impl UsageWindow {
             .duration_since(SystemTime::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
         let layout = self.layout.borrow();
+        let search = self.search.look(&self.anchor_of(&layout));
         let scene = UsageScene {
             layout: &layout,
             collapsed: self.collapsed.get(),
@@ -385,6 +398,7 @@ impl UsageWindow {
             hot: self.hot.get(),
             pressed: self.pressed.get(),
             open: self.open.get(),
+            search: search.as_ref().map(|s| s.field(layout.search)),
         };
         let result = slot
             .as_ref()
@@ -412,9 +426,54 @@ impl UsageWindow {
                 Row::Account => tip::Row::Account,
                 Row::Version => tip::Row::Version,
             }),
+            // The placeholder says it, and a tip would cover the list.
+            UsageHit::Search if self.search.typing() => return None,
             _ => None,
         };
         tip::usage(hot, row, self.locked.get())
+    }
+
+    /// Where the search field is, for its list and its caret.
+    fn anchor(&self) -> Anchor {
+        self.anchor_of(&self.layout.borrow())
+    }
+
+    fn anchor_of(&self, l: &UsageLayout) -> Anchor {
+        let s = self.scale();
+        let (x, y) = self.position();
+        let r = l.search;
+        let px = |v: f32| (v * s).round() as i32;
+        Anchor {
+            field: RECT {
+                left: x + px(r.x),
+                top: y + px(r.y),
+                right: x + px(r.right()),
+                bottom: y + px(r.bottom()),
+            },
+            inner: layout::search_inner(&r),
+            scale: s,
+        }
+    }
+
+    /// A point in the window in DIPs.
+    fn point(&self, lparam: LPARAM) -> (f32, f32) {
+        let s = self.scale();
+        let x = (lparam.0 & 0xffff) as i16 as f32 / s;
+        let y = ((lparam.0 >> 16) & 0xffff) as i16 as f32 / s;
+        (x, y)
+    }
+
+    /// Whether the cursor is over the search field's text, for the I-beam.
+    fn over_text(&self) -> bool {
+        let mut p = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut p);
+            let _ = ScreenToClient(self.hwnd, &mut p);
+        }
+        let s = self.scale();
+        let field: Rect = self.layout.borrow().search;
+        let text = Rect::new(field.x + 26.0, field.y, field.w - 26.0, field.h);
+        text.contains(p.x as f32 / s, p.y as f32 / s)
     }
 
     fn hover(&self, hot: UsageHit) {
@@ -468,7 +527,8 @@ impl UsageWindow {
                 }
                 None => {}
             },
-            UsageHit::Nothing => {}
+            // A press on the field takes the keyboard before any click.
+            UsageHit::Search | UsageHit::Nothing => {}
         }
     }
 
@@ -549,6 +609,9 @@ impl UsageWindow {
     }
 
     fn handle(&self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
+        if let Some(r) = self.search.handle(msg, wparam) {
+            return Some(r);
+        }
         match msg {
             WM_PAINT => {
                 self.paint();
@@ -591,6 +654,26 @@ impl UsageWindow {
             WM_MOUSEWHEEL => {
                 let notches = ((wparam.0 >> 16) & 0xffff) as i16 as i32 / 120;
                 app::push(Input::Scroll(columns::USAGE.into(), notches));
+                Some(LRESULT(0))
+            }
+            WM_SETCURSOR if (lparam.0 & 0xffff) as u32 == HTCLIENT && self.over_text() => {
+                unsafe {
+                    let _ = LoadCursorW(None, IDC_IBEAM).map(|c| SetCursor(Some(c)));
+                }
+                Some(LRESULT(1))
+            }
+            WM_MOVE => {
+                if self.search.typing() {
+                    self.search.reanchor(&self.anchor());
+                }
+                None
+            }
+            WM_LBUTTONDOWN if self.hit(lparam) == UsageHit::Search => {
+                tip::press(self.hwnd);
+                // Shift held extends the selection, as in any field.
+                let extend = wparam.0 & 0x4 != 0;
+                let (x, _) = self.point(lparam);
+                self.search.begin(&self.anchor(), Some((x, extend)));
                 Some(LRESULT(0))
             }
             WM_LBUTTONDOWN => {

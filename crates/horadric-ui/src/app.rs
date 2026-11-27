@@ -768,6 +768,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     usage::register_class()?;
     dropdown::register_class()?;
     crate::suggest::register_class()?;
+    crate::finder::register_class()?;
     settings::register_class()?;
     ask::register_class()?;
     menu::register_class()?;

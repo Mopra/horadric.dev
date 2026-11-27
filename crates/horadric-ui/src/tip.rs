@@ -237,6 +237,7 @@ pub fn usage(hit: UsageHit, row: Option<Row>, locked: bool) -> Option<&'static s
         }
         (UsageHit::Setting(_), Some(Row::Account)) => "Switch to another account",
         (UsageHit::Setting(_), Some(Row::Version)) => "Read the release notes",
+        (UsageHit::Search, _) => "Find any conversation in any project, and carry it on",
         (UsageHit::Setting(_), None) | (UsageHit::Nothing, _) => return None,
     })
 }

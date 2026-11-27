@@ -64,9 +64,9 @@ use crate::board::{Ink, RowState};
 use crate::files::{Row, Tree};
 use crate::layout::{
     self, AskLayout, Button, CaptionHit, CaptionLayout, CatchupLayout, CatchupRow, ClusterLayout,
-    DialogHit, DialogLayout, DropdownLayout, FilesLayout, Hit, MenuLayout, Metrics, Rect,
-    SettingRow, SettingsHit, SettingsLayout, StartHit, StartLayout, SuggestLayout, TasksLayout,
-    ToastLayout, TomeLayout, UsageHit, UsageLayout, KNOB_R,
+    DialogHit, DialogLayout, DropdownLayout, FilesLayout, FinderLayout, Hit, MenuLayout, Metrics,
+    Rect, SettingRow, SettingsHit, SettingsLayout, StartHit, StartLayout, SuggestLayout,
+    TasksLayout, ToastLayout, TomeLayout, UsageHit, UsageLayout, FINDER_ROW_H, KNOB_R,
 };
 use crate::motion;
 use crate::portal_key::Look as PortalLook;
@@ -498,6 +498,9 @@ pub struct UsageScene<'a> {
     pub pressed: Option<UsageHit>,
     /// The setting whose list is dropped down.
     pub open: Option<usize>,
+    /// The search field at the bottom. None when its text could not be
+    /// laid out, which leaves the well blank.
+    pub search: Option<FieldLook<'a>>,
 }
 
 /// A setting as the usage window shows it.
@@ -569,6 +572,33 @@ pub struct SuggestScene<'a> {
     /// The row the arrow keys are on.
     pub chosen: Option<usize>,
     pub hot: Option<usize>,
+}
+
+/// Everything one frame of the conversations the usage window's search
+/// found needs.
+pub struct FinderScene<'a> {
+    pub layout: &'a FinderLayout,
+    /// The rows shown, from the first one scrolled to.
+    pub rows: &'a [FoundLook],
+    /// The row the keys or the mouse are on, counted among those shown.
+    pub chosen: Option<usize>,
+    /// The first row shown and how many there are, for the thumb.
+    pub top: usize,
+    pub total: usize,
+    /// Said while there are no rows.
+    pub note: &'a str,
+}
+
+/// A conversation as the search's list shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FoundLook {
+    pub title: String,
+    /// Its project and how long ago, right of the title.
+    pub meta: String,
+    /// The words it was found by, fainter on the line below.
+    pub snippet: String,
+    /// A tile holds it already, so a pick shows that tile.
+    pub held: bool,
 }
 
 /// Everything one frame of a menu needs.
@@ -1020,6 +1050,16 @@ impl Target {
         unsafe {
             self.rt.BeginDraw();
             self.lit(|p| p.suggest(gpu, m, scene));
+            self.rt.EndDraw(None, None)
+        }
+    }
+
+    /// Draws the conversations a search found. `Err` means the target
+    /// must be recreated.
+    pub fn draw_finder(&self, gpu: &Gpu, m: &Metrics, scene: &FinderScene) -> Result<()> {
+        unsafe {
+            self.rt.BeginDraw();
+            self.lit(|p| p.finder(gpu, m, scene));
             self.rt.EndDraw(None, None)
         }
     }
@@ -1613,6 +1653,37 @@ impl Painter<'_> {
             let b = scene.button(UsageHit::Setting(i));
             self.setting(gpu, m, row, look, b, scene.open == Some(i));
         }
+        self.search_field(gpu, &l.search, scene);
+    }
+
+    /// The usage window's search: a well like the Settings window's, its
+    /// magnifier lit while it has the keyboard or the cursor.
+    unsafe fn search_field(&self, gpu: &Gpu, r: &Rect, scene: &UsageScene) {
+        let radius = 8.0;
+        self.sunk(gpu, r, radius, theme::well());
+        let focused = scene.search.as_ref().is_some_and(|f| f.focused);
+        if focused {
+            self.stroke_rounded(
+                &r.inset(0.5),
+                radius,
+                theme::working().with_alpha(0.55),
+                1.0,
+            );
+        }
+        let ink = if focused || scene.hot == UsageHit::Search {
+            theme::text()
+        } else {
+            theme::text_dim()
+        };
+        self.icon(
+            &gpu.icon_small,
+            ink,
+            '\u{E721}',
+            Rect::new(r.x + 9.0, r.y + 1.0, 16.0, r.h),
+        );
+        if let Some(f) = &scene.search {
+            self.field_text(gpu, f, &layout::search_inner(r));
+        }
     }
 
     /// A portal of `c` centred on `at` with radii `r`: an oval with light
@@ -2023,6 +2094,66 @@ impl Painter<'_> {
             let x = inner.x + w + 14.0;
             let rest = Rect::new(x, inner.y, inner.right() - x, inner.h);
             self.text(&gpu.small, theme::legend(), address, rest);
+        }
+    }
+
+    /// The conversations a search found, on a plate of their own like the
+    /// address field's suggestions: each one's title in bold with its
+    /// project and age to the right, the words it was found by under it,
+    /// and the one the keys or the mouse are on lit.
+    unsafe fn finder(&self, gpu: &Gpu, m: &Metrics, scene: &FinderScene) {
+        let l = scene.layout;
+        self.plate(m, l.size);
+        if scene.rows.is_empty() {
+            let n = l.note;
+            let at = Rect::new(n.x + 12.0, n.y, n.w - 24.0, n.h);
+            self.text(&gpu.small, theme::legend(), scene.note, at);
+            return;
+        }
+        let pad = 12.0;
+        for (i, (r, row)) in l.rows.iter().zip(scene.rows).enumerate() {
+            let lit = scene.chosen == Some(i);
+            if lit {
+                self.fill_rounded(&r.inset(1.0), 7.0, theme::hover_fill());
+            }
+            let ink = if lit {
+                theme::text()
+            } else {
+                theme::text_dim().mix(theme::text(), 0.5)
+            };
+            let inner = Rect::new(r.x + pad, r.y + 5.0, r.w - 2.0 * pad, r.h - 10.0);
+            let top = Rect::new(inner.x, inner.y, inner.w, 20.0);
+            let under = Rect::new(inner.x, top.bottom(), inner.w, inner.h - top.h);
+            let mut meta_w = self.measure(gpu, &gpu.small, &row.meta).min(inner.w * 0.45);
+            if row.held {
+                // A lamp, as a checked menu line has, says a tile holds it.
+                let cy = top.y + top.h / 2.0;
+                self.led(inner.right() - meta_w - 9.0, cy, theme::text());
+                meta_w += 16.0;
+            }
+            self.text(&gpu.small_right, theme::legend(), &row.meta, top);
+            let title = Rect::new(top.x, top.y, inner.w - meta_w - 14.0, top.h);
+            self.text(&gpu.small_bold, ink, &row.title, title);
+            self.text(
+                &gpu.small,
+                theme::text_dim().fade(0.85),
+                &row.snippet,
+                under,
+            );
+        }
+        // Where the view is in a list longer than the window.
+        let shown = l.rows.len();
+        if scene.total > shown {
+            let first = l.rows[0];
+            let track = shown as f32 * FINDER_ROW_H;
+            let total = scene.total as f32;
+            let thumb_h = (track * shown as f32 / total).max(12.0);
+            let thumb_y = first.y + (track - thumb_h) * scene.top as f32 / (total - shown as f32);
+            self.fill_rounded(
+                &Rect::new(first.right() - 1.0, thumb_y, 3.0, thumb_h),
+                1.5,
+                theme::text_dim().with_alpha(0.5),
+            );
         }
     }
 
@@ -2518,7 +2649,13 @@ impl Painter<'_> {
                 1.0,
             );
         }
-        let inner = layout::ask_inner(&f.rect);
+        self.field_text(gpu, f, &layout::ask_inner(&f.rect));
+    }
+
+    /// A field's text inside `inner`: the selection under it, the
+    /// placeholder while it is empty, and the caret.
+    unsafe fn field_text(&self, gpu: &Gpu, f: &FieldLook, inner: &Rect) {
+        let inner = *inner;
         self.rt.PushAxisAlignedClip(
             &rect(&Rect::new(inner.x - 2.0, inner.y, inner.w + 4.0, inner.h)),
             D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,

@@ -50,7 +50,7 @@ pub fn pick_nested(id: usize, first: usize) -> Option<(usize, Pick)> {
 }
 
 /// "now", "12 min", "5 h", "3 days", "6 weeks".
-fn ago_text(d: Duration) -> String {
+pub fn ago_text(d: Duration) -> String {
     let min = d.as_secs() / 60;
     let (h, days) = (min / 60, min / 1440);
     match () {
