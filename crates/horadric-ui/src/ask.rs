@@ -58,7 +58,7 @@ pub(crate) const CLASS: PCWSTR = w!("HoradricAsk");
 const MAX_LEN: usize = 200;
 /// A secret is a token or a key pasted whole, and one cut short would
 /// fail later with nothing to say why.
-const MAX_SECRET: usize = 16 * 1024;
+pub(crate) const MAX_SECRET: usize = 16 * 1024;
 /// Notes go to the agent with the task, so they may run to a few
 /// paragraphs.
 const MAX_NOTES: usize = 4000;
@@ -498,6 +498,7 @@ impl<'a> Popup<'a> {
                 selection: render::range_rects(text, a, b - a),
                 caret: (focused && self.lit.get()).then_some(caret),
                 focused,
+                keep_right: 0.0,
             });
         }
         let list = self.list.borrow();
@@ -950,13 +951,13 @@ impl<'a> Popup<'a> {
 }
 
 /// The work area of the screen `r` is on, as left, top, right, bottom.
-fn too_long(room: usize) -> String {
+pub(crate) fn too_long(room: usize) -> String {
     format!("Longer than the {room} characters there is room for. A longer value goes in with horadric secret set NAME in a terminal")
 }
 
 /// What a paste into a secret field adds, or why it is refused: one line
 /// with what surrounds it trimmed, all of it or none.
-fn secret_paste(s: &str, room: usize) -> std::result::Result<String, String> {
+pub(crate) fn secret_paste(s: &str, room: usize) -> std::result::Result<String, String> {
     let s = s.trim();
     if s.contains(['\n', '\r']) {
         return Err("It has line breaks inside. A value of more than one line goes in with horadric secret set NAME in a terminal".into());

@@ -1,12 +1,15 @@
-//! The Vault's rows in the Settings window: a project's identity and the
-//! secrets and web logins its sessions get, in the Projects section, and
-//! the identities themselves in a section of their own. See
-//! docs/plan/vault.md, "Whose is what", "Logging in" and "Adding one".
+//! The Vault's rows in the Settings window: a project's identity and a
+//! line on what it keeps in the Projects section, the secrets and web
+//! logins its sessions get in the Secrets section, and the identities in
+//! one of their own. See docs/plan/vault.md, "Whose is what", "Logging in"
+//! and "Adding one".
 //!
-//! A row's click is taken here, not by the app: every one of them asks
-//! something, and a question runs a modal loop, so it waits for a timer to
-//! fire outside every borrow. Values are never shown, only names, whose
-//! they are and when they were last used.
+//! A row's click is taken here, not by the app. An identity's rows ask
+//! something, and a question runs a modal loop, so their clicks wait for a
+//! timer to fire outside every borrow. The Secrets section asks nothing in
+//! a window of its own: its forms are rows typed into in place (see
+//! [`super::secrets`]). Values are never shown, only names, whose they are
+//! and when they were last used.
 
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -15,15 +18,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use horadric_core::session::Phase;
 use horadric_core::vault::identity as core;
-use horadric_core::vault::secret::{valid_name, Owner};
+use horadric_core::vault::secret::Owner;
 use horadric_core::vault::web;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{KillTimer, SetTimer};
 
 use super::identity::{self, Git, Identity, Resolved, Tool};
-use super::store::{self, Used};
+use super::secrets::{self, Form, Group, Save, Slot, Ui, View};
+use super::store;
 use crate::ask;
 use crate::dialog::{self, Dialog, Tone};
+use crate::field::{self, Field as Text};
 use crate::settings::{Control, Field, Line};
 use crate::window::Shared;
 
@@ -35,13 +40,38 @@ pub enum Row {
     Pick,
     /// Running sessions still on the identity they started with.
     LeftBehind,
+    /// What the project keeps, counted, which opens the Secrets section.
+    Summary,
     /// A secret kept for the project, its identity or Everywhere.
     Secret(u16),
     Login(u16),
     /// A name the project's config.json asks for that is not kept.
     Missing(u16),
-    AddSecret,
-    AddLogin,
+    /// The Secrets section's filter by name.
+    Filter,
+    /// Add a secret, Add a web login.
+    Adds,
+    /// A group's heading, which folds it.
+    Group(Group),
+    /// A line of what an opened item says.
+    Detail,
+    /// One thing the opened item is allowed always for, with its Remove.
+    Allowed(u16),
+    /// What can be done to the opened item, or Forget waiting to be sure.
+    Actions,
+    /// What a form is for.
+    FormTitle,
+    /// A field of the form.
+    Input(Slot),
+    /// What is wrong with a field of the form.
+    Wrong(Slot),
+    /// Whose a new item is.
+    Whose,
+    /// Why a paste or a keystroke was refused.
+    Refused,
+    /// Why the last change could not be kept.
+    Failed,
+    FormButtons,
     AddIdentity,
     /// Said under Add when there is no identity yet.
     NoIdentity,
@@ -61,14 +91,27 @@ pub enum Row {
 pub fn help(row: Row) -> &'static str {
     match row {
         Row::Pick => "Whose git, gh, npm and Vercel logins its new sessions get",
+        Row::Summary => "Tokens and web logins its sessions use but never read",
         Row::LeftBehind => "A session keeps the logins it started with until it restarts",
         Row::Secret(_) => "Its sessions use it through secret run, never read it",
         Row::Login(_) => "Its sessions sign in with it in the browser pane, never read it",
         Row::Missing(_) => "Its config.json asks for it and none is kept",
-        Row::AddSecret => "A token its sessions may use but never read",
-        Row::AddLogin => "A site its sessions may sign in to in the browser pane",
         Row::AddIdentity => "One of your worlds, with git and logins of its own",
-        Row::NoIdentity | Row::Heading(_) => "",
+        Row::NoIdentity
+        | Row::Heading(_)
+        | Row::Filter
+        | Row::Adds
+        | Row::Group(_)
+        | Row::Detail
+        | Row::Allowed(_)
+        | Row::Actions
+        | Row::FormTitle
+        | Row::Input(_)
+        | Row::Wrong(_)
+        | Row::Whose
+        | Row::Refused
+        | Row::Failed
+        | Row::FormButtons => "",
         Row::Afar => "Its identity and secrets are that machine's",
         Row::Problem => "Nothing kept shows or can be added until it opens",
         Row::Name(_) => "Rename it, or delete it and its logins",
@@ -83,14 +126,27 @@ pub fn help(row: Row) -> &'static str {
 fn label(row: Row) -> &'static str {
     match row {
         Row::Pick => "Identity",
+        Row::Summary => "Secrets",
         Row::LeftBehind => "Running sessions",
         Row::Secret(_) => "Secret",
         Row::Login(_) => "Web login",
         Row::Missing(_) => "Wanted by config.json",
-        Row::AddSecret => "Add a secret",
-        Row::AddLogin => "Add a web login",
         Row::AddIdentity => "Add an identity",
-        Row::NoIdentity | Row::Heading(_) => "",
+        Row::Input(slot) => slot.label(),
+        Row::Filter => "Find by name",
+        Row::Whose => "Whose",
+        Row::NoIdentity
+        | Row::Heading(_)
+        | Row::Adds
+        | Row::Group(_)
+        | Row::Detail
+        | Row::Allowed(_)
+        | Row::Actions
+        | Row::FormTitle
+        | Row::Wrong(_)
+        | Row::Refused
+        | Row::Failed
+        | Row::FormButtons => "",
         Row::Afar => "Vault",
         Row::Problem => "Secrets file",
         Row::Name(_) => "Name",
@@ -104,78 +160,12 @@ fn line(row: Row, value: String, control: Control) -> Line {
     let field = Field::Vault(row);
     Line {
         field,
-        label: label(row),
+        label: label(row).into(),
         value,
         control,
         help: field.help(),
-    }
-}
-
-/// A kept secret or web login as the rows show it: never its value.
-#[derive(Clone, Debug, Default)]
-struct Kept {
-    name: String,
-    owner: Option<Owner>,
-    /// Another of the same name beats it for this project.
-    beaten: bool,
-    /// Programs for a secret, project keys for a web login.
-    allowed: Vec<String>,
-    last: Option<Used>,
-    origins: Vec<String>,
-    user: String,
-    totp: bool,
-}
-
-impl Kept {
-    fn owner(&self) -> Owner {
-        self.owner.clone().unwrap_or(Owner::Everywhere)
-    }
-}
-
-/// Everything the rows show, read once and again after a change, not at
-/// every paint: the identities file and the sealed store are files.
-#[derive(Default)]
-struct View {
-    built: bool,
-    /// The project it was read for, "" for none.
-    key: String,
-    resolved: Option<Resolved>,
-    /// The human's pick on this machine, "" for none.
-    pick: Option<String>,
-    /// The slug the project's config.json names.
-    file: Option<String>,
-    secrets: Vec<Kept>,
-    logins: Vec<Kept>,
-    missing: Vec<String>,
-    /// Why the secrets file would not open, which leaves every row empty.
-    problem: Option<String>,
-    ids: Vec<Identity>,
-    /// Per identity, in `Tool::ALL`'s order: None when the tool is not
-    /// its own, Some(None) when it is but nobody is logged in.
-    who: Vec<[Option<Option<String>>; 3]>,
-}
-
-impl View {
-    fn identity_name(&self, slug: &str) -> String {
-        self.ids
-            .iter()
-            .find(|i| i.slug == slug)
-            .map_or_else(|| slug.to_string(), |i| i.name.clone())
-    }
-
-    fn whose(&self, owner: &Owner) -> String {
-        match owner {
-            Owner::Project(_) => "this project's".into(),
-            Owner::Identity(slug) => format!("{}'s", self.identity_name(slug)),
-            Owner::Everywhere => "everywhere".into(),
-        }
-    }
-
-    fn slug(&self) -> Option<String> {
-        self.resolved
-            .as_ref()
-            .and_then(|r| r.slug())
-            .map(String::from)
+        parts: Vec::new(),
+        nested: false,
     }
 }
 
@@ -184,6 +174,9 @@ thread_local! {
     static SHARED: RefCell<Option<Rc<Shared>>> = const { RefCell::new(None) };
     static PENDING: Cell<Option<Row>> = const { Cell::new(None) };
     static BUSY: Cell<bool> = const { Cell::new(false) };
+    /// The Secrets section's folds, filter, opened item and form, for as
+    /// long as the Settings window is open.
+    static UI: RefCell<Ui> = RefCell::new(Ui::default());
 }
 
 /// What the questions are drawn with, from the Settings window.
@@ -211,14 +204,6 @@ fn read_text(path: &Path) -> String {
     text.strip_prefix('\u{feff}')
         .map(String::from)
         .unwrap_or(text)
-}
-
-fn rank(owner: &Owner) -> u8 {
-    match owner {
-        Owner::Project(_) => 0,
-        Owner::Identity(_) => 1,
-        Owner::Everywhere => 2,
-    }
 }
 
 /// The identities kept on this machine. None under test, so a test does
@@ -262,46 +247,11 @@ fn build(key: &str) -> View {
     v.file = core::config_identity(&config);
     let slug = resolved.slug().map(String::from);
     v.resolved = Some(resolved);
-    let ours = |o: &Owner| match o {
-        Owner::Project(k) => k == key,
-        Owner::Identity(s) => Some(s) == slug.as_ref(),
-        Owner::Everywhere => true,
-    };
     v.problem = store::problem();
     // The listing, not the store itself: a view kept between paints holds
     // no value, password or seed.
-    let (mut secrets, mut logins): (Vec<Kept>, Vec<Kept>) = (Vec::new(), Vec::new());
-    for l in store::listing(key, slug.as_deref()) {
-        if !ours(&l.owner) {
-            continue;
-        }
-        let kind = l.kind;
-        let k = Kept {
-            name: l.name,
-            owner: Some(l.owner),
-            beaten: l.beaten,
-            allowed: l.allowed,
-            last: l.last_used,
-            origins: l.origins,
-            user: l.user,
-            totp: l.has_totp,
-        };
-        match kind {
-            store::Kind::Secret => secrets.push(k),
-            store::Kind::WebLogin => logins.push(k),
-        }
-    }
-    for list in [&mut secrets, &mut logins] {
-        list.sort_by(|a, b| {
-            (rank(&a.owner()), a.name.as_str()).cmp(&(rank(&b.owner()), b.name.as_str()))
-        });
-    }
-    v.missing = core::config_secrets(&config)
-        .into_iter()
-        .filter(|n| !secrets.iter().chain(&logins).any(|k| k.name == *n))
-        .collect();
-    v.secrets = secrets;
-    v.logins = logins;
+    let listing = store::listing(key, slug.as_deref());
+    v.fill(key, slug.as_deref(), listing, core::config_secrets(&config));
     v
 }
 
@@ -338,22 +288,15 @@ fn now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-fn used(last: &Option<Used>) -> String {
-    match last {
-        Some(u) => format!("used {}", ago(u.at, now())),
-        None => "never used".into(),
-    }
-}
-
 /// The last part of a path or a URL's host, for a line's room.
-fn short(path: &str) -> &str {
+pub(super) fn short(path: &str) -> &str {
     path.trim_end_matches(['/', '\\'])
         .rsplit(['/', '\\'])
         .next()
         .unwrap_or(path)
 }
 
-fn host(origin: &str) -> &str {
+pub(super) fn host(origin: &str) -> &str {
     origin.split_once("://").map_or(origin, |(_, h)| h)
 }
 
@@ -368,7 +311,8 @@ fn few(names: &[String]) -> String {
 }
 
 /// The Projects section's Vault rows for the project `key`, none without
-/// one.
+/// one: its identity, and what it keeps counted, which opens the Secrets
+/// section.
 pub fn project_lines(key: &str) -> Vec<Line> {
     if key.is_empty() {
         return Vec::new();
@@ -382,10 +326,10 @@ pub fn project_lines(key: &str) -> Vec<Line> {
     }
     with_view(Some(key), |v| {
         let mut rows = Vec::new();
-        if let Some(why) = &v.problem {
+        if v.problem.is_some() {
             rows.push(line(
                 Row::Problem,
-                format!("Will not open: {why}"),
+                "Will not open, see Secrets".into(),
                 Control::Note,
             ));
         }
@@ -393,30 +337,7 @@ pub fn project_lines(key: &str) -> Vec<Line> {
         if let Some(value) = left_behind_value(v, key) {
             rows.push(line(Row::LeftBehind, value, Control::Button));
         }
-        for (i, s) in v.secrets.iter().enumerate() {
-            let mut value = format!("{}, {}, {}", s.name, v.whose(&s.owner()), used(&s.last));
-            if s.beaten {
-                value.push_str(", another wins");
-            }
-            rows.push(line(Row::Secret(i as u16), value, Control::Button));
-        }
-        for (i, l) in v.logins.iter().enumerate() {
-            let site = l.origins.first().map_or("", |o| host(o));
-            let mut value = format!("{}, {site} as {}, {}", l.name, l.user, v.whose(&l.owner()));
-            if l.beaten {
-                value.push_str(", another wins");
-            }
-            rows.push(line(Row::Login(i as u16), value, Control::Button));
-        }
-        for (i, n) in v.missing.iter().enumerate() {
-            rows.push(line(
-                Row::Missing(i as u16),
-                format!("{n}, not kept, add it"),
-                Control::Button,
-            ));
-        }
-        rows.push(line(Row::AddSecret, "Add\u{2026}".into(), Control::Button));
-        rows.push(line(Row::AddLogin, "Add\u{2026}".into(), Control::Button));
+        rows.push(line(Row::Summary, secrets::summary(v), Control::Button));
         rows
     })
 }
@@ -564,6 +485,593 @@ pub fn identity_lines() -> Vec<Line> {
         }
         rows
     })
+}
+
+/// The Secrets section's rows for the project `key`, under its picker.
+pub fn secrets_lines(key: &str) -> Vec<Line> {
+    if key.is_empty() {
+        return Vec::new();
+    }
+    if afar(key) {
+        let mut rows = vec![line(
+            Row::Afar,
+            "Kept on the machine it runs on".into(),
+            Control::Note,
+        )];
+        // A draft begun in another project still shows, here too: a live
+        // draft is never hidden.
+        UI.with(|u| {
+            if let Some(form) = &u.borrow().form {
+                secrets::form_lines(form, false, &mut rows);
+            }
+        });
+        return rows;
+    }
+    let now = now();
+    with_view(Some(key), |v| {
+        UI.with(|u| secrets::lines(v, &u.borrow(), now))
+    })
+}
+
+/// Every item the project `key` keeps or misses, one row each, for the
+/// window's search to find by name.
+pub fn secret_items(key: &str) -> Vec<Line> {
+    if key.is_empty() || afar(key) {
+        return Vec::new();
+    }
+    let now = now();
+    with_view(Some(key), |v| secrets::items(v, now))
+}
+
+/// What the Settings window does after the Secrets section took a click
+/// or a key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum After {
+    Nothing,
+    /// The keyboard goes to this row.
+    Focus(Row),
+    /// The keyboard goes to this part of this row.
+    FocusPart(Row, usize),
+}
+
+thread_local! {
+    /// When Forget was pressed, so a second click of a double click or a
+    /// key held down never lands on what it turned into.
+    static ASKED: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
+}
+
+/// Whether a confirm press `since` after Forget's is too soon to be meant:
+/// within the double click time `double_ms`.
+fn too_soon(since: std::time::Duration, double_ms: u32) -> bool {
+    since.as_millis() < u128::from(double_ms)
+}
+
+fn double_click_ms() -> u32 {
+    unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime() }
+}
+
+/// A change to the sealed store a click asks for, made once every borrow
+/// of the view is let go: a change reads the view again.
+enum Deed {
+    Save(Save),
+    Forget(secrets::ItemId),
+    /// Stops allowing one Always of an item.
+    Unallow(secrets::ItemId, String),
+}
+
+/// The keyboard to the open form, at its first empty field.
+fn to_form(ui: &Ui) -> After {
+    ui.form
+        .as_ref()
+        .map_or(After::Nothing, |f| After::Focus(Row::Input(f.first())))
+}
+
+/// Starts `form`, or, when a draft is open, goes back to that one.
+fn start(ui: &mut Ui, form: Form) -> After {
+    ui.start(form);
+    to_form(ui)
+}
+
+fn clicked(v: &View, ui: &mut Ui, row: Row, part: Option<usize>) -> (After, Option<Deed>) {
+    let expanded = ui.expanded.clone();
+    let kept = expanded
+        .as_ref()
+        .and_then(|id| v.find(id).map(|i| (id.clone(), i)));
+    let nothing = (After::Nothing, None);
+    let home = secrets::Home::of(v);
+    match (row, part) {
+        (Row::Adds, Some(0)) => (start(ui, Form::add_secret(&home, "")), None),
+        (Row::Adds, Some(1)) => (start(ui, Form::add_login(&home)), None),
+        (Row::Group(g), _) => {
+            ui.fold(g);
+            nothing
+        }
+        (Row::Secret(_) | Row::Login(_), _) => {
+            if let Some(id) = secrets::item_at(v, row) {
+                ui.open(id);
+            }
+            (After::Focus(row), None)
+        }
+        (Row::Missing(i), _) => match v.missing.get(i as usize) {
+            Some(name) => (start(ui, Form::add_secret(&home, name)), None),
+            None => nothing,
+        },
+        (Row::Allowed(j), Some(0)) => {
+            let Some((id, i)) = kept else {
+                return nothing;
+            };
+            let entry = match id.kind {
+                store::Kind::Secret => v.secrets.get(i as usize),
+                store::Kind::WebLogin => v.logins.get(i as usize),
+            }
+            .and_then(|k| k.allowed.get(j as usize).cloned());
+            match entry {
+                Some(e) => (After::Nothing, Some(Deed::Unallow(id, e))),
+                None => nothing,
+            }
+        }
+        (Row::Actions, Some(j)) => {
+            let Some((id, _)) = kept else {
+                return nothing;
+            };
+            let kind = id.kind;
+            let login = kind == store::Kind::WebLogin;
+            let keep = secrets::keep_part(kind);
+            match (ui.confirm, login, j) {
+                (true, _, j) if j != keep => {
+                    let early = ASKED
+                        .with(Cell::get)
+                        .is_some_and(|at| too_soon(at.elapsed(), double_click_ms()));
+                    if early {
+                        return nothing;
+                    }
+                    (After::Nothing, Some(Deed::Forget(id)))
+                }
+                // Kept: the keyboard goes back to Forget, where Keep it
+                // stood.
+                (true, _, _) => {
+                    ui.confirm = false;
+                    (
+                        After::FocusPart(Row::Actions, if login { 2 } else { 1 }),
+                        None,
+                    )
+                }
+                (false, false, 0) => (start(ui, Form::replace(&home, id, Slot::Value)), None),
+                (false, true, 0) => (start(ui, Form::replace(&home, id, Slot::Password)), None),
+                (false, true, 1) => (start(ui, Form::replace(&home, id, Slot::Seed)), None),
+                (false, _, _) => {
+                    ui.confirm = true;
+                    ASKED.with(|a| a.set(Some(std::time::Instant::now())));
+                    (After::FocusPart(Row::Actions, keep), None)
+                }
+            }
+        }
+        (Row::Whose, Some(j)) => {
+            if let Some(form) = ui.form.as_mut() {
+                if let Some((w, _)) = secrets::offers(&form.home).get(j) {
+                    form.whose = *w;
+                    form.edited(Slot::Whose);
+                }
+            }
+            nothing
+        }
+        (Row::FormButtons, Some(0)) => save(ui),
+        (Row::FormButtons, Some(_)) => {
+            ui.form = None;
+            nothing
+        }
+        (Row::Input(_), Some(1)) => {
+            if let Some(f) = ui.form.as_mut() {
+                f.shown = !f.shown;
+            }
+            nothing
+        }
+        (Row::Input(_) | Row::Filter, _) => (After::Focus(row), None),
+        _ => nothing,
+    }
+}
+
+/// Save pressed, or Enter in the form: what to keep, or every problem
+/// shown and the keyboard at the first.
+fn save(ui: &mut Ui) -> (After, Option<Deed>) {
+    let Some(form) = ui.form.as_mut() else {
+        return (After::Nothing, None);
+    };
+    match secrets::decide(form) {
+        Ok(save) => (After::Nothing, Some(Deed::Save(save))),
+        Err(wrong) => {
+            form.tried = true;
+            let at = wrong
+                .iter()
+                .map(|(s, _)| *s)
+                .find(|s| *s != Slot::Whose)
+                .map_or(After::Focus(Row::FormButtons), |s| {
+                    After::Focus(Row::Input(s))
+                });
+            (at, None)
+        }
+    }
+}
+
+/// Keeps what `deed` asks in the sealed store, or says why not in words
+/// the section shows.
+fn apply(deed: &Deed) -> Result<(), String> {
+    let gone = match deed {
+        Deed::Save(
+            Save::Value { item, .. } | Save::Password { item, .. } | Save::Seed { item, .. },
+        ) => Some(item.name.clone()),
+        _ => None,
+    };
+    match stored(deed) {
+        Ok(0) => match gone {
+            Some(name) => Err(format!("{name} is no longer kept; add it again")),
+            None => Ok(()),
+        },
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("Not kept: {e}")),
+    }
+}
+
+/// Makes the change `deed` asks, and says how many kept items it changed
+/// in place: none for a replacement means its item went meanwhile.
+fn stored(deed: &Deed) -> Result<usize, String> {
+    let mut n = 0;
+    let r = change(deed, &mut n);
+    r.map(|()| n)
+}
+
+fn change(deed: &Deed, n: &mut usize) -> Result<(), String> {
+    let same =
+        |name: &str, owner: &Owner, id: &secrets::ItemId| id.name == name && id.owner == *owner;
+    match deed {
+        Deed::Save(save) => keep(save, n),
+        Deed::Forget(id) => store::change(|v| match id.kind {
+            store::Kind::Secret => v.secrets.retain(|s| !same(&s.name, &s.owner, id)),
+            store::Kind::WebLogin => v.logins.retain(|l| !same(&l.name, &l.owner, id)),
+        }),
+        Deed::Unallow(id, entry) => store::change(|v| match id.kind {
+            store::Kind::Secret => v
+                .secrets
+                .iter_mut()
+                .filter(|s| same(&s.name, &s.owner, id))
+                .for_each(|s| s.allowed.retain(|a| a != entry)),
+            store::Kind::WebLogin => v
+                .logins
+                .iter_mut()
+                .filter(|l| same(&l.name, &l.owner, id))
+                .for_each(|l| l.allowed.retain(|a| a != entry)),
+        }),
+    }
+}
+
+/// Seals what a form saves, as the questions it replaced did: a new item
+/// takes the place of one of the same name and owner, allowed for
+/// nothing yet, and a new value is a new secret whose Always answers are
+/// asked again.
+fn keep(save: &Save, n: &mut usize) -> Result<(), String> {
+    match save {
+        Save::Secret { name, owner, value } => store::change(|v| {
+            v.secrets
+                .retain(|s| !(s.name == *name && s.owner == *owner));
+            v.secrets.push(store::Secret {
+                name: name.clone(),
+                owner: owner.clone(),
+                value: value.clone(),
+                allowed: Vec::new(),
+                last_used: None,
+            });
+        }),
+        Save::Login {
+            name,
+            owner,
+            origins,
+            user,
+            password,
+            seed,
+        } => store::change(|v| {
+            v.logins.retain(|l| !(l.name == *name && l.owner == *owner));
+            v.logins.push(store::WebLogin {
+                name: name.clone(),
+                owner: owner.clone(),
+                origins: origins.clone(),
+                user: user.clone(),
+                password: password.clone(),
+                totp: seed.clone(),
+                allowed: Vec::new(),
+                last_used: None,
+            });
+        }),
+        Save::Value { item, value } => store::change(|v| {
+            for s in v
+                .secrets
+                .iter_mut()
+                .filter(|s| s.name == item.name && s.owner == item.owner)
+            {
+                s.value = value.clone();
+                s.allowed.clear();
+                *n += 1;
+            }
+        }),
+        Save::Password { item, password } => store::change(|v| {
+            for l in v
+                .logins
+                .iter_mut()
+                .filter(|l| l.name == item.name && l.owner == item.owner)
+            {
+                l.password = password.clone();
+                *n += 1;
+            }
+        }),
+        Save::Seed { item, seed } => store::change(|v| {
+            for l in v
+                .logins
+                .iter_mut()
+                .filter(|l| l.name == item.name && l.owner == item.owner)
+            {
+                l.totp = seed.clone();
+                *n += 1;
+            }
+        }),
+    }
+}
+
+/// The item a saved form is about, to open once it is kept.
+fn saved_item(save: &Save) -> secrets::ItemId {
+    let id = |kind, name: &String, owner: &Owner| secrets::ItemId {
+        kind,
+        name: name.clone(),
+        owner: owner.clone(),
+    };
+    match save {
+        Save::Secret { name, owner, .. } => id(store::Kind::Secret, name, owner),
+        Save::Login { name, owner, .. } => id(store::Kind::WebLogin, name, owner),
+        Save::Value { item, .. } | Save::Password { item, .. } | Save::Seed { item, .. } => {
+            item.clone()
+        }
+    }
+}
+
+/// Does what a deed asks and says how it went, out of every borrow.
+fn carry_out(deed: Deed) {
+    let result = apply(&deed);
+    UI.with(|u| {
+        let mut u = u.borrow_mut();
+        match (&result, &deed) {
+            (Err(e), _) => u.failure = Some(e.clone()),
+            (Ok(()), Deed::Save(save)) => {
+                u.form = None;
+                u.failure = None;
+                u.reveal(saved_item(save));
+            }
+            (Ok(()), Deed::Forget(_)) => {
+                u.expanded = None;
+                u.confirm = false;
+                u.failure = None;
+                ASKED.with(|a| a.set(None));
+            }
+            (Ok(()), Deed::Unallow(..)) => u.failure = None,
+        }
+    });
+    stale();
+}
+
+/// A row of the Secrets section clicked, on its part `part` when it has
+/// parts.
+pub fn secrets_click(row: Row, part: Option<usize>) -> After {
+    let (after, deed) = with_view(None, |v| {
+        UI.with(|u| clicked(v, &mut u.borrow_mut(), row, part))
+    });
+    if let Some(d) = deed {
+        carry_out(d);
+    }
+    after
+}
+
+/// Enter in a field of the section: a form's saves it.
+pub fn enter(row: Row) -> After {
+    if !matches!(row, Row::Input(_)) {
+        return After::Nothing;
+    }
+    secrets_click(Row::FormButtons, Some(0))
+}
+
+/// Esc with the keyboard on `row`. A form's rows cancel it and the
+/// filter empties; false when Esc means nothing there.
+pub fn escape(row: Row) -> bool {
+    UI.with(|u| {
+        let mut u = u.borrow_mut();
+        match row {
+            Row::Input(_) | Row::Whose | Row::FormButtons if u.form.is_some() => {
+                u.form = None;
+                true
+            }
+            Row::Filter if !u.filter.text.is_empty() => {
+                u.filter.wipe();
+                true
+            }
+            _ => false,
+        }
+    })
+}
+
+/// Whether Esc with the keyboard on `row`, a button of the open form,
+/// cancels that form.
+pub fn escape_cancels(row: Row) -> bool {
+    matches!(row, Row::Whose | Row::FormButtons) && UI.with(|u| u.borrow().form.is_some())
+}
+
+/// The first field of the draft open, if one is.
+pub fn draft() -> Option<Row> {
+    UI.with(|u| u.borrow().form.as_ref().map(|f| Row::Input(f.first())))
+}
+
+/// A row the window's search found, shown in the section: the filter
+/// emptied, its group unfolded and an item opened.
+pub fn reveal(row: Row) -> After {
+    let id = with_view(None, |v| secrets::item_at(v, row));
+    UI.with(|u| {
+        let mut u = u.borrow_mut();
+        match id {
+            Some(id) => u.reveal(id),
+            None => {
+                u.filter.wipe();
+                u.folded.retain(|g| *g != Group::Missing);
+            }
+        }
+    });
+    After::Focus(row)
+}
+
+/// The Settings window closed: folds and filter are forgotten, and a draft
+/// with them, its fields zeroed as it goes.
+pub fn closed() {
+    let old = UI.with(|u| std::mem::take(&mut *u.borrow_mut()));
+    drop(old);
+}
+
+/// What the window draws of a field of the section.
+pub struct InputLook {
+    /// As drawn: dots for a secret not shown. Empty for a secret shown in
+    /// clear whose text the window already laid out at this `rev`: it is
+    /// not copied out again.
+    pub text: String,
+    /// A secret shown in clear, whose layout the window keeps while it is.
+    pub clear: bool,
+    /// The form's count of changes, for that layout.
+    pub rev: u64,
+    pub empty: bool,
+    /// In UTF-16 units, as DirectWrite counts.
+    pub caret: u32,
+    pub anchor: u32,
+    pub placeholder: &'static str,
+}
+
+/// The field of `row` as drawn. `laid` is the change count of the clear
+/// text the window has laid out already, if any.
+pub fn input_look(row: Row, laid: Option<u64>) -> Option<InputLook> {
+    UI.with(|u| {
+        let u = u.borrow();
+        let (t, secret, shown, rev, placeholder) = match row {
+            Row::Filter => (&u.filter, false, false, 0, "Part of a name"),
+            Row::Input(slot) => {
+                let f = u.form.as_ref()?;
+                (
+                    f.field(slot)?,
+                    slot.secret(),
+                    f.shown,
+                    f.rev,
+                    slot.placeholder(&f.purpose),
+                )
+            }
+            _ => return None,
+        };
+        let clear = secret && shown;
+        let text = if clear && laid == Some(rev) {
+            String::new()
+        } else {
+            secrets::display(t, secret && !shown)
+        };
+        Some(InputLook {
+            text,
+            clear,
+            rev,
+            empty: t.text.is_empty(),
+            caret: field::utf16_at(&t.text, t.caret),
+            anchor: field::utf16_at(&t.text, t.anchor),
+            placeholder,
+        })
+    })
+}
+
+/// Runs `f` on the field of `row`, told whether it holds a secret. What
+/// `f` gives back as a refusal is said under the form.
+fn edit_with(row: Row, f: impl FnOnce(&mut Text, bool) -> Option<String>) {
+    UI.with(|u| {
+        let mut u = u.borrow_mut();
+        match row {
+            Row::Filter => {
+                f(&mut u.filter, false);
+            }
+            Row::Input(slot) => {
+                let Some(form) = u.form.as_mut() else {
+                    return;
+                };
+                let Some(t) = form.field_mut(slot) else {
+                    return;
+                };
+                let refused = f(t, slot.secret());
+                form.edited(slot);
+                form.refusal = refused;
+            }
+            _ => {}
+        }
+    });
+}
+
+/// A key that edits the field of `row`: the caret moved, a character
+/// erased, undone.
+pub fn input_edit(row: Row, f: impl FnOnce(&mut Text)) {
+    edit_with(row, |t, _| {
+        f(t);
+        None
+    });
+}
+
+/// Text typed into the field of `row`. A secret's field full says so
+/// rather than cut the value short.
+pub fn input_typed(row: Row, s: &str) {
+    edit_with(row, |t, secret| {
+        if secret && t.room() == 0 {
+            return Some(ask::too_long(ask::MAX_SECRET));
+        }
+        t.insert(s);
+        None
+    });
+}
+
+/// A paste into the field of `row`. A secret is taken whole or refused
+/// with why, as the question it replaced did.
+pub fn input_paste(row: Row, s: &str) {
+    edit_with(row, |t, secret| {
+        if !secret {
+            t.insert(s);
+            return None;
+        }
+        match ask::secret_paste(s, t.room()) {
+            Ok(mut s) => {
+                t.insert(&s);
+                field::zero(&mut s);
+                None
+            }
+            Err(why) => Some(why),
+        }
+    });
+}
+
+/// The selection of the field of `row` for the clipboard, cut out of it
+/// when `cut`. None for a secret, which never leaves its field.
+pub fn input_copy(row: Row, cut: bool) -> Option<String> {
+    let mut out = None;
+    edit_with(row, |t, secret| {
+        if !secret && t.caret != t.anchor {
+            out = Some(if cut {
+                t.cut()
+            } else {
+                t.selected().to_string()
+            });
+        }
+        None
+    });
+    out
+}
+
+/// Puts the caret of the field of `row` at UTF-16 offset `at`, carrying
+/// the selection along when `extend`.
+pub fn input_caret(row: Row, at: u32, extend: bool) {
+    input_edit(row, |t| {
+        let b = field::byte_at(&t.text, at);
+        t.set_caret(b, extend);
+    });
 }
 
 /// A Vault row clicked. What it asks waits for the app's own message loop,
@@ -740,23 +1248,6 @@ fn act(row: Row) {
     match row {
         Row::Pick => pick_identity(&key),
         Row::LeftBehind => restart_left_behind(&key),
-        Row::Secret(i) => {
-            if let Some(k) = with_view(None, |v| v.secrets.get(i as usize).cloned()) {
-                kept_secret(&key, k);
-            }
-        }
-        Row::Login(i) => {
-            if let Some(k) = with_view(None, |v| v.logins.get(i as usize).cloned()) {
-                kept_login(&key, k);
-            }
-        }
-        Row::Missing(i) => {
-            if let Some(n) = with_view(None, |v| v.missing.get(i as usize).cloned()) {
-                add_secret(&key, Some(&n));
-            }
-        }
-        Row::AddSecret => add_secret(&key, None),
-        Row::AddLogin => add_login(&key),
         Row::AddIdentity => {
             if let Some(name) = type_in(
                 "Add an identity",
@@ -771,7 +1262,27 @@ fn act(row: Row) {
                 }
             }
         }
-        Row::NoIdentity | Row::Heading(_) | Row::Afar | Row::Problem => {}
+        Row::NoIdentity
+        | Row::Heading(_)
+        | Row::Afar
+        | Row::Problem
+        | Row::Summary
+        | Row::Secret(_)
+        | Row::Login(_)
+        | Row::Missing(_)
+        | Row::Filter
+        | Row::Adds
+        | Row::Group(_)
+        | Row::Detail
+        | Row::Allowed(_)
+        | Row::Actions
+        | Row::FormTitle
+        | Row::Input(_)
+        | Row::Wrong(_)
+        | Row::Whose
+        | Row::Refused
+        | Row::Failed
+        | Row::FormButtons => {}
         Row::Name(i) | Row::Git(i) | Row::Claims(i) | Row::Tool(i, _) => {
             let Some((id, who)) = with_view(None, |v| {
                 let id = v.ids.get(i as usize)?.clone();
@@ -1000,187 +1511,11 @@ fn pick_identity(key: &str) {
     }
 }
 
-/// Whose a new secret or login is: the project's, its identity's or
-/// Everywhere's. None when cancelled.
-fn ask_owner(key: &str, what: &str) -> Option<Owner> {
-    let slug = with_view(Some(key), View::slug);
-    let identity = slug
-        .as_ref()
-        .map(|s| with_view(None, |v| v.identity_name(s)));
-    let mut buttons: Vec<String> = vec!["This project".into()];
-    if let Some(name) = &identity {
-        buttons.push(name.clone());
-    }
-    buttons.push("Everywhere".into());
-    buttons.push("Cancel".into());
-    let refs: Vec<&str> = buttons.iter().map(String::as_str).collect();
-    let text = format!(
-        "Whose is {what}? A project's own wins over its identity's, which wins over Everywhere."
-    );
-    let i = choose(Tone::Question, "Whose is it", &text, &refs)?;
-    match (i, &slug) {
-        (0, _) => Some(Owner::Project(key.to_string())),
-        (1, Some(s)) => Some(Owner::Identity(s.clone())),
-        (1, None) | (2, Some(_)) => Some(Owner::Everywhere),
-        _ => None,
-    }
-}
-
-/// A name for a secret or login, asked until it is one or cancelled.
-fn ask_name(title: &str, initial: &str) -> Option<String> {
-    let mut prompt = "Its name, as an environment variable has it: upper case letters, digits and _, a letter first. GITHUB_TOKEN.";
-    loop {
-        let name = type_in(title, prompt, initial, "NAME", "go on", false)?;
-        let name = name.trim().to_string();
-        if valid_name(&name) {
-            return Some(name);
-        }
-        prompt = "That is not a name a secret can have. Upper case letters, digits and _, a letter first, at most 64.";
-    }
-}
-
-fn add_secret(key: &str, name: Option<&str>) {
-    let name = match name {
-        Some(n) => n.to_string(),
-        None => match ask_name("Add a secret", "") {
-            Some(n) => n,
-            None => return,
-        },
-    };
-    let prompt = format!("The value of {name}, one line. Pasting is fine. It is sealed for this Windows user and never shown again. More than one line goes in with horadric secret set {name} in a terminal.");
-    let Some(value) = type_in("Add a secret", &prompt, "", "", "keep it", true) else {
-        return;
-    };
-    let value = value.trim().to_string();
-    if value.is_empty() {
-        return;
-    }
-    let Some(owner) = ask_owner(key, &name) else {
-        return;
-    };
-    done(
-        "Add a secret",
-        store::change(|v| {
-            v.secrets.retain(|s| !(s.name == name && s.owner == owner));
-            v.secrets.push(store::Secret {
-                name,
-                owner,
-                value,
-                allowed: Vec::new(),
-                last_used: None,
-            });
-        }),
-    );
-}
-
-fn kept_secret(key: &str, k: Kept) {
-    let owner = k.owner();
-    let whose = with_view(Some(key), |v| v.whose(&owner));
-    let mut text = format!("Kept {whose}, {}.", used(&k.last));
-    if let Some(u) = &k.last {
-        text.push_str(&format!(
-            " Last by session {} for {}.",
-            short_id(&u.session),
-            short(&u.what)
-        ));
-    }
-    if k.beaten {
-        text.push_str(" Another of the same name wins for this project.");
-    }
-    let allowed = format!("Allowed for ({})", k.allowed.len());
-    let mut buttons = vec!["Replace", "Forget"];
-    if !k.allowed.is_empty() {
-        buttons.push(&allowed);
-    }
-    buttons.push("Keep");
-    let pressed = choose(Tone::Question, &k.name, &text, &buttons);
-    match pressed.map(|i| buttons[i]) {
-        Some("Replace") => {
-            let always = match k.allowed.len() {
-                0 => String::new(),
-                1 => " The program allowed Always is asked again.".to_string(),
-                n => format!(" The {n} programs allowed Always are asked again."),
-            };
-            let prompt = format!("The new value of {}, one line. It replaces the old one, which is not shown.{always} More than one line goes in with horadric secret set in a session's terminal.", k.name);
-            if let Some(value) = type_in(&k.name, &prompt, "", "", "replace it", true) {
-                let value = value.trim().to_string();
-                if !value.is_empty() {
-                    done(
-                        &k.name,
-                        store::change(|v| {
-                            // A new value is a new secret, as with secret
-                            // set: what was allowed for the old one is asked
-                            // again.
-                            for s in v
-                                .secrets
-                                .iter_mut()
-                                .filter(|s| s.name == k.name && s.owner == owner)
-                            {
-                                s.value = value.clone();
-                                s.allowed.clear();
-                            }
-                        }),
-                    );
-                }
-            }
-        }
-        Some("Forget") => {
-            if forget(&k.name) {
-                done(
-                    &k.name,
-                    store::change(|v| {
-                        v.secrets
-                            .retain(|s| !(s.name == k.name && s.owner == owner))
-                    }),
-                );
-            }
-        }
-        Some(b) if b == allowed => {
-            if let Some(gone) = pick_allowed(&k.name, &k.allowed, "the program") {
-                done(
-                    &k.name,
-                    store::change(|v| {
-                        for s in v
-                            .secrets
-                            .iter_mut()
-                            .filter(|s| s.name == k.name && s.owner == owner)
-                        {
-                            s.allowed.retain(|a| *a != gone);
-                        }
-                    }),
-                );
-            }
-        }
-        _ => {}
-    }
-}
-
-fn short_id(session: &str) -> &str {
-    session.get(..8).unwrap_or(session)
-}
-
-fn forget(name: &str) -> bool {
-    let text =
-        format!("Forgets {name} on this PC. Sessions asking for it after are told it is missing.");
-    choose(Tone::Warning, name, &text, &["Forget it", "Keep it"]) == Some(0)
-}
-
-/// One of `allowed` to stop allowing Always, by its last part. The whole
-/// entry.
-fn pick_allowed(name: &str, allowed: &[String], what: &str) -> Option<String> {
-    let offers: Vec<(String, String)> = allowed.iter().map(|a| allowed_offer(a)).collect();
-    let prompt = format!("Allowed Always for {name}. Pick {what} to ask about again from now on.");
-    match pick_one(name, &prompt, "remove it", &offers, false)? {
-        Picked::Offer(i) => allowed.get(i).cloned(),
-        Picked::Typed(_) => None,
-    }
-}
-
 /// How an Always reads in the list: a secret's by its program's file name,
 /// with the project and the content it was given for, since the same
 /// program may be allowed for two projects or as it was before an update.
 /// A web login's is a project key.
-fn allowed_offer(entry: &str) -> (String, String) {
+pub(super) fn allowed_offer(entry: &str) -> (String, String) {
     let parts = entry
         .strip_prefix("sha256:")
         .and_then(|rest| rest.split_once('|'))
@@ -1211,115 +1546,10 @@ fn allowed_offer(entry: &str) -> (String, String) {
     }
 }
 
-fn kept_login(key: &str, k: Kept) {
-    let owner = k.owner();
-    let whose = with_view(Some(key), |v| v.whose(&owner));
-    let sites: Vec<String> = k.origins.iter().map(|o| host(o).to_string()).collect();
-    let mut text = format!(
-        "{} as {}, kept {whose}, {}. {}",
-        sites.join(", "),
-        k.user,
-        used(&k.last),
-        if k.totp {
-            "It keeps a one time code seed too."
-        } else {
-            "No one time code seed."
-        }
-    );
-    if k.beaten {
-        text.push_str(" Another of the same name wins for this project.");
-    }
-    let allowed = format!("Allowed for ({})", k.allowed.len());
-    let mut buttons = vec!["Replace", "Forget"];
-    if !k.allowed.is_empty() {
-        buttons.push(&allowed);
-    }
-    buttons.push("Keep");
-    let pressed = choose(Tone::Question, &k.name, &text, &buttons);
-    let change = |f: &dyn Fn(&mut store::WebLogin)| {
-        store::change(|v| {
-            for l in v
-                .logins
-                .iter_mut()
-                .filter(|l| l.name == k.name && l.owner == owner)
-            {
-                f(l);
-            }
-        })
-    };
-    match pressed.map(|i| buttons[i]) {
-        Some("Replace") => {
-            let prompt = format!(
-                "A new password for {} on {}. Leave it empty to keep the one kept.",
-                k.user,
-                sites.join(", ")
-            );
-            let Some(password) = type_in(&k.name, &prompt, "", "", "go on", true) else {
-                return;
-            };
-            let Some(seed) = ask_seed(&k.name, true) else {
-                return;
-            };
-            done(
-                &k.name,
-                change(&|l| {
-                    if !password.is_empty() {
-                        l.password = password.clone();
-                    }
-                    match seed.as_deref() {
-                        Some("none") => l.totp = None,
-                        Some(s) => l.totp = Some(s.to_string()),
-                        None => {}
-                    }
-                }),
-            );
-        }
-        Some("Forget") => {
-            if forget(&k.name) {
-                done(
-                    &k.name,
-                    store::change(|v| v.logins.retain(|l| !(l.name == k.name && l.owner == owner))),
-                );
-            }
-        }
-        Some(b) if b == allowed => {
-            if let Some(gone) = pick_allowed(&k.name, &k.allowed, "the project") {
-                done(&k.name, change(&|l| l.allowed.retain(|a| *a != gone)));
-            }
-        }
-        _ => {}
-    }
-}
-
-/// A one time code seed, asked until it reads as base32 or is left out.
-/// Some(None) for none given; with `replacing`, Some(Some("none")) to take
-/// the kept one away. None when cancelled.
-fn ask_seed(title: &str, replacing: bool) -> Option<Option<String>> {
-    let mut prompt = if replacing {
-        "A new one time code seed, the text under the QR code. Empty keeps what is kept; type none to take it away."
-    } else {
-        "Its one time code seed, the text under the QR code, if the site asks for a code. Empty for none. Kept here, the second factor then lives on this PC beside the first."
-    };
-    loop {
-        let seed = type_in(title, prompt, "", "", "keep it", true)?;
-        let seed = seed.trim().to_string();
-        if seed.is_empty() {
-            return Some(None);
-        }
-        if replacing && seed.eq_ignore_ascii_case("none") {
-            return Some(Some("none".into()));
-        }
-        if seed_ok(&seed) {
-            return Some(Some(seed));
-        }
-        prompt = "That is not a seed: it is at least 16 letters A to Z and digits 2 to 7. Empty for none.";
-    }
-}
-
 /// Whether `seed` reads as a one time code seed. A site's is at least 80
 /// bits, 16 base32 characters; shorter is a typo or the wrong text copied,
 /// and would make codes the site never accepts.
-fn seed_ok(seed: &str) -> bool {
+pub(super) fn seed_ok(seed: &str) -> bool {
     let chars = seed
         .chars()
         .filter(|c| !c.is_whitespace() && !matches!(c, '-' | '='))
@@ -1391,74 +1621,6 @@ pub fn name_for(origin: &str) -> String {
     }
     name.truncate(64);
     name
-}
-
-fn add_login(key: &str) {
-    const TITLE: &str = "Add a web login";
-    let mut prompt = "The address of the page you sign in on, pasted whole is fine. More than one site: put spaces between them.".to_string();
-    let origins = loop {
-        let text = match type_in(
-            TITLE,
-            &prompt,
-            "",
-            "https://app.example.com",
-            "go on",
-            false,
-        ) {
-            Some(t) => t,
-            None => return,
-        };
-        match parse_sites(&text) {
-            Ok(o) => break o,
-            Err(why) => prompt = format!("{why}. The address of the page you sign in on."),
-        }
-    };
-    let Some(name) = ask_name(TITLE, &name_for(&origins[0])) else {
-        return;
-    };
-    let Some(user) = type_in(
-        TITLE,
-        "The user name or email you sign in with. Agents may see it.",
-        "",
-        "",
-        "go on",
-        false,
-    ) else {
-        return;
-    };
-    let prompt = format!(
-        "The password for {} on {}. Sealed for this Windows user and never shown again.",
-        user.trim(),
-        host(&origins[0])
-    );
-    let Some(password) = type_in(TITLE, &prompt, "", "", "go on", true) else {
-        return;
-    };
-    if password.is_empty() {
-        return;
-    }
-    let Some(seed) = ask_seed(TITLE, false) else {
-        return;
-    };
-    let Some(owner) = ask_owner(key, &name) else {
-        return;
-    };
-    done(
-        TITLE,
-        store::change(|v| {
-            v.logins.retain(|l| !(l.name == name && l.owner == owner));
-            v.logins.push(store::WebLogin {
-                name,
-                owner,
-                origins,
-                user: user.trim().to_string(),
-                password,
-                totp: seed,
-                allowed: Vec::new(),
-                last_used: None,
-            });
-        }),
-    );
 }
 
 fn name_of(id: &Identity) {
@@ -1849,6 +2011,13 @@ mod tests {
         assert_eq!(counted(2, 1), "2 secrets and a web login");
         assert_eq!(counted(1, 0), "a secret");
         assert_eq!(counted(0, 3), "3 web logins");
+    }
+
+    #[test]
+    fn a_confirm_inside_the_double_click_time_is_not_taken() {
+        use std::time::Duration;
+        assert!(too_soon(Duration::from_millis(200), 500));
+        assert!(!too_soon(Duration::from_millis(500), 500));
     }
 
     #[test]

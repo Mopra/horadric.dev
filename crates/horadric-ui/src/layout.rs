@@ -957,8 +957,146 @@ pub struct SettingsLayout {
     /// The box round the rows, which they are clipped to.
     pub group: Rect,
     pub rows: Vec<SettingRow>,
+    /// Each row's parts, as its [`RowShape`] asks: a field and the key
+    /// that shows it, or buttons side by side. Empty for a plain row.
+    pub parts: Vec<Vec<Rect>>,
     /// How far the rows can scroll: their height past the box's.
     pub overflow: f32,
+}
+
+/// What a row of the Settings window holds besides its line.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RowKind {
+    /// A name and a value, the row itself the one thing to click.
+    Plain,
+    /// A text field after the name, with a key at its end to show a
+    /// secret it hides.
+    Field { eye: bool },
+    /// `n` buttons, after the row's words when it has `text`. Joined, they
+    /// stand edge to edge as one picker and share all the room.
+    Buttons { n: usize, text: bool, joined: bool },
+    /// One button at the end of a line of words.
+    Trailing,
+}
+
+/// One row of the Settings window as far as laying it out goes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RowShape {
+    pub h: f32,
+    pub kind: RowKind,
+    /// Set in under the item it belongs to.
+    pub indent: bool,
+}
+
+impl RowShape {
+    pub fn plain(h: f32) -> Self {
+        RowShape {
+            h,
+            kind: RowKind::Plain,
+            indent: false,
+        }
+    }
+}
+
+/// How far a row inside an opened item is set in.
+pub const SETTINGS_INDENT: f32 = 14.0;
+/// The room a text field's name takes before the field.
+pub const SETTINGS_LABEL_W: f32 = 104.0;
+const SETTINGS_BUTTON_H: f32 = 28.0;
+const SETTINGS_BUTTON_MAX: f32 = 150.0;
+/// Buttons after words stand narrower, to leave the words room.
+const SETTINGS_BUTTON_MAX_AFTER: f32 = 110.0;
+const SETTINGS_TRAILING_W: f32 = 84.0;
+const SETTINGS_EYE_W: f32 = 30.0;
+
+/// The parts of a row at `rect` shaped `shape`.
+fn row_parts(m: &Metrics, rect: Rect, shape: &RowShape) -> Vec<Rect> {
+    let indent = if shape.indent { SETTINGS_INDENT } else { 0.0 };
+    let left = rect.x + m.setting_pad + indent;
+    let right = rect.right() - m.setting_pad;
+    let mid = |h: f32| rect.y + (rect.h - h) / 2.0;
+    match shape.kind {
+        RowKind::Plain => Vec::new(),
+        RowKind::Field { eye } => {
+            let h = (rect.h - 10.0).max(0.0);
+            let x = left + SETTINGS_LABEL_W;
+            let field = Rect::new(x, mid(h), (right - x).max(0.0), h);
+            let mut parts = vec![field];
+            if eye {
+                let e = Rect::new(
+                    field.right() - SETTINGS_EYE_W - 3.0,
+                    field.y + 3.0,
+                    SETTINGS_EYE_W,
+                    h - 6.0,
+                );
+                parts.push(e);
+            }
+            parts
+        }
+        RowKind::Buttons { n, text, joined } => {
+            if n == 0 {
+                return Vec::new();
+            }
+            let gap = if joined { 0.0 } else { 8.0 };
+            // Joined, they are a picker named by the row's label. Apart after
+            // words, they leave the words the room they do not need.
+            let from = if text && joined {
+                left + SETTINGS_LABEL_W
+            } else {
+                left
+            };
+            let most = if text && !joined {
+                SETTINGS_BUTTON_MAX_AFTER
+            } else {
+                SETTINGS_BUTTON_MAX
+            };
+            let room = (right - from - gap * (n - 1) as f32).max(0.0);
+            let w = if joined {
+                room / n as f32
+            } else {
+                (room / n as f32).min(most)
+            };
+            // Words before them: the buttons stand at the right. None: they
+            // start at the left, where a reader starts.
+            let start = if text {
+                right - w * n as f32 - gap * (n - 1) as f32
+            } else {
+                from
+            };
+            (0..n)
+                .map(|i| {
+                    Rect::new(
+                        start + i as f32 * (w + gap),
+                        mid(SETTINGS_BUTTON_H),
+                        w,
+                        SETTINGS_BUTTON_H,
+                    )
+                })
+                .collect()
+        }
+        RowKind::Trailing => vec![Rect::new(
+            right - SETTINGS_TRAILING_W,
+            mid(SETTINGS_BUTTON_H),
+            SETTINGS_TRAILING_W,
+            SETTINGS_BUTTON_H,
+        )],
+    }
+}
+
+/// Where the text of a field part stands, clear of its show key.
+pub fn settings_field_inner(field: &Rect, eye: bool) -> Rect {
+    let mut inner = ask_inner(field);
+    inner.w = (inner.w - settings_key_room(eye)).max(0.0);
+    inner
+}
+
+/// The room a field's show key takes from its text.
+pub fn settings_key_room(eye: bool) -> f32 {
+    if eye {
+        SETTINGS_EYE_W + 4.0
+    } else {
+        0.0
+    }
 }
 
 const SETTINGS_TITLE_H: f32 = 40.0;
@@ -1008,6 +1146,18 @@ pub fn settings(
     size: (f32, f32),
     scroll: f32,
 ) -> SettingsLayout {
+    let shapes: Vec<RowShape> = heights.iter().map(|h| RowShape::plain(*h)).collect();
+    settings_shaped(m, sections, &shapes, size, scroll)
+}
+
+/// [`settings`] with rows that hold more than a name and a value.
+pub fn settings_shaped(
+    m: &Metrics,
+    sections: usize,
+    shapes: &[RowShape],
+    size: (f32, f32),
+    scroll: f32,
+) -> SettingsLayout {
     let width = size.0;
     let title = Rect::new(0.0, 0.0, width, SETTINGS_TITLE_H);
     let close = Rect::new(width - m.pad - 32.0, 6.0, 32.0, SETTINGS_TITLE_H - 12.0);
@@ -1029,12 +1179,13 @@ pub fn settings(
         pane_w,
         (size.1 - m.pad - group_top).max(m.setting_row_h),
     );
-    let content: f32 = heights.iter().sum::<f32>() + 2.0 * SETTINGS_INNER;
+    let content: f32 = shapes.iter().map(|s| s.h).sum::<f32>() + 2.0 * SETTINGS_INNER;
     let overflow = (content - group.h).max(0.0);
     let mut y = group_top + SETTINGS_INNER - scroll.clamp(0.0, overflow);
-    let rows = heights
+    let rows: Vec<SettingRow> = shapes
         .iter()
-        .map(|h| {
+        .map(|s| {
+            let h = &s.h;
             let rect = Rect::new(x, y, pane_w, *h);
             y += h;
             let line = if *h > m.setting_row_h + 8.0 {
@@ -1049,6 +1200,11 @@ pub fn settings(
             }
         })
         .collect();
+    let parts = rows
+        .iter()
+        .zip(shapes)
+        .map(|(r, s)| row_parts(m, r.rect, s))
+        .collect();
     SettingsLayout {
         size,
         title,
@@ -1058,6 +1214,7 @@ pub fn settings(
         heading,
         group,
         rows,
+        parts,
         overflow,
     }
 }
@@ -1071,6 +1228,9 @@ pub enum SettingsHit {
     Search,
     Section(usize),
     Row(usize),
+    /// A part of a row: its field, the key showing it, or one of its
+    /// buttons.
+    Part(usize, usize),
     Nothing,
 }
 
@@ -1091,9 +1251,14 @@ pub fn settings_hit(l: &SettingsLayout, x: f32, y: f32) -> SettingsHit {
     if !l.group.contains(x, y) {
         return SettingsHit::Nothing;
     }
-    match l.rows.iter().position(|r| r.rect.contains(x, y)) {
-        Some(i) => SettingsHit::Row(i),
-        None => SettingsHit::Nothing,
+    let Some(i) = l.rows.iter().position(|r| r.rect.contains(x, y)) else {
+        return SettingsHit::Nothing;
+    };
+    // Last first: a field's show key lies inside the field.
+    let parts = l.parts.get(i).map_or(&[][..], Vec::as_slice);
+    match parts.iter().rposition(|p| p.contains(x, y)) {
+        Some(j) => SettingsHit::Part(i, j),
+        None => SettingsHit::Row(i),
     }
 }
 
@@ -3976,6 +4141,96 @@ mod tests {
         );
         let wide = settings(&m, 8, &heights, (size.0 + 200.0, size.1), 0.0);
         assert_eq!(wide.group.w, l.group.w + 200.0);
+    }
+
+    #[test]
+    fn a_row_with_parts_lays_them_out_in_its_room() {
+        let m = Metrics::default();
+        let shape = |kind, indent| RowShape {
+            h: 44.0,
+            kind,
+            indent,
+        };
+        let shapes = [
+            shape(RowKind::Field { eye: true }, false),
+            shape(
+                RowKind::Buttons {
+                    n: 2,
+                    text: false,
+                    joined: false,
+                },
+                true,
+            ),
+            shape(
+                RowKind::Buttons {
+                    n: 2,
+                    text: true,
+                    joined: false,
+                },
+                false,
+            ),
+            shape(
+                RowKind::Buttons {
+                    n: 3,
+                    text: true,
+                    joined: true,
+                },
+                false,
+            ),
+            shape(RowKind::Trailing, false),
+            RowShape::plain(38.0),
+        ];
+        let l = settings_shaped(&m, 4, &shapes, (700.0, 600.0), 0.0);
+        let row = |i: usize| l.rows[i].rect;
+        let inside = |r: &Rect, i: usize| {
+            r.x >= row(i).x
+                && r.right() <= row(i).right()
+                && r.y >= row(i).y
+                && r.bottom() <= row(i).bottom()
+        };
+        for (i, parts) in l.parts.iter().enumerate() {
+            assert!(parts.iter().all(|p| inside(p, i)), "row {i}");
+        }
+        // A field after its name, its show key inside it at its end.
+        let (field, eye) = (l.parts[0][0], l.parts[0][1]);
+        assert_eq!(field.x, row(0).x + m.setting_pad + SETTINGS_LABEL_W);
+        assert!(eye.x > field.x && eye.right() < field.right());
+        assert!(settings_field_inner(&field, true).right() < eye.x);
+        // Buttons alone start at the left, set in when nested, no wider
+        // than a button needs.
+        let b = &l.parts[1];
+        assert_eq!(b[0].x, row(1).x + m.setting_pad + SETTINGS_INDENT);
+        assert!(b[0].w <= SETTINGS_BUTTON_MAX && b[1].x > b[0].right());
+        // After words they stand at the right.
+        let b = &l.parts[2];
+        assert!((b[1].right() - (row(2).right() - m.setting_pad)).abs() < 0.01);
+        // Joined, they meet edge to edge.
+        let j = &l.parts[3];
+        assert!((j[0].right() - j[1].x).abs() < 0.01 && (j[1].right() - j[2].x).abs() < 0.01);
+        assert_eq!(l.parts[4].len(), 1);
+        assert!(l.parts[5].is_empty());
+        // A part is hit before its row, the show key before its field.
+        let at = |r: Rect| settings_hit(&l, r.x + r.w / 2.0, r.y + r.h / 2.0);
+        assert_eq!(at(eye), SettingsHit::Part(0, 1));
+        assert_eq!(
+            settings_hit(&l, field.x + 3.0, field.y + 3.0),
+            SettingsHit::Part(0, 0)
+        );
+        assert_eq!(at(l.parts[3][2]), SettingsHit::Part(3, 2));
+        assert_eq!(at(l.parts[4][0]), SettingsHit::Part(4, 0));
+        assert_eq!(
+            settings_hit(&l, row(4).x + 20.0, row(4).y + 5.0),
+            SettingsHit::Row(4)
+        );
+        // Plain rows are laid out as they always were.
+        let plain = settings(
+            &m,
+            4,
+            &[44.0, 44.0, 44.0, 44.0, 44.0, 38.0],
+            (700.0, 600.0),
+            0.0,
+        );
+        assert_eq!(plain.rows, l.rows);
     }
 
     #[test]

@@ -493,7 +493,7 @@ pub struct UsageScene<'a> {
     pub usage: Option<&'a Usage>,
     /// Unix seconds.
     pub now: u64,
-    pub settings: Vec<SettingLook>,
+    pub settings: Vec<SettingLook<'a>>,
     pub hot: UsageHit,
     pub pressed: Option<UsageHit>,
     /// The setting whose list is dropped down.
@@ -501,8 +501,8 @@ pub struct UsageScene<'a> {
 }
 
 /// A setting as the usage window shows it.
-pub struct SettingLook {
-    pub label: &'static str,
+pub struct SettingLook<'a> {
+    pub label: &'a str,
     /// What it is set to, "Default" for nothing.
     pub value: String,
     /// For a scale, the stop it is at and how many there are.
@@ -525,26 +525,42 @@ pub struct SettingsScene<'a> {
     /// The search field has the keyboard.
     pub typing: bool,
     pub rows: &'a [SettingsLook],
-    /// The row the keyboard is on.
-    pub focus: Option<usize>,
+    /// The fields typed into in place, each by the row it stands in.
+    pub fields: Vec<(usize, FieldLook<'a>)>,
+    /// The row the keyboard is on, and which of its parts.
+    pub focus: Option<(usize, usize)>,
     pub hot: SettingsHit,
     pub pressed: Option<SettingsHit>,
 }
 
 /// A row of the Settings window as it is drawn.
 pub struct SettingsLook {
-    pub label: &'static str,
+    pub label: String,
     pub value: String,
     pub control: Control,
     /// What it does, drawn under its name.
     pub help: &'static str,
     /// Its list is dropped down.
     pub open: bool,
+    /// Its buttons' names.
+    pub parts: Vec<String>,
+    /// Inside an item opened above it.
+    pub nested: bool,
 }
 
 impl SettingsScene<'_> {
     fn button(&self, which: SettingsHit) -> Button {
         layout::button(which, self.hot, self.pressed)
+    }
+}
+
+impl SettingsLook {
+    /// Ringed by its parts, not as a whole.
+    fn control_in_parts(&self) -> bool {
+        matches!(
+            self.control,
+            Control::Input { .. } | Control::Buttons | Control::Segments(_) | Control::Removable
+        )
     }
 }
 
@@ -729,6 +745,9 @@ pub struct FieldLook<'a> {
     /// While the field has the keyboard and the caret is lit.
     pub caret: Option<Rect>,
     pub focused: bool,
+    /// Room kept clear at the field's right end, for a key drawn there:
+    /// the text is cut off before it.
+    pub keep_right: f32,
 }
 
 impl UsageScene<'_> {
@@ -1889,26 +1908,158 @@ impl Painter<'_> {
             &rect(&l.group.inset(1.0)),
             D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
         );
+        let none: Vec<Rect> = Vec::new();
         for (i, (row, look)) in l.rows.iter().zip(scene.rows).enumerate() {
-            if i > 0 {
+            let parts = l.parts.get(i).unwrap_or(&none);
+            // An opened item's rows stand on a shade of their own, with no
+            // groove between them.
+            let inside = i > 0 && look.nested && scene.rows[i - 1].nested;
+            if look.nested {
+                let r = &row.rect;
+                let shade = Rect::new(r.x + 6.0, r.y, r.w - 12.0, r.h);
+                self.fill_rounded(&shade, 4.0, theme::well().with_alpha(0.45));
+            }
+            if i > 0 && !inside {
                 let r = &row.rect;
                 self.groove(r.x + m.setting_pad, r.right() - m.setting_pad, r.y);
             }
-            if scene.focus == Some(i) {
-                self.stroke_rounded(&row.rect.inset(2.0), 8.0, theme::text_dim(), 1.5);
+            match scene.focus {
+                Some((f, p)) if f == i && look.control_in_parts() => {
+                    if let Some(r) = parts.get(p) {
+                        self.stroke_rounded(&r.inset(-2.0), 9.0, theme::text_dim(), 1.5);
+                    }
+                }
+                Some((f, _)) if f == i => {
+                    self.stroke_rounded(&row.rect.inset(2.0), 8.0, theme::text_dim(), 1.5);
+                }
+                _ => {}
             }
-            if look.control == Control::Note {
+            let indent = if look.nested {
+                layout::SETTINGS_INDENT
+            } else {
+                0.0
+            };
+            let text_r = {
                 let r = &row.line;
-                let inner = Rect::new(r.x + m.setting_pad, r.y, r.w - 2.0 * m.setting_pad, r.h);
-                self.text(&gpu.small, theme::legend(), &look.value, inner);
-                continue;
+                Rect::new(
+                    r.x + m.setting_pad + indent,
+                    r.y,
+                    r.w - 2.0 * m.setting_pad - indent,
+                    r.h,
+                )
+            };
+            match look.control {
+                Control::Note => {
+                    self.text(&gpu.small, theme::legend(), &look.value, text_r);
+                    continue;
+                }
+                Control::Error => {
+                    self.text(&gpu.small, theme::error(), &look.value, text_r);
+                    continue;
+                }
+                Control::Fold(open) | Control::Item(open) => {
+                    let fold = matches!(look.control, Control::Fold(_));
+                    let b = scene.button(SettingsHit::Row(i));
+                    if let (Some(fill), _) = theme::button_look(b) {
+                        self.fill_rounded(&row.rect.inset(3.0), 8.0, fill);
+                    }
+                    let chevron = 12.0;
+                    let glyph = match (fold, open) {
+                        (true, true) => '\u{E70D}',
+                        (true, false) => '\u{E76C}',
+                        (false, true) => '\u{E70E}',
+                        (false, false) => '\u{E70D}',
+                    };
+                    if fold {
+                        let at = Rect::new(text_r.x, text_r.y + 1.0, chevron, text_r.h);
+                        self.icon(&gpu.icon_small, theme::text_dim(), glyph, at);
+                        let name = Rect::new(
+                            text_r.x + chevron + 8.0,
+                            text_r.y,
+                            text_r.w - chevron - 8.0,
+                            text_r.h,
+                        );
+                        self.text(&gpu.small_bold, theme::text(), &look.label, name);
+                        self.text(&gpu.small_right, theme::legend(), &look.value, text_r);
+                    } else {
+                        let at =
+                            Rect::new(text_r.right() - chevron, text_r.y + 1.0, chevron, text_r.h);
+                        self.icon(&gpu.icon_small, theme::text_dim(), glyph, at);
+                        self.text(&gpu.small, theme::text(), &look.label, text_r);
+                        let value =
+                            Rect::new(text_r.x, text_r.y, text_r.w - chevron - 8.0, text_r.h);
+                        self.text(&gpu.small_right, theme::text_dim(), &look.value, value);
+                    }
+                    continue;
+                }
+                Control::Input { .. } => {
+                    // Level with the field, which stands in the middle of
+                    // the row. The field itself is drawn once every row
+                    // is, from the scene's fields, its show key after it.
+                    let r = &row.rect;
+                    let name = Rect::new(text_r.x, r.y, layout::SETTINGS_LABEL_W - 8.0, r.h);
+                    self.text(&gpu.small, theme::text_dim(), &look.label, name);
+                    continue;
+                }
+                Control::Buttons | Control::Segments(_) | Control::Removable => {
+                    let picked = match look.control {
+                        Control::Segments(at) => Some(at),
+                        _ => None,
+                    };
+                    let words = if look.label.is_empty() {
+                        &look.value
+                    } else {
+                        &look.label
+                    };
+                    if look.control == Control::Removable {
+                        let top = Rect::new(text_r.x, row.rect.y + 4.0, text_r.w - 96.0, 20.0);
+                        self.text(&gpu.small, theme::text(), &look.label, top);
+                        let under = Rect::new(text_r.x, top.bottom(), top.w, 18.0);
+                        self.text(&gpu.small, theme::legend(), &look.value, under);
+                    } else if !words.is_empty() {
+                        let ink = if look.label.is_empty() {
+                            theme::legend()
+                        } else {
+                            theme::text_dim()
+                        };
+                        let first = parts.first().map_or(text_r.right(), |r| r.x);
+                        let room =
+                            Rect::new(text_r.x, row.rect.y, first - text_r.x - 8.0, row.rect.h);
+                        self.text(&gpu.small, ink, words, room);
+                    }
+                    for (j, (r, name)) in parts.iter().zip(&look.parts).enumerate() {
+                        let b = scene.button(SettingsHit::Part(i, j));
+                        let lit = picked == Some(j);
+                        if lit {
+                            self.fill_rounded(r, 7.0, theme::hover_fill());
+                            self.latched(gpu, r, 7.0, 1.0);
+                        } else {
+                            let depth = match b {
+                                Button::Idle => 0.5,
+                                Button::Hover => 0.8,
+                                Button::Pressed => 0.2,
+                            };
+                            self.key(gpu, r, 7.0, theme::surface(), depth, 1.0);
+                        }
+                        let ink = if lit || b != Button::Idle {
+                            theme::text()
+                        } else {
+                            theme::text_dim()
+                        };
+                        let sink = if b == Button::Pressed { 1.0 } else { 0.0 };
+                        let at = Rect::new(r.x + 4.0, r.y + sink, r.w - 8.0, r.h);
+                        self.text(&gpu.small_centre, ink, name, at);
+                    }
+                    continue;
+                }
+                _ => {}
             }
             let b = match look.control {
                 Control::Fixed => Button::Idle,
                 _ => scene.button(SettingsHit::Row(i)),
             };
             let shown = SettingLook {
-                label: look.label,
+                label: &look.label,
                 value: look.value.clone(),
                 stop: None,
                 list: look.control == Control::List,
@@ -1935,6 +2086,36 @@ impl Painter<'_> {
                     self.fill_rounded(&dot, 2.5, theme::lamp_off().mix(theme::text_dim(), 0.3));
                 }
             }
+        }
+        for (i, f) in &scene.fields {
+            self.input(gpu, f);
+            let Some(look) = scene.rows.get(*i) else {
+                continue;
+            };
+            let (
+                Control::Input {
+                    secret: true,
+                    shown,
+                },
+                Some(eye),
+            ) = (look.control, l.parts.get(*i).and_then(|p| p.get(1)))
+            else {
+                continue;
+            };
+            let b = scene.button(SettingsHit::Part(*i, 1));
+            if let (Some(fill), _) = theme::button_look(b) {
+                self.fill_rounded(eye, 6.0, fill);
+            }
+            if scene.focus == Some((*i, 1)) {
+                self.stroke_rounded(&eye.inset(-1.0), 7.0, theme::text_dim(), 1.5);
+            }
+            let ink = if shown {
+                theme::text()
+            } else {
+                theme::text_dim()
+            };
+            let glyph = if shown { '\u{ED1A}' } else { '\u{E890}' };
+            self.icon(&gpu.icon_small, ink, glyph, *eye);
         }
         self.rt.PopAxisAlignedClip();
         // Rows that do not fit: a thin thumb says how far down they are.
@@ -2518,7 +2699,8 @@ impl Painter<'_> {
                 1.0,
             );
         }
-        let inner = layout::ask_inner(&f.rect);
+        let mut inner = layout::ask_inner(&f.rect);
+        inner.w = (inner.w - f.keep_right).max(0.0);
         self.rt.PushAxisAlignedClip(
             &rect(&Rect::new(inner.x - 2.0, inner.y, inner.w + 4.0, inner.h)),
             D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,

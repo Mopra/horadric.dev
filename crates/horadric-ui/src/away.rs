@@ -631,6 +631,7 @@ impl AwayCard {
                 },
                 caret: (focused && self.lit.get()).then_some(caret),
                 focused,
+                keep_right: 0.0,
             });
         }
         let layout = self.layout.borrow();

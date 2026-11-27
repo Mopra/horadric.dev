@@ -271,13 +271,36 @@ third half, below.
   folders the user can write to, and its pinned files are held so none
   can be written until it ends. Settings marks an Always for a program
   no longer on the list as no longer used (decided 2026-11-06).
-- **Adding one.** In Settings, Projects, a Secrets row lists the picked
-  project's names, its identity's and the Everywhere ones under them, and
-  the names `config.json` asks for that are not kept yet. Add asks for the
-  name and the value in a masked field (`field.rs` with the characters
-  drawn as dots), pasting allowed. A value is never shown again: a kept
-  secret has Replace, Forget, Allowed for (the programs, each with a
-  cross) and when it was last used and by which session. From a terminal,
+- **Adding one.** Settings has a Secrets section of its own, after
+  Identities; Projects keeps one row for it, "5 secrets, 2 web logins, 1
+  missing", whose click opens it at the same project. The section has the
+  project picker at the top, a filter by name, and Add a secret and Add a
+  web login. Below them what the project's sessions see, in groups that
+  fold with a count each: This project, its identity's, Everywhere, Web
+  logins, and Missing, the names `config.json` asks for that are not kept
+  (a click on one starts adding it by that name). Folds and the filter
+  last as long as the window. The window's own search finds an item by
+  name too and opens it where it lives. A row shows the name, when it was
+  last used and whether another of the name wins; a value is never shown
+  again. A click opens the item in place: whose it is, when and by which
+  session for what it was last used, each program (a web login's: each
+  project) allowed Always on a line with its own Remove, and Replace value
+  and Forget (a web login: Replace password, Replace seed, Forget). Forget
+  asks in the row itself, "Forget NAME? Forget it, Keep it".
+  Adding and replacing are forms in the pane with every field at once,
+  never a chain of questions (decided 2026-11-26, after a click outside a
+  question threw away what was typed): a secret's Name, checked as typed,
+  and Value, in a masked field (`field.rs` with the characters drawn as
+  dots and a key to show them, pasting taken whole or refused with why,
+  never copied out), and whose it is as three buttons. A web login's
+  Sites, Name (following the first site until typed), User, Password and
+  an optional one time code seed. What is wrong shows under its field,
+  for a field typed in at once and for every field after Save. Enter
+  saves, Esc in the form cancels. A draft lasts through clicks anywhere,
+  another section and the window losing the focus; it ends with Save,
+  Cancel or closing the window, which drops it, and its fields are zeroed
+  as it goes. One draft at a time: Add while one is open goes back to it.
+  From a terminal,
   `horadric secret set NAME [--everywhere]` reads the value without
   echoing it, for a value too long to paste into a field. That holds in
   a session's own terminal, whose key names the session in the question.
@@ -338,8 +361,9 @@ in a transcript.
   lives on this machine beside the first. Without a seed, a site asking
   for a code blocks the quest on the human as today (`quest blocked`
   with `--you`), saying which site wants one.
-- **Adding one.** The Secrets row lists web logins beside secrets, Add
-  asks for the site, the user name and the password in the masked field.
+- **Adding one.** The Secrets section lists web logins in a group of
+  their own, and Add a web login takes the site, the user name and the
+  password in the masked field.
   That is the only way in: the pane never offers to keep a login typed
   into a page, since that means reading a password out of a web form
   (decided 2026-11-08).
@@ -392,7 +416,7 @@ What it does buy: the login an agent finds is the right one, and one
 project's switch never stops another's quest. No secrets in repositories
 or `.env` files, none in transcripts by accident, one place to see and
 revoke them, a log of every use, and a question before any new program
-gets one. The advice it gives the human in the Secrets row: narrow
+gets one. The advice it gives the human in the Secrets section: narrow
 tokens over passwords (a fine grained GitHub token for one repository,
 an API key with one scope), so a leak costs little and a revoke is a
 click on the provider's site.
@@ -466,7 +490,7 @@ Before that, identities first, since the daily pain is a switched account.
    `--on-login`.
 4. The sealed secrets file, `secret set` and `secret run` with the mask.
 5. The key and the questions on the tile.
-6. The Secrets row in Settings, with secrets owned by a project, an
+6. The Secrets section in Settings, with secrets owned by a project, an
    identity or Everywhere.
 7. Web logins: kept in the sealed file, `browser_fill_login` with the
    origin check, the pane's tools held back after a fill, the question

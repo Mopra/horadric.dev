@@ -3,6 +3,7 @@
 pub mod fill;
 pub mod identity;
 pub mod run;
+pub mod secrets;
 pub mod settings;
 pub mod split;
 pub mod store;
