@@ -4,9 +4,9 @@
 //! with a growing wait whenever it ends by itself, as a node's link is
 //! ([`crate::far_node`]).
 //!
-//! On is the human's switch in Settings and is kept in the state file.
-//! Paused is the pause key's and the tray's, and is forgotten when the
-//! app ends: a pause is for the next while, not for good.
+//! On is the human's switch in Settings, paused is the pause key's and
+//! the tray's. Both are kept in the state file: a reload or a restart
+//! that forgot the pause would start watching what it was paused for.
 
 use std::ffi::c_void;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -14,7 +14,7 @@ use std::os::windows::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use horadric_core::nodes::Backoff;
 use windows::Win32::Foundation::HANDLE;
@@ -57,12 +57,42 @@ pub fn watching() -> bool {
     is_on() && !PAUSED.load(Ordering::Relaxed)
 }
 
-/// The switch in Settings, and what the state file said at the app's
-/// start. Turned on, it watches at once: a pause does not outlive off.
+/// The switch in Settings. Turned on, it watches at once: a pause does
+/// not outlive off.
 pub fn set_on(on: bool) {
     ON.store(on, Ordering::Relaxed);
     PAUSED.store(false, Ordering::Relaxed);
     sync();
+    if !on {
+        // Nothing is written from here on, so nothing else would.
+        prune_soon();
+    }
+}
+
+/// What the state file said at the app's start: on or off, and still
+/// paused if it was.
+pub fn restore(on: bool, paused: bool) {
+    ON.store(on, Ordering::Relaxed);
+    PAUSED.store(on && paused, Ordering::Relaxed);
+    sync();
+    // Off or paused, days still grow older than the trail keeps them.
+    prune_soon();
+}
+
+/// Deletes the days the trail no longer keeps, off the thread that
+/// draws: it lists a folder and deletes files.
+fn prune_soon() {
+    let pruning = std::thread::Builder::new()
+        .name("trail-prune".into())
+        .spawn(|| {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            super::trail::prune(now);
+        });
+    if pruning.is_err() {
+        eprintln!("horadric: no thread to prune the trail on");
+    }
 }
 
 /// The pause key: stops it watching, or lets it watch again. Says
@@ -152,6 +182,12 @@ struct Watcher {
 
 impl Watcher {
     fn start() -> Option<Watcher> {
+        // The watcher leaves at once inside the agent's desk, which is
+        // never watched. Started there it would be started again and
+        // again for nothing.
+        if crate::desk::hand::in_desk() {
+            return None;
+        }
         let stop = Arc::new(AtomicBool::new(false));
         let child: Shared<Child> = Arc::default();
         let (s, c) = (Arc::clone(&stop), Arc::clone(&child));
@@ -203,9 +239,8 @@ fn keep_running(stop: &AtomicBool, child: &Mutex<Option<Child>>) {
             }
             Err(e) => eprintln!("horadric: cannot start the companion's watcher: {e}"),
         }
-        // One that leaves at once is not wanted here: another Horadric
-        // watches already, or this is the agent's desk. The wait grows,
-        // so asking again costs next to nothing.
+        // One that leaves at once could not start. The wait grows, so
+        // trying again costs next to nothing.
         let until = Instant::now() + backoff.after(began.elapsed());
         while Instant::now() < until {
             if stop.load(Ordering::SeqCst) {

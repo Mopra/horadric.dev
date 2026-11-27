@@ -194,6 +194,8 @@ Usage:
                                what it shows to the trail, started by the app
   horadric companion peek        Wait 3 seconds, then print what the companion reads of
                                the window in front and how long it took; writes nothing
+  horadric companion show [MINUTES]
+                               Print what the trail holds of the last minutes (15)
   horadric portal [off|phones|forget N|all|relay URL]
                                Town Portal, Horadric from your phone: turn it on and show
                                a pairing QR code that works once, for 5 minutes; turn it

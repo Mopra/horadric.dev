@@ -658,8 +658,6 @@ pub(crate) enum Input {
     StageActive,
     /// The stage went down to its taskbar button: the tiles go with it.
     StageMinimized,
-    /// A take over has its sentence: the companion's session starts.
-    Companion,
 }
 
 thread_local! {
@@ -720,6 +718,13 @@ fn recalled(project: &str, ids: &[String]) {
     crate::mind::fire(project, ids);
     crate::glows::stir();
     post(EVENT_WINDOW.load(Ordering::Acquire), WM_HORADRIC_EVENT, 0);
+}
+
+/// Wakes the app to look at what a thread left for it, from any thread.
+/// [`push`] is for the thread that draws alone: its queue is that
+/// thread's own.
+pub(crate) fn wake() {
+    post(EVENT_WINDOW.load(Ordering::Acquire), WM_HORADRIC_INPUT, 0);
 }
 
 fn post_event(window: isize, phase: bool) {
@@ -797,12 +802,13 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
 
     let saved = store::load();
     let keys = chords(&saved.hotkeys);
+    // Before the keys: the companion's are registered only while it is on.
+    crate::companion::link::restore(saved.companion, saved.companion_paused);
     let keys_live = Action::ALL.map(|a| register_key(notify, a, keys[a.index()]));
     crate::dictate::use_chord(keys[Action::Dictate.index()]);
     web::set_sizes(&saved.page_sizes);
     ghost::set_speed_saved(saved.desktop_glide_ms);
     crate::takeover_mode::set_mode(saved.takeover);
-    crate::companion::link::set_on(saved.companion);
     theme::set_accents(&saved.accents);
     web::set_docks(&saved.page_docks);
     sanctuary::set_docks(&saved.sky_docks);
@@ -1295,9 +1301,11 @@ fn chords(saved: &BTreeMap<String, String>) -> [Chord; hotkey::COUNT] {
 }
 
 /// Registers `action`'s shortcut on `chord`. False when another program
-/// holds the chord.
+/// holds the chord. True for one Windows is not given at all, dictation
+/// in Horadric's and the companion's while it is off: false is shown in
+/// Settings as a chord another program has.
 fn register_key(hwnd: HWND, action: Action, chord: Chord) -> bool {
-    if !action.is_global() {
+    if !action.registers(crate::companion::link::is_on()) {
         return true;
     }
     let mods = HOT_KEY_MODIFIERS(chord.mods.flags()) | MOD_NOREPEAT;
@@ -1699,8 +1707,11 @@ fn tray_menu(hwnd: HWND) {
         Some(Choice::Takeover(line)) => crate::takeover_mode::tray_pick(line),
         Some(Choice::Companion(line)) => {
             crate::companion::link::tray_pick(line);
-            // On and off are kept.
-            with_app(App::save);
+            // On, off and paused are kept.
+            with_app(|app| {
+                app.companion_keys();
+                app.save();
+            });
         }
         Some(Choice::New) => pick_and_start(hwnd, projects.first().map(PathBuf::from)),
         Some(Choice::Recent(path)) => start_logged(PathBuf::from(path)),
@@ -6583,12 +6594,30 @@ impl App {
 
     /// The shortcuts' names for the tray, None for one not registered.
     fn key_names(&self) -> [Option<String>; hotkey::COUNT] {
-        Action::ALL.map(|a| self.keys_live[a.index()].then(|| self.keys[a.index()].name()))
+        let on = crate::companion::link::is_on();
+        Action::ALL.map(|a| {
+            (self.keys_live[a.index()] && (on || !a.is_companions()))
+                .then(|| self.keys[a.index()].name())
+        })
     }
 
     /// Registers every shortcut on its chord again.
     fn register_keys(&mut self) {
         for a in Action::ALL {
+            unregister_key(self.notify, a);
+            self.keys_live[a.index()] = register_key(self.notify, a, self.keys[a.index()]);
+        }
+    }
+
+    /// Gives Windows the companion's chords or takes them back, after the
+    /// companion was turned on or off.
+    fn companion_keys(&mut self) {
+        // While Settings listens for a chord none is registered, and all
+        // are again when it stops.
+        if self.key_listening.is_some() {
+            return;
+        }
+        for a in Action::ALL.into_iter().filter(|a| a.is_companions()) {
             unregister_key(self.notify, a);
             self.keys_live[a.index()] = register_key(self.notify, a, self.keys[a.index()]);
         }
@@ -7159,6 +7188,7 @@ impl App {
             }
             Field::Companion => {
                 crate::companion::link::set_on(!crate::companion::link::is_on());
+                self.companion_keys();
                 self.save();
             }
             Field::Sounds => {
@@ -9636,6 +9666,7 @@ impl App {
             microphone: self.microphone.clone(),
             dictation_tidy: crate::dictate::tidies(),
             companion: crate::companion::link::is_on(),
+            companion_paused: crate::companion::link::paused(),
             dictation_model: Some(crate::dictate::voice().model)
                 .filter(|m| *m != horadric_memory::speech::Model::SmallEn)
                 .map(|m| m.folder().to_string()),
@@ -10192,6 +10223,8 @@ impl App {
                 self.open_forge(&key, &file, false);
             }
         }
+        // So does the thread that builds a take over's prompt.
+        self.companion_start();
         let inputs = INPUT.with(|q| std::mem::take(&mut *q.borrow_mut()));
         let mut relayout = false;
         for input in inputs {
@@ -10228,7 +10261,6 @@ impl App {
                     self.raise();
                 }
                 Input::StageMinimized => self.hide_tiles(),
-                Input::Companion => self.companion_start(),
                 Input::TileMenu(id) => {
                     self.menu_for = Some(id);
                     post(self.notify.0 as isize, WM_HORADRIC_TILE_MENU, 0);

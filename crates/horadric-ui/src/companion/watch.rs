@@ -98,6 +98,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
     if args.first().is_some_and(|a| a == "peek") {
         return peek();
     }
+    if args.first().is_some_and(|a| a == "show") {
+        return show(args.get(1));
+    }
     let parent = parent_of(args)?;
     // SAFETY: the handle is this process's own and needs no closing.
     if let Err(e) = unsafe { SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS) } {
@@ -278,11 +281,28 @@ impl State {
         let title = title_of(hwnd);
         match self.front.as_mut().filter(|f| f.hwnd == id) {
             Some(front) => {
-                if front.title != title {
+                // A packaged app whose inner window was not there yet
+                // is asked again until it says which app it is. Until
+                // then it is skipped: the never list cannot tell it
+                // from any other packaged app.
+                let resolved = unresolved(&front.program) && {
+                    let (_, program) = program_of(hwnd);
+                    let found = !unresolved(&program);
+                    if found {
+                        front.program = program;
+                    }
+                    found
+                };
+                if resolved || front.title != title {
                     front.skip = skipped(&front.program, &title);
                     front.title = title;
                     front.changed = now;
                     front.unread = true;
+                }
+                if resolved && !front.skip {
+                    // Late, but as for any window that comes in front.
+                    write(&front.program, &front.title, "");
+                    front.titled = front.title.clone();
                 }
             }
             None => self.came_in_front(hwnd, title, now),
@@ -357,17 +377,31 @@ impl State {
         let Some(front) = self.front.as_mut() else {
             return;
         };
-        // The reading took a while. If another window or tab came in
-        // front meanwhile the text may be its, and it may be one that
-        // is never watched: dropped, and the next step sees the change.
+        // From before the reading: what the human did during it counts
+        // as done since. Stamped whatever becomes of the text: a
+        // reading that is dropped was still made, and a title that
+        // never rests would otherwise have the window read at every
+        // tick.
+        front.read_at = Some(now);
+        // The reading took a while. If another window came in front
+        // meanwhile the text may be its, and it may be one that is
+        // never watched: dropped, and the next step sees the change.
         // SAFETY: plain call.
-        if unsafe { GetForegroundWindow() } != hwnd || title_of(hwnd) != front.title {
+        if unsafe { GetForegroundWindow() } != hwnd {
             return;
         }
+        let title = title_of(hwnd);
+        if title != front.title {
+            // The title changed under the reading (a spinner, a
+            // counter, a new tab): the text goes under the title the
+            // window has now, unless that one is never watched.
+            front.skip = skipped(&front.program, &title);
+            front.title = title;
+            if front.skip {
+                return;
+            }
+        }
         front.unread = false;
-        // From before the reading: what the human did during it counts
-        // as done since.
-        front.read_at = Some(now);
         let seen = match self.seen.iter().position(|(h, _)| *h == id) {
             Some(i) => self.seen.remove(i).1,
             None => trail::Seen::default(),
@@ -431,8 +465,16 @@ fn due(c: &Clock) -> bool {
 fn skipped(program: &str, title: &str) -> bool {
     program.is_empty()
         || title.trim().is_empty()
+        || unresolved(program)
         || passing(program, title)
         || never::never(program, title)
+}
+
+/// Whether `program` is only the host of a packaged app's window, the
+/// app itself not known yet. Every such app looks the same then, the
+/// ones the human never wants watched too.
+pub(super) fn unresolved(program: &str) -> bool {
+    program.eq_ignore_ascii_case(FRAME_HOST)
 }
 
 fn passing(program: &str, title: &str) -> bool {
@@ -496,7 +538,7 @@ fn away() -> bool {
     }
 }
 
-fn title_of(hwnd: HWND) -> String {
+pub(super) fn title_of(hwnd: HWND) -> String {
     let mut buf = [0u16; 512];
     // SAFETY: the buffer is this function's own. For another program's
     // window this reads the title Windows keeps and asks the program
@@ -506,13 +548,14 @@ fn title_of(hwnd: HWND) -> String {
 }
 
 /// The process a window belongs to and its program's file name, empty
-/// when it cannot be told.
-fn program_of(hwnd: HWND) -> (u32, String) {
+/// when it cannot be told. A packaged app whose inner window is not
+/// there yet comes back as its host, see [`unresolved`].
+pub(super) fn program_of(hwnd: HWND) -> (u32, String) {
     let mut pid = 0u32;
     // SAFETY: `pid` outlives the call.
     unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
     let program = name_of(pid);
-    if !program.eq_ignore_ascii_case(FRAME_HOST) {
+    if !unresolved(&program) {
         return (pid, program);
     }
     // A packaged app's window belongs to a host every such app shares.
@@ -562,6 +605,25 @@ fn file_name(path: &str) -> String {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+/// `horadric companion show [MINUTES]`: what the trail holds of the last
+/// minutes, so the human can see what is kept of their work.
+fn show(minutes: Option<&String>) -> Result<(), String> {
+    let minutes = match minutes {
+        Some(m) => m.parse().map_err(|_| format!("{m} is not a number of minutes"))?,
+        None => 15,
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let seen = super::trail::recent(minutes, now);
+    if seen.is_empty() {
+        println!("The trail has nothing for the last {minutes} minutes.");
+    } else {
+        println!("{}", super::trail::render(&seen, now, usize::MAX));
+    }
+    Ok(())
 }
 
 /// `horadric companion peek`: what UI Automation gives for the window
@@ -710,6 +772,37 @@ mod tests {
             now: read_at + GAP_MS,
             ..flicked
         }));
+    }
+
+    #[test]
+    fn a_reading_that_was_dropped_is_not_made_again_at_the_next_tick() {
+        // The title changed under the reading, which stamps it all the
+        // same: read at 20 s, a spinner still turning in the title.
+        let read_at = 20_000;
+        let spinning = |now, input_at| Clock {
+            changed: now - 100,
+            unread: true,
+            read_at: Some(read_at),
+            input_at,
+            ..clock(now)
+        };
+        // Nothing done since: not at the next tick, and not ever.
+        assert!(!due(&spinning(read_at + u64::from(TICK_MS), read_at - 1_000)));
+        assert!(!due(&spinning(read_at + 10 * AGAIN_MS, read_at - 1_000)));
+        // The human works on: again only as often as any window.
+        let typed = read_at + 200;
+        assert!(!due(&spinning(read_at + u64::from(TICK_MS), typed)));
+        assert!(!due(&spinning(read_at + AGAIN_MS - 1, typed)));
+        assert!(due(&spinning(read_at + AGAIN_MS, typed)));
+    }
+
+    #[test]
+    fn a_packaged_app_not_yet_known_is_skipped() {
+        assert!(unresolved("ApplicationFrameHost.exe"));
+        assert!(unresolved("applicationframehost.exe"));
+        assert!(!unresolved("olk.exe"));
+        assert!(!unresolved(""));
+        assert!(skipped("ApplicationFrameHost.exe", "Mail"));
     }
 
     #[test]

@@ -21,7 +21,8 @@ use serde_json::{json, Value};
 
 use super::{folder_key, App, Kind, WEB};
 use crate::browse::{self, closed, error, Call};
-use crate::companion::{link, takeover};
+use crate::companion::link;
+use crate::companion::takeover::{self, Asker};
 use crate::console::Console;
 use crate::hotkey::Action;
 use crate::quests::{Runner as _, SessionSpec, Workplace};
@@ -69,7 +70,8 @@ impl App {
         {
             if !self.keyed(&call.session, &call.body) {
                 return call.reply.send(error(
-                    "Horadric answers for the companion only to a session it runs, with that                      session's key.",
+                    "Horadric answers for the companion only to a session it runs, with that \
+                     session's key.",
                 ));
             }
             let op = op.to_string();
@@ -233,40 +235,61 @@ impl App {
             "trail.recall" => {
                 // Only a session the human sits at. Warriv, a reviewer, an
                 // errand and a quest's session work unwatched, where a page
-                // they read could talk them into fetching the trail.
-                let own = !horadric_core::warriv::is_warriv(id)
-                    && !horadric_core::runeword::is_errand(id)
-                    && !self.holds_quest(id);
+                // they read could talk them into fetching the trail. So
+                // does the companion's own session, which has the minutes
+                // it needs in its prompt.
+                let asker = if self.companions_own(id) {
+                    Asker::Companion
+                } else if horadric_core::warriv::is_warriv(id)
+                    || horadric_core::runeword::is_errand(id)
+                    || self.holds_quest(id)
+                {
+                    Asker::Unwatched
+                } else {
+                    Asker::Human
+                };
                 let who = format!("{} ({id})", self.name_of(id));
-                takeover::recall(who, own, &call.body, call.reply);
+                takeover::recall(who, asker, &call.body, call.reply);
             }
             "companion.offer" => {
-                let folder = takeover::folder().map(|d| folder_key(&d.to_string_lossy()));
-                if folder.is_none() || self.project_of(id) != folder {
+                if !self.companions_own(id) {
                     return call.reply.send(error(
-                        "Only the companion's own session, started by a take over, offers the                          human a text.",
+                        "Only the companion's own session, started by a take over, offers the \
+                         human a text.",
                     ));
                 }
                 let Some(text) = call.body["text"].as_str().filter(|t| !t.trim().is_empty())
                 else {
                     return call.reply.send(error("say what to offer: text"));
                 };
-                takeover::offer(text);
+                if let Err(why) = takeover::offer(text) {
+                    return call.reply.send(error(&why));
+                }
                 let i = Action::CompanionType.index();
-                let how = match self.keys_live[i] {
-                    true => format!("{} types it where your cursor is", self.keys[i].name()),
-                    false => "Set a key to type it in Settings, under Keys".to_string(),
+                // The key is held only while the companion is on.
+                let how = match (link::is_on(), self.keys_live[i]) {
+                    (false, _) => "Turn the companion on in Settings to type it".to_string(),
+                    (true, true) => {
+                        format!("{} types it where your cursor is", self.keys[i].name())
+                    }
+                    (true, false) => "Set a key to type it in Settings, under Keys".to_string(),
                 };
                 self.toasts.show(
                     Kind::Info,
                     "The companion has a text",
-                    &format!("{}
-{how}", takeover::offer_shown(text)),
+                    &format!("{}\n{how}", takeover::offer_shown(text)),
                 );
                 call.reply.send(json!({ "text": takeover::OFFER_TAKEN }));
             }
             _ => call.reply.send(error("unknown companion call")),
         }
+    }
+
+    /// Whether session `id` is the companion's own, started by a take
+    /// over: its project is the companion's folder.
+    fn companions_own(&self, id: &str) -> bool {
+        let folder = takeover::folder().map(|d| folder_key(&d.to_string_lossy()));
+        folder.is_some() && self.project_of(id) == folder
     }
 
     /// Starts a session for each take over that has its sentence, in the
@@ -334,6 +357,8 @@ impl App {
             true => "Companion paused",
             false => "Companion watching",
         };
+        // A pause is kept, so a reload does not undo it.
+        self.save();
         self.toasts.show(Kind::Info, title, "");
     }
 

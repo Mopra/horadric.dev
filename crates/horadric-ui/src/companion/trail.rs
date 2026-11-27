@@ -149,7 +149,8 @@ pub fn asked(who: &str, why: &str, what: &str, now: u64) {
 }
 
 /// Deletes the day files older than [`KEEP_DAYS`]. [`write`] does this
-/// itself now and then; this is for whoever wants it done at once.
+/// itself now and then; the app does it as it starts and when the
+/// companion is turned off, when nothing may be written for days.
 pub fn prune(now: u64) {
     if let Some(dir) = dir() {
         prune_in(&dir, now / DAY);
@@ -481,15 +482,16 @@ fn asked_line(who: &str, why: &str, what: &str, now: u64) -> String {
     let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
     let (y, m, d) = civil(now / DAY);
     let s = now % DAY;
-    let what: String = flat(what).chars().take(ASKED_MOST).collect();
+    // Both are a session's own words, as long as it cared to make them.
+    let capped = |s: &str| flat(s).chars().take(ASKED_MOST).collect::<String>();
     format!(
         "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02} UTC, {}, for: {}, asked: {}\n",
         s / 3_600,
         s % 3_600 / 60,
         s % 60,
         flat(who),
-        flat(why),
-        what
+        capped(why),
+        capped(what)
     )
 }
 
@@ -684,5 +686,8 @@ mod tests {
         let line = asked_line("a", "b\r\nfake line", &long, 0);
         assert_eq!(line.matches('\n').count(), 1);
         assert!(line.chars().count() < ASKED_MOST + 80);
+        let line = asked_line("a", &long, "the last minute", 0);
+        assert!(line.chars().count() < ASKED_MOST + 80);
+        assert!(line.ends_with("asked: the last minute\n"));
     }
 }

@@ -56,6 +56,22 @@ impl Action {
         self != Action::Dictate
     }
 
+    /// One of the companion's three shortcuts.
+    pub fn is_companions(self) -> bool {
+        matches!(
+            self,
+            Action::CompanionTakeOver | Action::CompanionType | Action::CompanionPause
+        )
+    }
+
+    /// Whether Windows is given its chord now. The companion's are held
+    /// only while the companion is on: a global chord is taken from
+    /// every program, and AltGr with a letter types a character on some
+    /// layouts, which nobody should lose to a feature they have off.
+    pub fn registers(self, companion_on: bool) -> bool {
+        self.is_global() && (companion_on || !self.is_companions())
+    }
+
     /// Its place in [`Action::ALL`], which is also its hotkey id less one.
     pub fn index(self) -> usize {
         self as usize
@@ -474,6 +490,23 @@ mod tests {
             for a in Action::ALL {
                 assert_eq!(clash(&chords, a, chords[a.index()]), None, "{a:?}");
             }
+        }
+    }
+
+    #[test]
+    fn the_companions_chords_are_held_only_while_it_is_on() {
+        for a in Action::ALL {
+            let companions = matches!(
+                a,
+                Action::CompanionTakeOver | Action::CompanionType | Action::CompanionPause
+            );
+            assert_eq!(a.is_companions(), companions, "{a:?}");
+            assert_eq!(a.registers(true), a != Action::Dictate, "{a:?}");
+            assert_eq!(
+                a.registers(false),
+                a != Action::Dictate && !companions,
+                "{a:?}"
+            );
         }
     }
 

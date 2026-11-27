@@ -139,6 +139,10 @@ pub struct SavedState {
     /// Settings. Off until turned on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub companion: bool,
+    /// The companion is on but paused. Kept, so a restart or a reload
+    /// does not start it watching what the human paused it for.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub companion_paused: bool,
     /// The Whisper model dictation listens with, by its folder under
     /// `models`. None is the small English one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1000,6 +1004,21 @@ mod tests {
         let odd = SavedState::from_json(br#"{"discord": "loud", "quiet": true}"#);
         assert_eq!(odd.discord, Discord::Off);
         assert!(odd.quiet);
+    }
+
+    #[test]
+    fn a_paused_companion_is_kept_and_an_unpaused_one_writes_nothing() {
+        assert!(!SavedState::default().to_json().contains("companion"));
+        let paused = SavedState {
+            companion: true,
+            companion_paused: true,
+            ..Default::default()
+        };
+        let back = SavedState::from_json(paused.to_json().as_bytes());
+        assert!(back.companion && back.companion_paused);
+        // A file from before the pause was kept.
+        let old = SavedState::from_json(br#"{"companion": true}"#);
+        assert!(old.companion && !old.companion_paused);
     }
 
     #[test]

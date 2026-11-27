@@ -8,8 +8,40 @@ at any moment and it already knows the context. Later it also helps
 unasked: it fills in text, suggests changes and catches what the human
 missed.
 
-Nothing of it is built. The plan was reviewed on 2026-11-26; what the
-review changed is listed at the end.
+The plan was reviewed on 2026-11-26; what the review changed is listed
+at the end. A first cut of steps 1 to 3 was built on 2026-11-27, see
+"What is built" below.
+
+## What is built
+
+Since 2026-11-27, off until switched on in Settings, General,
+"Companion". The code is `crates/horadric-ui/src/companion/` and
+`crates/horadric/src/trail.rs`.
+
+- **The trail, the seen half.** `horadric companion` is a process of its
+  own that the app starts and stops. It writes the window in front and
+  the text UI Automation gives for it, only what is new, to
+  `%APPDATA%\Horadric\trail`, one sealed file per day, kept seven days.
+  `horadric companion show [MINUTES]` prints it, and
+  `horadric companion peek` is step 0's measuring tool.
+- **Never watched** is `companion-never.txt` in the state folder plus the
+  built in list (password managers, Horadric itself, private windows by
+  their title).
+- **Ask it.** `trail_recall` answers a session the human sits at. Quest,
+  Warriv and errand sessions and the companion's own are refused, and
+  every asking is in `trail\asked.log`. It finds by words, not yet by
+  meaning.
+- **Take over.** Ctrl+Alt+G listens for a sentence and starts a session
+  in the companion's folder with the last ten minutes in its prompt. The
+  session hands a text back with `companion_offer`, and Ctrl+Alt+J types
+  it where the cursor is. Ctrl+Alt+B pauses the watching.
+
+Not built yet: the heard half (microphone and calls), OCR for programs
+that expose no text, the daily summary in the memory store, a `Trail:`
+line that lets a quest ask, a mark on the tray icon (the tip and the
+menu say it), work handed back through the desk, and steps 4 and 5.
+Step 0 was not done as a day of measuring: reading is on a settled
+window only, and what it costs the browsers is still to be felt.
 
 ## Why Horadric
 

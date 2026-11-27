@@ -34,10 +34,21 @@ const PASSWORD_MANAGERS: [&str; 11] = [
 /// Where Windows itself asks for a password or shows the lock screen.
 const WINDOWS_OWN: [&str; 4] = ["credentialuibroker", "consent", "logonui", "lockapp"];
 
-/// What a private browser window says in its title. Edge and Firefox
-/// do; Chrome's incognito window says nothing there, so it is watched
-/// unless the human lists it.
-const PRIVATE_TITLES: [&str; 3] = ["inprivate", "incognito", "private browsing"];
+/// What a private browser window says in its title, in lower case. Edge
+/// and Firefox do; Chrome's incognito window says nothing there, so it
+/// is watched unless the human lists it. The browser says it in its own
+/// language, so the Danish and German words are here beside the English
+/// ones. Edge says InPrivate in all three.
+const PRIVATE_TITLES: [&str; 8] = [
+    "inprivate",
+    "incognito",
+    "private browsing",
+    "inkognito",
+    "privat browsing",
+    "privat vindue",
+    "privater modus",
+    "privates fenster",
+];
 
 const HEADER: &str = "\
 # What Horadric's companion never watches, beside what it never does
@@ -196,6 +207,18 @@ mod tests {
         assert!(private_window("New tab - [InPrivate] - Microsoft Edge"));
         assert!(private_window("Bank - Mozilla Firefox Private Browsing"));
         assert!(private_window("New Incognito Tab - Google Chrome"));
+        for title in [
+            "Ny fane - [InPrivate] - Microsoft Edge",
+            "Bank - Mozilla Firefox Privat browsing",
+            "Ny inkognitofane - Google Chrome",
+            "Bank - Privat vindue",
+            "Bank - Mozilla Firefox Privater Modus",
+            "Neues Inkognito-Tab - Google Chrome",
+            "Bank - Privates Fenster",
+        ] {
+            assert!(private_window(title), "{title}");
+        }
+        assert!(!private_window("Privatkunder - Acme Bank"));
         assert!(!private_window("Inbox - Outlook"));
         assert!(builtin("msedge.exe", "x - [InPrivate] - Microsoft Edge"));
         assert!(!builtin("msedge.exe", "x - Microsoft Edge"));
