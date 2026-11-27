@@ -268,11 +268,7 @@ fn list_in(root: &Path, cwd: &str, skip: &[String], limit: usize) -> Vec<Past> {
 /// own transcripts, in folders named after their parent, are not among
 /// them.
 pub fn files() -> Vec<PathBuf> {
-    let towns = crate::towns::homes()
-        .into_iter()
-        .map(|h| h.join("projects"));
-    let roots: Vec<PathBuf> = projects().into_iter().chain(towns).collect();
-    let mut found: Vec<(SystemTime, PathBuf)> = roots
+    let mut found: Vec<(SystemTime, PathBuf)> = roots()
         .iter()
         .filter_map(|r| std::fs::read_dir(r).ok())
         .flatten()
@@ -285,6 +281,49 @@ pub fn files() -> Vec<PathBuf> {
         .collect();
     found.sort_by_key(|(m, _)| std::cmp::Reverse(*m));
     found.into_iter().map(|(_, p)| p).collect()
+}
+
+/// Every transcripts folder: the machine's and each town's.
+fn roots() -> Vec<PathBuf> {
+    let towns = crate::towns::homes()
+        .into_iter()
+        .map(|h| h.join("projects"));
+    projects().into_iter().chain(towns).collect()
+}
+
+/// A transcript on disk, as its folder listing describes it.
+pub(crate) struct Listed {
+    pub path: PathBuf,
+    pub modified: SystemTime,
+    pub len: u64,
+    pub started: SystemTime,
+}
+
+/// Every `<id>.jsonl` that [`files`] finds, in no order, with what the
+/// folder listing says of it. The listing carries it, so a search that
+/// looks at hundreds of files on every keystroke opens none of them to
+/// learn whether one changed.
+pub(crate) fn listed() -> Vec<Listed> {
+    roots()
+        .iter()
+        .filter_map(|r| std::fs::read_dir(r).ok())
+        .flatten()
+        .flatten()
+        .filter_map(|d| std::fs::read_dir(d.path()).ok())
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+        .filter_map(|e| {
+            let meta = e.metadata().ok()?;
+            let modified = meta.modified().ok()?;
+            Some(Listed {
+                path: e.path(),
+                modified,
+                len: meta.len(),
+                started: meta.created().unwrap_or(modified).min(modified),
+            })
+        })
+        .collect()
 }
 
 /// The transcripts folder of the Claude home a session in `cwd` runs on:
@@ -324,7 +363,7 @@ fn folders(root: &Path, cwd: &str) -> Vec<PathBuf> {
 
 /// The folder name Claude Code gives a working directory: every character
 /// that is not an ASCII letter or digit becomes a hyphen.
-fn folder_name(cwd: &str) -> String {
+pub(crate) fn folder_name(cwd: &str) -> String {
     cwd.trim_end_matches(['\\', '/'])
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })

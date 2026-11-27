@@ -20,6 +20,7 @@ pub mod lore;
 pub mod open_url;
 pub mod otel;
 pub mod pace;
+pub mod search;
 pub mod tasks;
 pub mod tend;
 pub mod towns;
